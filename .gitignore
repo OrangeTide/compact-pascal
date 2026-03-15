@@ -1,0 +1,10 @@
+# AI assistant files
+CLAUDE.md
+SKILL.md
+
+# Build artifacts
+build/
+target/
+zig-out/
+zig-cache/
+.zig-cache/

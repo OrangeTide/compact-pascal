@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compact Pascal</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 700px;
+      margin: 60px auto;
+      padding: 0 20px;
+      color: #333;
+      line-height: 1.6;
+    }
+    h1 { margin-bottom: 0.2em; }
+    .subtitle { color: #666; margin-top: 0; font-size: 1.1em; }
+    a { color: #0066cc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 0.5em 0; border-bottom: 1px solid #eee; }
+    li:last-child { border-bottom: none; }
+    .label { display: inline-block; font-size: 0.75em; padding: 2px 8px;
+             border-radius: 3px; margin-left: 8px; vertical-align: middle; }
+    .pdf { background: #fde8e8; color: #c0392b; }
+    .md { background: #e8f4fd; color: #2980b9; }
+    footer { margin-top: 40px; color: #999; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <h1>Compact Pascal</h1>
+  <p class="subtitle">An embeddable Pascal-to-WebAssembly compiler</p>
+
+  <p>
+    Compact Pascal is a new programming language in the Pascal family with a compiler
+    that runs as WebAssembly. Embedding libraries for Rust and Zig let you compile and
+    run Compact Pascal programs from your application.
+  </p>
+
+  <h2>Documentation</h2>
+  <ul>
+    <li>
+      <strong>White Paper</strong>
+      <br>
+      <a href="compact-pascal-wp.pdf">compact-pascal-wp.pdf</a> <span class="label pdf">PDF</span>
+      <a href="compact-pascal-wp.md">compact-pascal-wp.md</a> <span class="label md">Markdown</span>
+    </li>
+    <li>
+      <strong>Language Reference</strong>
+      <br>
+      <a href="compact-pascal-ref.pdf">compact-pascal-ref.pdf</a> <span class="label pdf">PDF</span>
+      <a href="compact-pascal-ref.md">compact-pascal-ref.md</a> <span class="label md">Markdown</span>
+    </li>
+  </ul>
+
+  <h2>Source Code</h2>
+  <p>
+    <a href="https://github.com/OrangeTide/compact-pascal">github.com/OrangeTide/compact-pascal</a>
+  </p>
+
+  <footer>
+    Licensed under MIT or Apache-2.0.
+  </footer>
+</body>
+</html>
