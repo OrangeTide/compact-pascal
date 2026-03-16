@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Compact Pascal — Logo Asset Generator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Fira Sans', sans-serif;
+            background: #555;
+            color: #eee;
+            padding: 40px;
+        }
+        h1 { font-weight: 500; margin-bottom: 8px; }
+        h2 { font-weight: 400; font-size: 18px; margin-top: 40px; margin-bottom: 12px; color: #ccc; }
+        .asset-row {
+            display: flex;
+            align-items: flex-end;
+            gap: 24px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .asset-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+        .asset-item canvas { display: block; }
+        button {
+            background: #6b3a2a;
+            color: #f0ead0;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+        }
+        button:hover { background: #8a4d38; }
+        .label { font-size: 12px; color: #aaa; }
+    </style>
+</head>
+<body>
+    <h1>Compact Pascal — Logo Assets</h1>
+    <p style="color:#aaa; margin-bottom: 32px;">Click buttons to download individual assets as PNG.</p>
+
+    <h2>Icons (with text band)</h2>
+    <div class="asset-row">
+        <div class="asset-item">
+            <canvas id="icon-256" width="512" height="512"></canvas>
+            <span class="label">256×256</span>
+            <button onclick="download('icon-256', 'compact-pascal-icon-256')">Download</button>
+        </div>
+        <div class="asset-item">
+            <canvas id="icon-128" width="256" height="256"></canvas>
+            <span class="label">128×128</span>
+            <button onclick="download('icon-128', 'compact-pascal-icon-128')">Download</button>
+        </div>
+        <div class="asset-item">
+            <canvas id="icon-64" width="128" height="128"></canvas>
+            <span class="label">64×64</span>
+            <button onclick="download('icon-64', 'compact-pascal-icon-64')">Download</button>
+        </div>
+    </div>
+
+    <h2>README image (400px wide, no text band)</h2>
+    <div class="asset-row">
+        <div class="asset-item">
+            <canvas id="readme" width="800" height="800"></canvas>
+            <span class="label">400×400 @2x</span>
+            <button onclick="download('readme', 'compact-pascal-readme')">Download</button>
+        </div>
+    </div>
+
+    <h2>White paper cover (high-res, with bounding box)</h2>
+    <div class="asset-row">
+        <div class="asset-item">
+            <canvas id="cover" width="2400" height="2400"></canvas>
+            <span class="label">1200×1200 @2x (300 DPI at 4")</span>
+            <button onclick="download('cover', 'compact-pascal-cover')">Download</button>
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════════════
+        // COLOR PALETTE
+        // ═══════════════════════════════════════════════════════════════════════
+        const CREAM = [245, 240, 224];
+        const CREAM_DARK = [235, 228, 210];
+        const SIENNA = [107, 58, 42];
+        const TEAL = [26, 92, 90];
+        const LIGHT_CREAM = [240, 234, 208];
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // 3D ENGINE
+        // ═══════════════════════════════════════════════════════════════════════
+        const ROT_X = -53 * Math.PI / 180;
+        const ROT_Z = 74 * Math.PI / 180;
+        const COS_RX = Math.cos(ROT_X), SIN_RX = Math.sin(ROT_X);
+        const COS_RZ = Math.cos(ROT_Z), SIN_RZ = Math.sin(ROT_Z);
+        const FREQ = 2.0, AMP = 1.4;
+
+        function project(x, y, z, cx, cy, scale) {
+            let x1 = x * COS_RZ - y * SIN_RZ;
+            let y1 = x * SIN_RZ + y * COS_RZ;
+            let z1 = -z;
+            let x2 = x1;
+            let y2 = y1 * COS_RX - z1 * SIN_RX;
+            let z2 = y1 * SIN_RX + z1 * COS_RX;
+            return { x: cx + x2 * scale, y: cy + y2 * scale, depth: z2 };
+        }
+
+        function evalSurface(u, v) {
+            let rr = Math.sqrt(u * u + v * v) * FREQ * 4;
+            return Math.cos(rr) * Math.exp(-rr * 0.3) * AMP;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // SURFACE RENDERER
+        // ═══════════════════════════════════════════════════════════════════════
+        function drawSurface(ctx, cx, cy, scale, gridN, lineW, showBox) {
+            let n = gridN;
+            let verts = [];
+            let zMin = Infinity, zMax = -Infinity;
+
+            for (let i = 0; i <= n; i++) {
+                verts[i] = [];
+                let u = -1 + (2 * i / n);
+                for (let j = 0; j <= n; j++) {
+                    let v = -1 + (2 * j / n);
+                    let z = evalSurface(u, v);
+                    if (z < zMin) zMin = z;
+                    if (z > zMax) zMax = z;
+                    verts[i][j] = { x: u, y: v, z };
+                }
+            }
+
+            let bzMin = Math.min(zMin, 0);
+            let bzMax = zMax * 1.05;
+            let zRange = bzMax - bzMin;
+            let zScale = zRange > 0 ? 1.5 / zRange : 1;
+
+            function toScreen(x, y, z) {
+                let pz = (z - bzMin) * zScale - 0.75;
+                return project(x, y, pz, cx, cy, scale);
+            }
+
+            // Bounding box
+            if (showBox) {
+                let corners = [
+                    toScreen(-1,-1,bzMin), toScreen(1,-1,bzMin),
+                    toScreen(1,1,bzMin), toScreen(-1,1,bzMin),
+                    toScreen(-1,-1,bzMax), toScreen(1,-1,bzMax),
+                    toScreen(1,1,bzMax), toScreen(-1,1,bzMax)
+                ];
+                let edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+                let depths = edges.map(([a,b]) => (corners[a].depth + corners[b].depth)/2);
+                let sorted = [...depths].sort((a,b) => a-b);
+                let med = sorted[Math.floor(sorted.length/2)];
+
+                for (let ei = 0; ei < edges.length; ei++) {
+                    let [a, b] = edges[ei];
+                    let ca = corners[a], cb = corners[b];
+                    let isBack = depths[ei] < med;
+
+                    ctx.beginPath();
+                    ctx.strokeStyle = isBack
+                        ? `rgba(${SIENNA[0]},${SIENNA[1]},${SIENNA[2]},0.3)`
+                        : `rgba(${SIENNA[0]},${SIENNA[1]},${SIENNA[2]},0.55)`;
+                    ctx.lineWidth = isBack ? lineW * 0.5 : lineW * 0.7;
+                    if (isBack) ctx.setLineDash([6 * lineW, 5 * lineW]);
+                    else ctx.setLineDash([]);
+                    ctx.moveTo(ca.x, ca.y);
+                    ctx.lineTo(cb.x, cb.y);
+                    ctx.stroke();
+                }
+                ctx.setLineDash([]);
+            }
+
+            // Project surface
+            let proj = [];
+            for (let i = 0; i <= n; i++) {
+                proj[i] = [];
+                for (let j = 0; j <= n; j++) {
+                    let p = verts[i][j];
+                    proj[i][j] = toScreen(p.x, p.y, p.z);
+                }
+            }
+
+            // Collect segments
+            let segments = [];
+            for (let i = 0; i <= n; i++) {
+                for (let j = 0; j <= n; j++) {
+                    if (j < n) {
+                        let a = proj[i][j], b = proj[i][j+1];
+                        segments.push({ x1:a.x, y1:a.y, x2:b.x, y2:b.y, depth:(a.depth+b.depth)/2 });
+                    }
+                    if (i < n) {
+                        let a = proj[i][j], b = proj[i+1][j];
+                        segments.push({ x1:a.x, y1:a.y, x2:b.x, y2:b.y, depth:(a.depth+b.depth)/2 });
+                    }
+                }
+            }
+            segments.sort((a,b) => a.depth - b.depth);
+
+            let sMin = segments[0].depth, sMax = segments[segments.length-1].depth;
+            let sRange = sMax - sMin || 1;
+
+            for (let seg of segments) {
+                let t = (seg.depth - sMin) / sRange;
+                let alpha = 0.24 + 0.76 * t;
+                let wt = lineW * (0.4 + 0.6 * t);
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(${SIENNA[0]},${SIENNA[1]},${SIENNA[2]},${alpha})`;
+                ctx.lineWidth = wt;
+                ctx.moveTo(seg.x1, seg.y1);
+                ctx.lineTo(seg.x2, seg.y2);
+                ctx.stroke();
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // GRADIENT BACKGROUND
+        // ═══════════════════════════════════════════════════════════════════════
+        function fillGradientBg(ctx, x, y, w, h) {
+            let grad = ctx.createLinearGradient(x, y, x, y + h);
+            grad.addColorStop(0, `rgb(${CREAM[0]},${CREAM[1]},${CREAM[2]})`);
+            grad.addColorStop(1, `rgb(${CREAM_DARK[0]},${CREAM_DARK[1]},${CREAM_DARK[2]})`);
+            ctx.fillStyle = grad;
+            ctx.fillRect(x, y, w, h);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // ICON RENDERER
+        // ═══════════════════════════════════════════════════════════════════════
+        function renderIcon(canvasId, displaySize) {
+            let canvas = document.getElementById(canvasId);
+            let dpr = 2;
+            canvas.width = displaySize * dpr;
+            canvas.height = displaySize * dpr;
+            canvas.style.width = displaySize + 'px';
+            canvas.style.height = displaySize + 'px';
+            let ctx = canvas.getContext('2d');
+            ctx.scale(dpr, dpr);
+
+            let s = displaySize;
+
+            // Background gradient
+            fillGradientBg(ctx, 0, 0, s, s);
+
+            // Surface — clipped to icon
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(0, 0, s, s);
+            ctx.clip();
+
+            let surfScale = s * 0.51;
+            let gridN = displaySize >= 256 ? 24 : (displaySize >= 128 ? 20 : 16);
+            let lineW = displaySize >= 256 ? 1.0 : (displaySize >= 128 ? 0.8 : 0.7);
+            drawSurface(ctx, s / 2, s * 0.40, surfScale, gridN, lineW, false);
+            ctx.restore();
+
+            // Text band — proportional to icon size
+            // Text size scales with icon: ~5.5% of icon size, min 7px
+            let textSz = Math.max(7, Math.round(s * 0.055));
+            // Band padding above/below text: proportional
+            let bandPad = Math.max(2, Math.round(textSz * 0.25));
+            let bandH = textSz + bandPad * 2;
+            // Position: leave ~8% cream below the band
+            let bandY = s - bandH - Math.round(s * 0.08);
+
+            ctx.fillStyle = `rgb(${TEAL[0]},${TEAL[1]},${TEAL[2]})`;
+            ctx.fillRect(0, bandY, s, bandH);
+
+            ctx.font = `700 ${textSz}px 'Fira Sans'`;
+            ctx.fillStyle = `rgb(${LIGHT_CREAM[0]},${LIGHT_CREAM[1]},${LIGHT_CREAM[2]})`;
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            let rightPad = Math.max(3, Math.round(s * 0.04));
+            ctx.fillText('Compact Pascal', s - rightPad, bandY + bandH / 2);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // README IMAGE (no text band, no box)
+        // ═══════════════════════════════════════════════════════════════════════
+        function renderReadme() {
+            let canvas = document.getElementById('readme');
+            let displaySize = 400;
+            let dpr = 2;
+            canvas.width = displaySize * dpr;
+            canvas.height = displaySize * dpr;
+            canvas.style.width = displaySize + 'px';
+            canvas.style.height = displaySize + 'px';
+            let ctx = canvas.getContext('2d');
+            ctx.scale(dpr, dpr);
+
+            fillGradientBg(ctx, 0, 0, displaySize, displaySize);
+            drawSurface(ctx, displaySize / 2, displaySize * 0.45, 170, 32, 1.0, false);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // COVER IMAGE (with bounding box, high res)
+        // ═══════════════════════════════════════════════════════════════════════
+        function renderCover() {
+            let canvas = document.getElementById('cover');
+            let displaySize = 1200;
+            let dpr = 2;
+            canvas.width = displaySize * dpr;
+            canvas.height = displaySize * dpr;
+            canvas.style.width = displaySize + 'px';
+            canvas.style.height = displaySize + 'px';
+            let ctx = canvas.getContext('2d');
+            ctx.scale(dpr, dpr);
+
+            fillGradientBg(ctx, 0, 0, displaySize, displaySize);
+            drawSurface(ctx, displaySize / 2, displaySize * 0.47, 480, 48, 1.2, true);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // DOWNLOAD
+        // ═══════════════════════════════════════════════════════════════════════
+        function download(canvasId, filename) {
+            let canvas = document.getElementById(canvasId);
+            let link = document.createElement('a');
+            link.download = filename + '.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // RENDER ALL ON LOAD
+        // ═══════════════════════════════════════════════════════════════════════
+        window.addEventListener('load', function() {
+            // Wait for font to load
+            document.fonts.ready.then(() => {
+                renderIcon('icon-256', 256);
+                renderIcon('icon-128', 128);
+                renderIcon('icon-64', 64);
+                renderReadme();
+                renderCover();
+            });
+        });
+    </script>
+</body>
+</html>

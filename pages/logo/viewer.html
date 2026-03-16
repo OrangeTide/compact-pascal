@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compact Pascal Logo — Surface Plot</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&family=Lora:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --anthropic-dark: #141413;
+            --anthropic-light: #faf9f5;
+            --anthropic-mid-gray: #b0aea5;
+            --anthropic-light-gray: #e8e6dc;
+            --anthropic-orange: #d97757;
+            --anthropic-blue: #6a9bcc;
+            --anthropic-green: #788c5d;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, var(--anthropic-light) 0%, #f5f3ee 100%);
+            min-height: 100vh;
+            color: var(--anthropic-dark);
+        }
+
+        .container {
+            display: flex;
+            min-height: 100vh;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        .sidebar {
+            width: 320px;
+            flex-shrink: 0;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(20, 20, 19, 0.1);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .sidebar h1 {
+            font-family: 'Lora', serif;
+            font-size: 24px;
+            font-weight: 500;
+            color: var(--anthropic-dark);
+            margin-bottom: 8px;
+        }
+
+        .sidebar .subtitle {
+            color: var(--anthropic-mid-gray);
+            font-size: 14px;
+            margin-bottom: 32px;
+            line-height: 1.4;
+        }
+
+        .control-section { margin-bottom: 32px; }
+
+        .control-section h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--anthropic-dark);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .control-section h3::before {
+            content: '\2022';
+            color: var(--anthropic-orange);
+            font-weight: bold;
+        }
+
+        .seed-input {
+            width: 100%;
+            background: var(--anthropic-light);
+            padding: 12px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            margin-bottom: 12px;
+            border: 1px solid var(--anthropic-light-gray);
+            text-align: center;
+        }
+
+        .seed-input:focus {
+            outline: none;
+            border-color: var(--anthropic-orange);
+            box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.1);
+            background: white;
+        }
+
+        .seed-controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .regen-button { margin-bottom: 0; }
+
+        .control-group { margin-bottom: 20px; }
+
+        .control-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--anthropic-dark);
+            margin-bottom: 8px;
+        }
+
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .slider-container input[type="range"] {
+            flex: 1;
+            height: 4px;
+            background: var(--anthropic-light-gray);
+            border-radius: 2px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .slider-container input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--anthropic-orange);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .slider-container input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.1);
+            background: #c86641;
+        }
+
+        .slider-container input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: var(--anthropic-orange);
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .value-display {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: var(--anthropic-mid-gray);
+            min-width: 60px;
+            text-align: right;
+        }
+
+        .button {
+            background: var(--anthropic-orange);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        .button:hover { background: #c86641; transform: translateY(-1px); }
+        .button:active { transform: translateY(0); }
+        .button.secondary { background: var(--anthropic-blue); }
+        .button.secondary:hover { background: #5a8bb8; }
+        .button.tertiary { background: var(--anthropic-green); }
+        .button.tertiary:hover { background: #6b7b52; }
+
+        .button-row { display: flex; gap: 8px; }
+        .button-row .button { flex: 1; }
+
+        .canvas-area {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 0;
+        }
+
+        #canvas-container {
+            width: 100%;
+            max-width: 1000px;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 20px 40px rgba(20, 20, 19, 0.1);
+            background: white;
+        }
+
+        #canvas-container canvas {
+            display: block;
+            width: 100% !important;
+            height: auto !important;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--anthropic-mid-gray);
+            padding: 200px 0;
+        }
+
+        @media (max-width: 600px) {
+            .container { flex-direction: column; }
+            .sidebar { width: 100%; }
+            .canvas-area { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <h1>Compact Pascal</h1>
+            <div class="subtitle">Monochrome 3D surface plot — logo exploration</div>
+
+            <!-- Seed -->
+            <div class="control-section">
+                <h3>Seed</h3>
+                <input type="number" id="seed-input" class="seed-input" value="42" onchange="updateSeed()">
+                <div class="seed-controls">
+                    <button class="button secondary" onclick="previousSeed()">&#8592; Prev</button>
+                    <button class="button secondary" onclick="nextSeed()">Next &#8594;</button>
+                </div>
+                <button class="button tertiary regen-button" onclick="randomSeedAndUpdate()">&#8635; Random</button>
+            </div>
+
+            <!-- Parameters -->
+            <div class="control-section">
+                <h3>Parameters</h3>
+
+                <div class="control-group">
+                    <label>Grid Density</label>
+                    <div class="slider-container">
+                        <input type="range" id="gridDensity" min="20" max="72" step="2" value="32" oninput="updateParam('gridDensity', this.value)">
+                        <span class="value-display" id="gridDensity-value">32</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Rotation X (elevation)</label>
+                    <div class="slider-container">
+                        <input type="range" id="rotX" min="-90" max="0" step="1" value="-53" oninput="updateParam('rotX', this.value)">
+                        <span class="value-display" id="rotX-value">-53</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Rotation Z (azimuth)</label>
+                    <div class="slider-container">
+                        <input type="range" id="rotZ" min="-180" max="180" step="1" value="74" oninput="updateParam('rotZ', this.value)">
+                        <span class="value-display" id="rotZ-value">74</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Amplitude</label>
+                    <div class="slider-container">
+                        <input type="range" id="amplitude" min="0.3" max="3.0" step="0.1" value="1.4" oninput="updateParam('amplitude', this.value)">
+                        <span class="value-display" id="amplitude-value">1.4</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Frequency</label>
+                    <div class="slider-container">
+                        <input type="range" id="frequency" min="0.5" max="4.0" step="0.1" value="2.0" oninput="updateParam('frequency', this.value)">
+                        <span class="value-display" id="frequency-value">2.0</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Perturbation</label>
+                    <div class="slider-container">
+                        <input type="range" id="perturbation" min="0.0" max="0.5" step="0.01" value="0.0" oninput="updateParam('perturbation', this.value)">
+                        <span class="value-display" id="perturbation-value">0.00</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Stroke Weight</label>
+                    <div class="slider-container">
+                        <input type="range" id="strokeWt" min="0.3" max="2.5" step="0.1" value="1.0" oninput="updateParam('strokeWt', this.value)">
+                        <span class="value-display" id="strokeWt-value">1.0</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Show Bounding Box</label>
+                    <div class="slider-container">
+                        <input type="range" id="showBox" min="0" max="1" step="1" value="1" oninput="updateParam('showBox', this.value)">
+                        <span class="value-display" id="showBox-value">on</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Show Axes</label>
+                    <div class="slider-container">
+                        <input type="range" id="showAxes" min="0" max="1" step="1" value="0" oninput="updateParam('showAxes', this.value)">
+                        <span class="value-display" id="showAxes-value">off</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Presets -->
+            <div class="control-section">
+                <h3>Surface Presets</h3>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="button secondary" onclick="loadPreset('sinc')">Sinc (default)</button>
+                    <button class="button secondary" onclick="loadPreset('gaussianPeaks')">Gaussian Peaks</button>
+                    <button class="button secondary" onclick="loadPreset('saddle')">Monkey Saddle</button>
+                    <button class="button secondary" onclick="loadPreset('ripple')">Damped Ripple</button>
+                    <button class="button secondary" onclick="loadPreset('wave')">Crossed Waves</button>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="control-section">
+                <h3>Actions</h3>
+                <div class="button-row" style="margin-bottom: 8px;">
+                    <button class="button" onclick="resetParameters()">Reset</button>
+                </div>
+                <div class="button-row">
+                    <button class="button tertiary" onclick="downloadPNG()">Download PNG</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="canvas-area">
+            <div id="canvas-container">
+                <div class="loading">Initializing surface plot...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════════════
+        // PARAMETERS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        let params = {
+            seed: 42,
+            gridDensity: 32,
+            rotX: -53,
+            rotZ: 74,
+            amplitude: 1.4,
+            frequency: 2.0,
+            perturbation: 0.0,
+            strokeWt: 1.0,
+            showBox: 1,
+            showAxes: 0,
+            surfaceType: 'ripple'
+        };
+
+        let defaultParams = {...params};
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // 3D PROJECTION ENGINE
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // Custom orthographic 3D with manual projection for crisp 2D lines
+
+        let cosRx, sinRx, cosRz, sinRz;
+        let projScale = 320;
+
+        function project(x, y, z) {
+            // Rotate around Z axis (azimuth)
+            let x1 = x * cosRz - y * sinRz;
+            let y1 = x * sinRz + y * cosRz;
+            // Flip Z so positive z points up on screen
+            let z1 = -z;
+            // Rotate around X axis (elevation)
+            let x2 = x1;
+            let y2 = y1 * cosRx - z1 * sinRx;
+            let z2 = y1 * sinRx + z1 * cosRx;
+            return {
+                x: width / 2 + x2 * projScale,
+                y: height / 2 + y2 * projScale,
+                depth: z2
+            };
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // SURFACE FUNCTIONS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        function evalSurface(u, v, amp, freq, type) {
+            let x, y, z;
+            switch (type) {
+                case 'sinc': {
+                    // 2D sinc: sin(pi*r)/(pi*r), tall central peak with rings
+                    x = u;
+                    y = v;
+                    let r = Math.sqrt(u * u + v * v) * freq * 3.0;
+                    if (r < 0.001) {
+                        z = 1.0 * amp;
+                    } else {
+                        z = Math.sin(r) / r * amp;
+                    }
+                    break;
+                }
+                case 'gaussianPeaks': {
+                    // Sum of Gaussians — central tall peak + satellite peaks
+                    x = u;
+                    y = v;
+                    let g0 = Math.exp(-(u * u + v * v) * freq * 4);
+                    let g1 = 0.6 * Math.exp(-((u - 0.5) * (u - 0.5) + (v - 0.3) * (v - 0.3)) * freq * 6);
+                    let g2 = 0.5 * Math.exp(-((u + 0.4) * (u + 0.4) + (v - 0.5) * (v - 0.5)) * freq * 6);
+                    let g3 = 0.45 * Math.exp(-((u + 0.3) * (u + 0.3) + (v + 0.5) * (v + 0.5)) * freq * 6);
+                    let g4 = 0.55 * Math.exp(-((u - 0.4) * (u - 0.4) + (v + 0.4) * (v + 0.4)) * freq * 6);
+                    z = (g0 + g1 + g2 + g3 + g4) * amp;
+                    break;
+                }
+                case 'saddle': {
+                    x = u;
+                    y = v;
+                    let sx = u * freq * 2;
+                    let sy = v * freq * 2;
+                    z = (sx * sx * sx - 3 * sx * sy * sy) * 0.15 * amp;
+                    break;
+                }
+                case 'ripple': {
+                    x = u;
+                    y = v;
+                    let rr = Math.sqrt(u * u + v * v) * freq * 4;
+                    z = Math.cos(rr) * Math.exp(-rr * 0.3) * amp;
+                    break;
+                }
+                case 'wave': {
+                    x = u;
+                    y = v;
+                    z = Math.sin(u * Math.PI * freq * 1.5) * Math.cos(v * Math.PI * freq * 1.5) * amp * 0.5;
+                    break;
+                }
+                default: {
+                    x = u; y = v; z = 0;
+                }
+            }
+            return { x, y, z };
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // MAIN RENDER
+        // ═══════════════════════════════════════════════════════════════════════
+
+        function setup() {
+            let canvas = createCanvas(1200, 1200);
+            canvas.parent('canvas-container');
+            pixelDensity(2);
+            document.querySelector('.loading').style.display = 'none';
+            generateAndDraw();
+        }
+
+        function draw() {}
+
+        function generateAndDraw() {
+            randomSeed(params.seed);
+            noiseSeed(params.seed);
+
+            let rx = radians(params.rotX);
+            let rz = radians(params.rotZ);
+            cosRx = Math.cos(rx); sinRx = Math.sin(rx);
+            cosRz = Math.cos(rz); sinRz = Math.sin(rz);
+
+            let n = Math.floor(params.gridDensity);
+            let amp = params.amplitude;
+            let freq = params.frequency;
+            let pert = params.perturbation;
+            let type = params.surfaceType;
+
+            // Domain: [-1, 1] x [-1, 1]
+            let domMin = -1, domMax = 1;
+
+            // Evaluate surface on grid
+            let verts = [];  // [i][j] = {x, y, z}
+            let zMin = Infinity, zMax = -Infinity;
+
+            for (let i = 0; i <= n; i++) {
+                verts[i] = [];
+                let u = map(i, 0, n, domMin, domMax);
+                for (let j = 0; j <= n; j++) {
+                    let v = map(j, 0, n, domMin, domMax);
+                    let pt = evalSurface(u, v, amp, freq, type);
+
+                    // Seeded perturbation
+                    if (pert > 0) {
+                        let nv = noise(i * 0.25 + params.seed * 0.01, j * 0.25) - 0.5;
+                        pt.z += nv * pert * amp * 0.5;
+                    }
+
+                    if (pt.z < zMin) zMin = pt.z;
+                    if (pt.z > zMax) zMax = pt.z;
+
+                    verts[i][j] = pt;
+                }
+            }
+
+            // Bounding box dimensions in world coords
+            let bxMin = domMin, bxMax = domMax;
+            let byMin = domMin, byMax = domMax;
+            let bzMin = Math.min(zMin, 0);
+            let bzMax = zMax * 1.05;  // slight headroom
+
+            // Normalize z so the box looks proportional
+            // Scale z to roughly same visual range as x/y
+            let zRange = bzMax - bzMin;
+            let zScale = (zRange > 0) ? 1.5 / zRange : 1;
+
+            // Project all surface verts
+            let projSurface = [];
+            for (let i = 0; i <= n; i++) {
+                projSurface[i] = [];
+                for (let j = 0; j <= n; j++) {
+                    let p = verts[i][j];
+                    let pz = (p.z - bzMin) * zScale - 0.75;  // center vertically
+                    projSurface[i][j] = project(p.x, p.y, pz);
+                }
+            }
+
+            // ── Drawing ──
+            background(255);
+            noFill();
+
+            // Helper to project box coords
+            function boxProject(bx, by, bz) {
+                let pz = (bz - bzMin) * zScale - 0.75;
+                return project(bx, by, pz);
+            }
+
+            // ── Bounding box ──
+            if (params.showBox >= 1) {
+                // 8 corners of the box
+                let corners = [
+                    boxProject(bxMin, byMin, bzMin), // 0: front-bottom-left
+                    boxProject(bxMax, byMin, bzMin), // 1: front-bottom-right
+                    boxProject(bxMax, byMax, bzMin), // 2: back-bottom-right
+                    boxProject(bxMin, byMax, bzMin), // 3: back-bottom-left
+                    boxProject(bxMin, byMin, bzMax), // 4: front-top-left
+                    boxProject(bxMax, byMin, bzMax), // 5: front-top-right
+                    boxProject(bxMax, byMax, bzMax), // 6: back-top-right
+                    boxProject(bxMin, byMax, bzMax), // 7: back-top-left
+                ];
+
+                // Edges: [from, to, style]
+                // style: 'solid' for visible edges, 'dashed' for hidden
+                // Determine visibility by depth — back edges are dashed
+                let edges = [
+                    // Bottom face
+                    [0, 1], [1, 2], [2, 3], [3, 0],
+                    // Top face
+                    [4, 5], [5, 6], [6, 7], [7, 4],
+                    // Verticals
+                    [0, 4], [1, 5], [2, 6], [3, 7]
+                ];
+
+                // Find which edges should be dashed (back-facing)
+                // Simple heuristic: edges whose midpoint depth is below median
+                let edgeDepths = edges.map(([a, b]) => ({
+                    a, b,
+                    depth: (corners[a].depth + corners[b].depth) / 2
+                }));
+                let depthValues = edgeDepths.map(e => e.depth);
+                let medianDepth = depthValues.sort((a, b) => a - b)[Math.floor(depthValues.length / 2)];
+
+                for (let e of edges) {
+                    let ca = corners[e[0]];
+                    let cb = corners[e[1]];
+                    let avgD = (ca.depth + cb.depth) / 2;
+
+                    if (avgD < medianDepth) {
+                        // Back edge — dashed
+                        strokeWeight(0.6);
+                        stroke(120);
+                        drawDashedLine(ca.x, ca.y, cb.x, cb.y, 8, 6);
+                    } else {
+                        // Front edge — solid
+                        strokeWeight(0.8);
+                        stroke(60);
+                        line(ca.x, ca.y, cb.x, cb.y);
+                    }
+                }
+
+                // ── Axis labels ──
+                if (params.showAxes >= 1) {
+                    textFont('Poppins');
+                    textSize(22);
+                    textStyle(ITALIC);
+                    fill(40);
+                    noStroke();
+
+                    // X axis label — at end of X axis on bottom face
+                    // Find the most "right-pointing" bottom edge
+                    let xLabel = boxProject(bxMax * 1.12, (byMin + byMax) / 2, bzMin);
+                    // Try a few positions and pick the one that looks best
+                    let xEnd1 = boxProject(bxMax * 1.1, byMin, bzMin);
+                    let xMid = boxProject(bxMax * 1.15, (byMin) * 0.8, bzMin);
+                    textAlign(CENTER, CENTER);
+                    text('x', xMid.x, xMid.y);
+
+                    // Y axis label
+                    let yMid = boxProject((bxMax) * 0.8, byMax * 1.15, bzMin);
+                    text('y', yMid.x, yMid.y);
+
+                    // Z axis label
+                    let zMid = boxProject(bxMin * 1.05, byMin * 1.05, bzMax * 1.1);
+                    text('z', zMid.x, zMid.y);
+                }
+            }
+
+            // ── Surface wireframe ──
+            // Draw back-to-front using painter's algorithm on grid quads
+            // Collect all line segments with depth
+            let segments = [];
+
+            for (let i = 0; i <= n; i++) {
+                for (let j = 0; j <= n; j++) {
+                    if (j < n) {
+                        let a = projSurface[i][j];
+                        let b = projSurface[i][j + 1];
+                        segments.push({
+                            x1: a.x, y1: a.y,
+                            x2: b.x, y2: b.y,
+                            depth: (a.depth + b.depth) / 2
+                        });
+                    }
+                    if (i < n) {
+                        let a = projSurface[i][j];
+                        let b = projSurface[i + 1][j];
+                        segments.push({
+                            x1: a.x, y1: a.y,
+                            x2: b.x, y2: b.y,
+                            depth: (a.depth + b.depth) / 2
+                        });
+                    }
+                }
+            }
+
+            // Sort back to front
+            segments.sort((a, b) => a.depth - b.depth);
+
+            let sDepthMin = segments.length > 0 ? segments[0].depth : 0;
+            let sDepthMax = segments.length > 0 ? segments[segments.length - 1].depth : 1;
+            let sDepthRange = sDepthMax - sDepthMin;
+            if (sDepthRange === 0) sDepthRange = 1;
+
+            for (let seg of segments) {
+                let t = (seg.depth - sDepthMin) / sDepthRange; // 0=far, 1=near
+
+                // Depth-based stroke: far lines lighter, near lines darker
+                let alpha = map(t, 0, 1, 60, 255);
+                let wt = params.strokeWt * map(t, 0, 1, 0.4, 1.0);
+
+                stroke(20, 20, 19, alpha);
+                strokeWeight(wt);
+                line(seg.x1, seg.y1, seg.x2, seg.y2);
+            }
+
+            noLoop();
+        }
+
+        // ── Dashed line utility ──
+        function drawDashedLine(x1, y1, x2, y2, dashLen, gapLen) {
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            let steps = dist / (dashLen + gapLen);
+            let ux = dx / dist;
+            let uy = dy / dist;
+
+            for (let i = 0; i < steps; i++) {
+                let sx = x1 + ux * i * (dashLen + gapLen);
+                let sy = y1 + uy * i * (dashLen + gapLen);
+                let ex = sx + ux * dashLen;
+                let ey = sy + uy * dashLen;
+                // Clamp to endpoint
+                let progress = (i * (dashLen + gapLen) + dashLen) / dist;
+                if (progress > 1) {
+                    ex = x2; ey = y2;
+                }
+                line(sx, sy, ex, ey);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // PRESETS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        const presets = {
+            sinc: {
+                rotX: -25, rotZ: 225, amplitude: 1.5, frequency: 2.0,
+                perturbation: 0.0, gridDensity: 44, strokeWt: 0.9
+            },
+            gaussianPeaks: {
+                rotX: -25, rotZ: 225, amplitude: 1.5, frequency: 1.8,
+                perturbation: 0.0, gridDensity: 44, strokeWt: 0.9
+            },
+            saddle: {
+                rotX: -25, rotZ: 225, amplitude: 1.3, frequency: 1.5,
+                perturbation: 0.0, gridDensity: 40, strokeWt: 0.9
+            },
+            ripple: {
+                rotX: -53, rotZ: 74, amplitude: 1.4, frequency: 2.0,
+                perturbation: 0.0, gridDensity: 32, strokeWt: 1.0
+            },
+            wave: {
+                rotX: -25, rotZ: 225, amplitude: 1.2, frequency: 1.6,
+                perturbation: 0.0, gridDensity: 40, strokeWt: 0.9
+            }
+        };
+
+        function loadPreset(name) {
+            params.surfaceType = name;
+            let p = presets[name];
+            for (let k in p) params[k] = p[k];
+            syncUI();
+            generateAndDraw();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // UI HANDLERS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        function updateParam(paramName, value) {
+            params[paramName] = parseFloat(value);
+            let display = document.getElementById(paramName + '-value');
+            if (display) {
+                if (paramName === 'perturbation') {
+                    display.textContent = parseFloat(value).toFixed(2);
+                } else if (paramName === 'showBox' || paramName === 'showAxes') {
+                    display.textContent = parseFloat(value) >= 1 ? 'on' : 'off';
+                } else {
+                    display.textContent = value;
+                }
+            }
+            generateAndDraw();
+        }
+
+        function syncUI() {
+            let fields = ['gridDensity', 'rotX', 'rotZ', 'amplitude', 'frequency',
+                          'perturbation', 'strokeWt', 'showBox', 'showAxes'];
+            for (let f of fields) {
+                let el = document.getElementById(f);
+                let display = document.getElementById(f + '-value');
+                if (el) el.value = params[f];
+                if (display) {
+                    if (f === 'perturbation') {
+                        display.textContent = parseFloat(params[f]).toFixed(2);
+                    } else if (f === 'showBox' || f === 'showAxes') {
+                        display.textContent = parseFloat(params[f]) >= 1 ? 'on' : 'off';
+                    } else {
+                        display.textContent = params[f];
+                    }
+                }
+            }
+            updateSeedDisplay();
+        }
+
+        function downloadPNG() {
+            saveCanvas('compact-pascal-logo-' + params.seed, 'png');
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // SEED CONTROLS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        function updateSeedDisplay() {
+            document.getElementById('seed-input').value = params.seed;
+        }
+
+        function updateSeed() {
+            let input = document.getElementById('seed-input');
+            let newSeed = parseInt(input.value);
+            if (newSeed && newSeed > 0) {
+                params.seed = newSeed;
+                generateAndDraw();
+            } else {
+                updateSeedDisplay();
+            }
+        }
+
+        function previousSeed() {
+            params.seed = Math.max(1, params.seed - 1);
+            updateSeedDisplay();
+            generateAndDraw();
+        }
+
+        function nextSeed() {
+            params.seed = params.seed + 1;
+            updateSeedDisplay();
+            generateAndDraw();
+        }
+
+        function randomSeedAndUpdate() {
+            params.seed = Math.floor(Math.random() * 999999) + 1;
+            updateSeedDisplay();
+            generateAndDraw();
+        }
+
+        function resetParameters() {
+            params = {...defaultParams};
+            syncUI();
+            generateAndDraw();
+        }
+
+        window.addEventListener('load', function() {
+            updateSeedDisplay();
+        });
+    </script>
+</body>
+</html>

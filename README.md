@@ -1,8 +1,13 @@
 # Compact Pascal
 
+<p align="center">
+  <img src="pages/logo/compact-pascal-readme.png" alt="Compact Pascal" width="400">
+</p>
+
 ![Status: Early Development](https://img.shields.io/badge/status-early%20development-orange)
 ![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 ![WASM Target: 1.0 MVP](https://img.shields.io/badge/WASM-1.0%20MVP-purple)
+[![Human–AI Co-Created](https://dotnetdave.github.io/ai-usage-badges/badges/svg/human-ai-co-created.svg)](https://dotnetdave.github.io/ai-usage-badges/)
 
 An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. Embedding libraries for Rust and Zig let you compile and run Compact Pascal programs from your application — no external Pascal toolchain required.
 
@@ -14,7 +19,7 @@ Compact Pascal is a new language in the Pascal family. It inherits Pascal's synt
 - **Minimal runtime** — the compiled WASM output has no standard library overhead. Host applications provide exactly the functionality they want.
 - **Single-pass compiler** — fast compilation, especially important when the compiler itself runs inside a WASM interpreter.
 - **WASM 1.0 MVP only** — no WASM extensions, maximum portability across runtimes.
-- **Modern extensions** — structural interfaces with `implement` blocks (Go-style), short-circuit `and then`/`or else` (ISO 10206), and a macro system are planned.
+- **Modern extensions** — structural interfaces with `implement` blocks (Go-style), short-circuit `and then`/`or else` (ISO 10206).
 
 ### How It Works
 
@@ -76,16 +81,16 @@ try instance.call("main", &.{});
 | 4 | Browser / WASM target | Not started |
 | 5 | Dynamic allocation (`New`/`Dispose`) | Not started |
 | 5b | Richer string type | Not started |
-| 6 | Macro system | Not started |
+| 6 | Units and separate compilation | Not started |
 | 7 | Interfaces and methods | Not started |
 
 ## Documentation
 
 | Document | Description |
 |---|---|
-| [PLAN.md](PLAN.md) | Project plan with phased roadmap and findings |
 | [doc/compact-pascal-wp.md](doc/compact-pascal-wp.md) | White paper — motivation, architecture, grammar |
 | [doc/compact-pascal-ref.md](doc/compact-pascal-ref.md) | Language reference (living document, CalVer versioned) |
+| [doc/compact-pascal-tutorial.md](doc/compact-pascal-tutorial.md) | Compiler tutorial book — building the compiler step by step |
 
 ## Prerequisites
 
@@ -155,8 +160,9 @@ src/            — Rust crate source
 src-zig/        — Zig library source
 snapshot/       — compiler WASM blob (shared by Rust and Zig)
 examples/
-  rust/         — Rust example programs
-  zig/          — Zig example programs
+  pascal/       — Compact Pascal example programs
+  rust/         — Rust embedding examples
+  zig/          — Zig embedding examples
 doc/            — white paper and language reference
 pages/          — GitHub Pages site
 ```

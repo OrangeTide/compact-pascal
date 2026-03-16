@@ -1,12 +1,28 @@
-# Compact Pascal Language Reference
-
-**DRAFT** — This document is a work in progress and subject to change.
+---
+title: Compact Pascal Language Reference
+author: Jon Mayo
+date: March 2026
+header-includes:
+  - |
+    ```{=typst}
+    #v(0.5em)
+    #align(center, text(weight: "bold", size: 12pt, fill: rgb("#cc0000"))[DRAFT — This document is a work in progress and subject to change.])
+    ```
+---
 
 **Version 26.03.0** (CalVer: YY.MM.minor)
 
-Compact Pascal is a new language inspired by [Standard Pascaline](https://www.standardpascaline.org/pascaline.htm) (an extension of ISO 7185 Pascal) with modifications and additional extensions described in this document.
+Compact Pascal is a new language in the Pascal family, rooted in ISO 7185 (Standard Pascal) and ISO 10206 (Extended Pascal), with modifications and additional extensions described in this document.
 
 This is a living document. The version number follows [Calendar Versioning](https://calver.org/) using the YY.MM.minor scheme. The minor version increments for changes within the same month.
+
+## Source Encoding
+
+Source files must be encoded in **UTF-8**. The compiler treats source as a sequence of bytes; only ASCII-range bytes (0x00–0x7F) are significant to the lexer. Bytes 0x80–0xFF may appear in string literals and comments and are preserved verbatim. The compiler does not validate, decode, or normalize UTF-8 sequences.
+
+This means `char` is a **byte**, not a Unicode codepoint. `length('café')` returns the byte length (6 in UTF-8, not 4), and `s[i]` indexes by byte. Programs that work with multi-byte characters must account for this, just as in C or Go's `[]byte`. Full Unicode-aware string operations are a library concern, not a language primitive.
+
+Legacy Turbo Pascal source files encoded in CP437 or other 8-bit code pages must be converted to UTF-8 before compilation. This is a one-time conversion performed by standard tools or libraries (e.g., `iconv`, Rust's `encoding_rs` crate, or a simple 128-entry lookup table in Zig).
 
 ## Core Language
 
@@ -22,15 +38,15 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - `word` — unsigned 16-bit integer (0..65535).
 - `longint` — signed 32-bit integer.
 - `boolean` — `true` or `false`.
-- `char` — single byte character.
+- `char` — single byte (0..255). Represents one byte of text, not a Unicode codepoint. See [Source Encoding](#source-encoding).
 - `string` — TP-style short string (length byte + up to 255 characters). `string[n]` for a maximum length of `n`. See [String Representation](#string-representation).
-- `real` — floating point (mapped to WASM `f64`). *(Deferred from Phase 1.)*
+- `real` — floating point (mapped to WASM `f64`). *(Deferred from Phase 1. The scanner recognizes real literals but the compiler rejects them with an error.)*
 - `array` — fixed-size arrays: `array[lo..hi] of T`.
 - `record` — composite types, including variant records with a `case` tag. See [Variant Records](#variant-records).
 - `set` — bit-set types: `set of T` where T is an ordinal type with up to 256 values. See [Set Types](#set-types).
 - Pointers — `^T` typed pointers.
 - Enumerated types — mapped to WASM `i32`. Values are assigned sequentially from 0.
-- Subranges — mapped to WASM `i32`. Range bounds are checked at assignment only when `{$R+}` is enabled.
+- Subranges — a restricted range of an ordinal type. The base type can be inferred from the constants (`1..12` is `integer`, `'A'..'Z'` is `char`, `Mon..Fri` is the enumerated type containing `Mon`) or specified explicitly using the GPC typed subrange syntax: `Day(Mon..Fri)`. Mapped to WASM `i32`. Range bounds are checked at assignment only when `{$R+}` is enabled.
 - Procedural types — `procedure (params)` and `function (params): T`.
 
 ### Expressions
@@ -49,11 +65,11 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 
 - Assignment: `:=`.
 - Procedure call.
-- `if ... then ... else`.
+- `if ... then ... else` — dangling `else` binds to the nearest unmatched `if`.
 - `while ... do`.
 - `for ... := ... to/downto ... do`.
 - `repeat ... until`.
-- `case ... of`.
+- `case ... of ... else ... end` — with optional `else` default branch.
 - `with ... do` — open a record's fields for unqualified access.
 - `begin ... end` compound statement.
 
@@ -68,7 +84,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - `external` — marks a procedure or function as provided by the WASM host (used with `{$IMPORT}`). No Pascal body.
 - `program` — program header.
 
-### Differences from Standard Pascaline / ISO 7185
+### Differences from ISO 7185
 
 - **No file types.** The `file` type and associated operations are omitted.
 - **Built-in I/O is a compiler intrinsic.** `write`, `writeln`, `read`, `readln` are supported but compile to WASI preview 1 `fd_write`/`fd_read` calls rather than being part of the runtime. Any WASI-compatible host provides these automatically. See [Built-in I/O](#built-in-io).
@@ -85,7 +101,7 @@ Compact Pascal supports short-circuit (lazy) boolean evaluation using the `and t
 - `A and then B` — evaluates `B` only if `A` is `true`.
 - `A or else B` — evaluates `B` only if `A` is `false`.
 
-The standard `and` and `or` operators retain their ISO 7185 semantics: both operands are always evaluated, and the order of evaluation is not guaranteed.
+The standard `and` and `or` operators retain their ISO 7185 semantics: both operands are always evaluated, but the order of evaluation is unspecified.
 
 Short-circuit operators are essential for guarding expressions that would be invalid if evaluated unconditionally:
 
@@ -99,6 +115,22 @@ if (n = 0) or else (total div n > threshold) then
 
 `and then` and `or else` have the same precedence as `and` and `or` respectively.
 
+## Case Statement
+
+The `case` statement selects a branch based on the value of an ordinal expression. An optional `else` clause handles values not matched by any branch:
+
+```pascal
+case ch of
+  '0'..'9': writeln('digit');
+  'a'..'z', 'A'..'Z': writeln('letter');
+  '+', '-', '*', '/': writeln('operator');
+else
+  writeln('other');
+end;
+```
+
+The `else` clause is a Turbo Pascal extension (not in ISO 7185). If no branch matches and there is no `else` clause, execution continues after `end` without error.
+
 ## String Representation
 
 Strings use the Turbo Pascal short string representation: a length byte followed by character data in WASM linear memory.
@@ -107,11 +139,12 @@ Strings use the Turbo Pascal short string representation: a length byte followed
 Memory layout:  [len: byte] [char1] [char2] ... [charN] [padding to maxlen]
 ```
 
-- `string` is equivalent to `string[255]` (1 length byte + up to 255 characters).
-- `string[n]` declares a string with a maximum length of `n` (1 ≤ n ≤ 255).
-- The length byte at position 0 holds the current length of the string.
-- Characters are indexed from 1 to `length(s)`.
+- `string` is equivalent to `string[255]` (1 length byte + up to 255 bytes).
+- `string[n]` declares a string with a maximum length of `n` bytes (1 ≤ n ≤ 255).
+- The length byte at position 0 holds the current length in bytes.
+- Bytes are indexed from 1 to `length(s)`.
 - No null terminator.
+- UTF-8 strings are stored as-is. A string containing multi-byte characters uses more bytes than it has codepoints, and `length` returns the byte count. See [Source Encoding](#source-encoding).
 
 Short strings live on the stack or in records — no heap allocation is required. This representation is identical to Free Pascal in `-Mtp` mode.
 
@@ -131,14 +164,91 @@ String parameters follow the Turbo Pascal convention:
 
 This matches Turbo Pascal and Free Pascal behavior. `const` and `var` string parameters avoid copying, which is important for performance since a `string[255]` is 256 bytes.
 
+## String Literals
+
+String literals are enclosed in single quotes. A literal single quote within a string is escaped by doubling it (`''`):
+
+```pascal
+'hello'           { 5 bytes }
+''                { empty string, 0 bytes }
+'it''s'           { 4 bytes: i, t, ', s }
+'café'            { 6 bytes in UTF-8 }
+```
+
+String literals may contain any bytes, including UTF-8 multi-byte sequences, which are preserved verbatim. See [Source Encoding](#source-encoding).
+
+### Character Constants (`#`)
+
+The `#` prefix produces a byte value from a decimal or hexadecimal integer. Values must be in the range 0–255; values above 255 are an error.
+
+```pascal
+#13              { CR, byte 13 }
+#10              { LF, byte 10 }
+#0               { null, byte 0 }
+#$1B             { ESC, byte 27 }
+#$FF             { byte 255 }
+```
+
+Character constants can be concatenated directly with string literals (no `+` operator needed). The scanner folds adjacent sequences into a single string constant:
+
+```pascal
+'Hello'#13#10'World'     { 12 bytes: Hello, CR, LF, World }
+#27'[2J'                 { 4 bytes: ESC, [, 2, J }
+'Tab'#9'here'            { 8 bytes: Tab, HT, here }
+#13#10                   { 2 bytes: CR, LF (standalone) }
+```
+
+A standalone `#n` is a `char` constant. When concatenated with a string literal or other `#` constants, the result is a `string`.
+
+### Unicode Character Constants (`#u`) *(Future Extension)*
+
+A `#u` prefix followed by hexadecimal digits produces a `rune` value — a 32-bit Unicode codepoint. When a `rune` is concatenated with a string, the compiler encodes it as UTF-8 bytes. This is planned for a later phase alongside the `rune` type; Phase 1 does not support `#u`.
+
+```pascal
+#u41              { rune A — same codepoint as #$41 }
+#u00E9            { rune é }
+#u20AC            { rune € }
+#u1F600           { rune 😀 }
+'caf' + #u00E9    { string 'café' — rune encoded as UTF-8, 6 bytes }
+```
+
+Note that `#u` always uses hexadecimal (no `$` prefix needed). `#$41`, `#u41`, and `#u0041` all represent the same codepoint.
+
+### Rune Type *(Future Extension)*
+
+The `rune` type is a 32-bit ordinal type representing a Unicode codepoint (0 to $10FFFF), inspired by Go's `rune`. It is stored as WASM `i32`. `char` remains a byte; `rune` is a separate type for Unicode-aware operations.
+
+**Concatenation rules:** When a `rune` is concatenated with a string, the rune is encoded as UTF-8. When a `char` with value above 127 is concatenated with a string or `rune`, the compiler emits a warning — bytes 128–255 are not valid standalone UTF-8 and the user almost certainly meant `#u`. This warning applies only to compile-time constants; runtime string operations are byte-level with no checks.
+
+**Built-in functions:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `RuneLen(s)` | `string → integer` | Number of Unicode codepoints in a UTF-8 string. |
+| `DecodeRune(s, i, r)` | `string, integer, var rune → integer` | Decode the rune at byte index `i`, store in `r`, return the next byte index. |
+| `EncodeRune(r)` | `rune → string` | UTF-8 encoding of a rune (1–4 byte short string). |
+| `RuneChr(n)` | `integer → rune` | Integer to rune (full Unicode range). |
+| `ord(r)` | `rune → integer` | Codepoint value. |
+
+Rune literals (`#uHHHH`) are valid in constant expressions, including `case` label ranges:
+
+```pascal
+case r of
+  #u0000..#u007F: writeln('ASCII');
+  #u0080..#u07FF: writeln('2-byte UTF-8');
+  #u0800..#uFFFF: writeln('3-byte UTF-8');
+end;
+```
+
+Planned alongside Phase 5b (richer string type). Phase 1 has no `rune` type.
+
 ## Numeric Literals
 
 ### Standard Literals
 
 - Decimal integers: `42`, `0`, `1000`
 - Hexadecimal (TP-style): `$FF`, `$1A3F`
-- Real numbers: `3.14`, `1.0e10`, `2.5e-3`
-- String literals: `'hello'`, `''` (empty), `'it''s'` (escaped quote)
+- Real numbers: `3.14`, `1.0e10`, `2.5e-3` *(recognized by the scanner but rejected in Phase 1)*
 
 ### Extended Literals (Optional)
 
@@ -223,7 +333,7 @@ type
   end;
 ```
 
-The tag field (`Kind`) is a normal field accessible at runtime. All variants overlap in memory starting at the same offset. The record size is determined by the largest variant. With `{$R+}`, accessing a variant field checks the tag value.
+The tag field (`Kind`) is a normal field accessible at runtime. All variant fields overlap in memory starting at the same offset. The record size is determined by the largest variant. With `{$R+}`, accessing a variant field checks the tag value.
 
 Variant records map directly to WASM linear memory — the variants simply share the same byte offsets. No special WASM support is required.
 
@@ -255,7 +365,7 @@ If field names conflict, the innermost (rightmost) record takes precedence.
 
 ## Built-in Functions and Procedures
 
-The following functions and procedures are compiler intrinsics. They are always available without any `uses` clause or import.
+These functions and procedures are compiler intrinsics, always available without requiring a `uses` clause or import.
 
 ### Arithmetic Functions
 
@@ -268,7 +378,7 @@ The following functions and procedures are compiler intrinsics. They are always 
 
 | Function | Signature | Description |
 |---|---|---|
-| `ord(x)` | `char → integer` or `boolean → integer` or `enum → integer` | Ordinal value. `ord(false) = 0`, `ord(true) = 1`. |
+| `ord(x)` | `char → integer` or `boolean → integer` or `enumerated → integer` | Ordinal value. `ord(false) = 0`, `ord(true) = 1`. |
 | `chr(x)` | `integer → char` | Character with ordinal value `x`. |
 | `succ(x)` | `ordinal → ordinal` | Successor value. |
 | `pred(x)` | `ordinal → ordinal` | Predecessor value. |
@@ -392,7 +502,7 @@ Any WASI-compatible runtime (wasmtime, wasmer, wasm3, browser polyfill) provides
 
 ### Linear Memory Layout
 
-Compiled programs use the following layout in WASM linear memory:
+Compiled programs use this layout in WASM linear memory:
 
 ```
 [ nil guard | data segment | heap -> ....... <- stack ]
@@ -464,8 +574,8 @@ Local directives may appear anywhere in the source. They take effect from the po
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
 | `{$ALIGN n}` | — | 1 | Record field alignment in bytes (1, 2, 4, or 8). |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
-| `{$EXPORT name}` | — | — | Export the following procedure, function, or variable as `name` in the WASM module's export table. |
-| `{$IMPORT 'module' name}` | — | — | Declare the following procedure or function as a WASM import from `module` with import name `name`. |
+| `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |
+| `{$IMPORT 'module' name}` | — | — | Declare the next procedure or function as a WASM import from `module` with import name `name`. |
 | `{$EXTLITERALS ON/OFF}` | — | OFF | Enable C-style numeric literal prefixes: `0x` (hex), `0o` (octal), `0b` (binary). |
 
 ### Examples
@@ -510,7 +620,7 @@ end.
 
 The `{$INCLUDE}` directive is resolved by the **host application**, not by the compiler. Before invoking the compiler, the embedding library (or fpc during bootstrap) scans the source for `{$I}` / `{$INCLUDE}` directives and replaces them with the contents of the referenced files. The compiler receives a single, fully-expanded source stream on stdin.
 
-This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust and Zig embedding libraries provide a utility function to perform include expansion. If the host cannot locate an included file, it reports an error before compilation begins.
+This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust and Zig embedding libraries provide a utility function to perform include expansion. If the host cannot locate an included file, the embedding library reports an error before compilation begins.
 
 During fpc bootstrap, the compiler runs as a native executable and fpc handles `{$I}` natively.
 
@@ -518,9 +628,43 @@ During fpc bootstrap, the compiler runs as a native executable and fpc handles `
 
 All directives are processed in source order during the single pass. Global directives are validated before parsing begins. Local directives modify compiler state immediately — there is no deferred application.
 
+## Compiler Diagnostics
+
+The compiler writes all diagnostics to stderr (fd 2). Every line is prefixed with a tag so the host application can parse output mechanically without relying on free-text heuristics.
+
+### Message Tags
+
+| Tag | Meaning | Format |
+|---|---|---|
+| `Error:` | Compilation error (fatal) | `Error: line:col: message` |
+| `Warning:` | Non-fatal diagnostic | `Warning: line:col: message` |
+| `Info:` | Informational | `Info: message` |
+| `Debug:` | Verbose debugging output | `Debug: message` |
+| `Progress:` | Compilation progress | `Progress: done/total [message]` |
+
+Phase 1 uses at minimum `Error:`. Additional tags may be introduced as the compiler matures.
+
+### Progress Tag
+
+The `Progress:` tag uses a fixed `done/total` format (both integers) so the host can compute a percentage or display a progress bar. An optional human-readable message may follow the ratio:
+
+```
+Progress: 0/123
+Progress: 20/100 Analyzing...
+Progress: 100/100 Done
+```
+
+### Error Format
+
+On the first compilation error, the compiler writes a single tagged diagnostic and halts via `proc_exit(1)`. No error recovery or multi-error reporting:
+
+```
+Error: 42:10: Undeclared identifier 'foo'
+```
+
 ## Extensions
 
-The following extensions go beyond Standard Pascaline and are unique to Compact Pascal.
+These extensions go beyond ISO 7185 and ISO 10206 and are unique to Compact Pascal.
 
 ### Standalone Methods
 
@@ -546,7 +690,7 @@ There are two types of method receivers:
 - **Value receiver** — the receiver is passed by value (copied). Intended for small, immutable types. The method cannot modify the caller's copy.
 
   ```pascal
-  procedure Area for r: TRect: integer;
+  function Area for r: TRect: integer;
   begin
     Area := r.Width * r.Height;
   end;
@@ -576,6 +720,31 @@ end;
 
 When calling a pointer-receiver method on a value, the compiler automatically takes the address. When calling a value-receiver method on a pointer, the compiler automatically dereferences.
 
+### Structured Return Types
+
+Standard Pascal restricts function return types to simple types and pointers. Compact Pascal lifts this restriction: functions may return any type, including arrays and records. This follows the precedent set by C, where functions can return structs by value.
+
+```pascal
+type TPoint = record
+  X, Y: integer;
+end;
+
+function Origin: TPoint;
+begin
+  Origin.X := 0;
+  Origin.Y := 0;
+end;
+
+function MakeRow: array[1..5] of integer;
+var i: integer;
+begin
+  for i := 1 to 5 do
+    MakeRow[i] := i * 10;
+end;
+```
+
+The compiler implements this via a hidden pointer parameter: the caller allocates space for the return value in its own stack frame and passes a pointer as a hidden first argument. The callee writes the result through that pointer. This is the same calling convention used by C compilers for struct returns.
+
 ### Interfaces
 
 An interface defines a set of method signatures that a concrete type can satisfy. Interfaces use structural typing — there is no explicit inheritance.
@@ -591,7 +760,7 @@ type IPet = interface
 end;
 ```
 
-The compiler adds a hidden `Self` field to store a pointer to the concrete data when the interface is instantiated.
+The compiler adds a hidden `Self` field to store a pointer to the concrete data for each interface value.
 
 #### Implementing Interfaces
 
@@ -660,6 +829,272 @@ This is an inline vtable. A future optimization could use shared interface table
 - **Type assertions** — test at runtime whether an interface value holds a specific concrete type.
 - **Type switches** — branch on the concrete type behind an interface value.
 
-### Macros (Future)
+---
 
-Rust-like macros as a language extension. Since `write`/`writeln`/`read`/`readln` are now compiler intrinsics, macros are free to serve other purposes — e.g., custom formatting, domain-specific syntax, or compile-time code generation. Specification to be written.
+## Appendix A: Formal Grammar
+
+The grammar is specified in Extended Backus-Naur Form (EBNF). The notation follows ISO 14977: `{ ... }` means zero or more repetitions, `[ ... ]` means optional, `( ... )` groups alternatives, `|` separates alternatives, and `=` defines a production. Terminal symbols are quoted. Comments are enclosed in `(* ... *)`.
+
+### Program Structure
+
+```ebnf
+Program          = 'program' Identifier ';' Block '.' .
+
+Block            = { DeclSection } StatementPart .
+
+DeclSection      = ConstDeclPart
+                 | TypeDeclPart
+                 | VarDeclPart
+                 | ProcOrFuncDecl
+                 | ImplementBlock .
+
+ConstDeclPart    = 'const' ConstDef { ConstDef } .
+ConstDef         = Identifier '=' Expression ';'
+                 | Identifier ':' Type '=' Expression ';' .
+                 (* second form is a typed constant / initialized variable *)
+
+TypeDeclPart     = 'type' TypeDef { TypeDef } .
+TypeDef          = Identifier '=' Type ';' .
+
+VarDeclPart      = 'var' VarDecl { VarDecl } .
+VarDecl          = IdentList ':' Type ';' .
+IdentList        = Identifier { ',' Identifier } .
+```
+
+### Types
+
+```ebnf
+Type             = SimpleType
+                 | StringType
+                 | ArrayType
+                 | RecordType
+                 | SetType
+                 | PointerType
+                 | InterfaceType
+                 | ProceduralType .
+
+SimpleType       = TypeIdentifier
+                 | EnumType
+                 | SubrangeType .
+
+TypeIdentifier   = Identifier .
+                 (* built-in: integer, boolean, char, real,
+                    byte, shortint, word, longint *)
+StringType       = 'string' [ '[' Constant ']' ] .
+                 (* 'string' alone is 'string[255]' *)
+
+EnumType         = '(' IdentList ')' .
+SubrangeType     = Constant '..' Constant
+                 | Identifier '(' Constant '..' Constant ')' .
+                 (* second form: typed subrange with explicit base type,
+                    e.g. Day(Mon..Fri). Base type is verified semantically. *)
+
+ArrayType        = 'array' '[' SubrangeType { ',' SubrangeType } ']' 'of' Type .
+
+RecordType       = 'record' FieldList [ VariantPart ] 'end' .
+FieldList        = [ FieldDecl { ';' FieldDecl } ] .
+FieldDecl        = IdentList ':' Type .
+VariantPart      = 'case' [ Identifier ':' ] TypeIdentifier 'of'
+                   Variant { ';' Variant } .
+Variant          = CaseLabelList ':' '(' FieldList ')' .
+
+SetType          = 'set' 'of' SimpleType .
+                 (* base type must have at most 256 ordinal values *)
+
+PointerType      = '^' TypeIdentifier .
+
+InterfaceType    = 'interface' InterfaceFieldList 'end' .
+InterfaceFieldList = [ InterfaceField { ';' InterfaceField } ] .
+InterfaceField   = Identifier ':' ProceduralType .
+
+ProceduralType   = 'procedure' [ FormalParams ]
+                 | 'function' [ FormalParams ] ':' Type .
+```
+
+### Procedures, Functions, and Methods
+
+```ebnf
+ProcOrFuncDecl   = ProcDecl | FuncDecl .
+
+ProcDecl         = 'procedure' Identifier
+                   ( 'for' Receiver [ FormalParams ] ';' Block ';'
+                   | [ FormalParams ] ';' ( Block ';' | 'forward' ';' | 'external' ';' ) ) .
+FuncDecl         = 'function'  Identifier
+                   ( 'for' Receiver [ FormalParams ] ':' Type ';' Block ';'
+                   | [ FormalParams ] ':' Type ';' ( Block ';' | 'forward' ';' | 'external' ';' ) ) .
+                 (* 'for' Receiver marks a standalone method — see Extensions.
+                    'external' is used with {$IMPORT} for WASM host-provided procedures.
+                    Return type is any Type, including arrays and records —
+                    see Structured Return Types under Extensions. *)
+
+FormalParams     = '(' FormalParam { ';' FormalParam } ')' .
+FormalParam      = [ 'var' | 'const' ] IdentList ':' Type .
+
+Receiver         = Identifier ':' Type .
+                 (* Type may be a value type or '^TypeIdentifier' for pointer receiver *)
+```
+
+### Implement Blocks (Extension)
+
+```ebnf
+ImplementBlock   = 'implement' TypeIdentifier 'for' TypeIdentifier ';'
+                   { ImplMethod }
+                   'end' ';' .
+
+ImplMethod       = ImplProcDecl | ImplFuncDecl .
+ImplProcDecl     = 'procedure' Identifier [ FormalParams ] ';' Block ';' .
+ImplFuncDecl     = 'function'  Identifier [ FormalParams ] ':' Type ';' Block ';' .
+                 (* Self is implicitly available inside the block *)
+```
+
+### Statements
+
+```ebnf
+StatementPart    = CompoundStmt .
+CompoundStmt     = 'begin' StmtSequence 'end' .
+StmtSequence     = Statement { ';' Statement } .
+
+Statement        = [ AssignOrCallStmt
+                   | CompoundStmt
+                   | IfStmt
+                   | WhileStmt
+                   | ForStmt
+                   | RepeatStmt
+                   | CaseStmt
+                   | WithStmt ] .
+
+AssignOrCallStmt = Designator [ ':=' Expression ] .
+                 (* a bare Designator is a procedure call; includes method calls
+                    via dot notation: Designator '.' Identifier '(' ... ')' *)
+
+IfStmt           = 'if' Expression 'then' Statement [ 'else' Statement ] .
+                 (* Dangling else: 'else' binds to the nearest unmatched 'if'. *)
+WhileStmt        = 'while' Expression 'do' Statement .
+ForStmt          = 'for' Identifier ':=' Expression ( 'to' | 'downto' ) Expression
+                   'do' Statement .
+RepeatStmt       = 'repeat' StmtSequence 'until' Expression .
+CaseStmt         = 'case' Expression 'of' CaseElement { ';' CaseElement } [ ';' ]
+                   [ 'else' StmtSequence ] 'end' .
+CaseElement      = CaseLabelList ':' Statement .
+CaseLabelList    = CaseLabel { ',' CaseLabel } .
+CaseLabel        = Constant [ '..' Constant ] .
+
+WithStmt         = 'with' Designator { ',' Designator } 'do' Statement .
+```
+
+### Expressions
+
+```ebnf
+Expression       = SimpleExpr [ RelOp SimpleExpr ] .
+RelOp            = '=' | '<>' | '<' | '>' | '<=' | '>=' | 'in' .
+
+SimpleExpr       = [ '+' | '-' ] Term { AddOp Term } .
+AddOp            = '+' | '-' | 'or' | 'or' 'else' .
+
+Term             = Factor { MulOp Factor } .
+MulOp            = '*' | 'div' | 'mod' | 'and' | 'and' 'then' .
+
+Factor           = INTEGER_LITERAL
+                 | REAL_LITERAL
+                 | STRING_LITERAL
+                 | 'true' | 'false'
+                 | 'nil'
+                 | Designator
+                 | '(' Expression ')'
+                 | 'not' Factor
+                 | SetConstructor .
+
+SetConstructor   = '[' [ SetElement { ',' SetElement } ] ']' .
+SetElement       = Expression [ '..' Expression ] .
+
+Designator       = Identifier { Selector } .
+Selector         = '.' Identifier             (* field access or method call *)
+                 | '[' ExprList ']'            (* array indexing *)
+                 | '(' [ ExprList ] ')'        (* function call or type cast —
+                                                  resolved semantically *)
+                 | '^' .                       (* pointer dereference *)
+
+ExprList         = Expression { ',' Expression } .
+```
+
+### Constants
+
+```ebnf
+Constant         = [ '+' | '-' ] ( INTEGER_LITERAL | REAL_LITERAL | Identifier )
+                 | STRING_LITERAL
+                 | RUNE_LITERAL .
+                 (* RUNE_LITERAL = '#u' followed by hex digits, e.g. #u2261.
+                    STRING_LITERAL includes #n char constants folded by the scanner. *)
+```
+
+### Lexical Elements
+
+```ebnf
+Identifier       = LETTER { LETTER | DIGIT | '_' } .
+INTEGER_LITERAL  = DIGIT { DIGIT }
+                 | '$' HEX_DIGIT { HEX_DIGIT } .
+                 (* with {$EXTLITERALS ON}, the following forms are also accepted:
+                    '0x' HEX_DIGIT { HEX_DIGIT }
+                    '0o' OCTAL_DIGIT { OCTAL_DIGIT }
+                    '0b' BIN_DIGIT { BIN_DIGIT }
+                    where OCTAL_DIGIT = '0'..'7' and BIN_DIGIT = '0' | '1' *)
+REAL_LITERAL     = DIGIT { DIGIT } '.' DIGIT { DIGIT } [ 'e' [ '+' | '-' ] DIGIT { DIGIT } ] .
+STRING_LITERAL   = StringElement { StringElement } .
+StringElement    = "'" { CHARACTER | "''" } "'"
+                 | '#' INTEGER_LITERAL .
+                 (* "''" is an escaped single quote within a string *)
+                 (* '#' followed by 0..255 produces a byte; values > 255 are an error *)
+RUNE_LITERAL     = '#u' HEX_DIGIT { HEX_DIGIT } .
+                 (* produces a rune value — a 32-bit Unicode codepoint *)
+
+LETTER           = 'a'..'z' | 'A'..'Z' .
+DIGIT            = '0'..'9' .
+HEX_DIGIT        = '0'..'9' | 'a'..'f' | 'A'..'F' .
+CHARACTER        = (* any byte; UTF-8 sequences are preserved verbatim *) .
+```
+
+### Reserved Words
+
+```
+and       array     begin     case      const
+div       do        downto    else      end
+external  for       forward   function  if
+implement in        interface mod       nil
+not       of        or        procedure program
+record    repeat    set       string    then
+to        type      until     var       while
+with
+```
+
+The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.
+
+`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
+
+### Operator Precedence (Highest to Lowest)
+
+| Precedence | Operators | Associativity |
+|---|---|---|
+| 1 (highest) | `not`, unary `+`/`-` | Right |
+| 2 | `*`, `div`, `mod`, `and`, `and then` | Left |
+| 3 | `+`, `-`, `or`, `or else` | Left |
+| 4 (lowest) | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
+
+### Comments and Compiler Directives
+
+```ebnf
+Comment          = '{' { CHARACTER } '}'
+                 | '(*' { CHARACTER } '*)' .
+
+Directive        = '{' '$' DirectiveName [ DirectiveValue ] '}'
+                 | '(*' '$' DirectiveName [ DirectiveValue ] '*)' .
+
+DirectiveName    = LETTER { LETTER } .
+DirectiveValue   = SwitchValue | Identifier | INTEGER_LITERAL | STRING_LITERAL .
+SwitchValue      = '+' | '-' .
+```
+
+Comments do not nest. They may appear anywhere whitespace is permitted. A `$` immediately after the opening brace marks a compiler directive. Switch directives use `+`/`-` (e.g., `{$R+}`). See [Compiler Directives](#compiler-directives) for the full directive list.
+
+---
+
+Copyright 2026 Jon Mayo. This document is licensed under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
