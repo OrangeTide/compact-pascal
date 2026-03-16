@@ -50,6 +50,18 @@ Compact Pascal is not a conforming implementation of any existing Pascal standar
 - **Portability.** Target WASM 1.0 MVP only. No WASM extensions, no platform-specific features, no assumptions beyond what the MVP specification guarantees.
 - **Interoperability.** Host applications (Rust, Zig, browser JavaScript) must be able to call into Pascal code and provide functions that Pascal code can call, through WASM's import/export mechanism.
 
+### Non-Goals
+
+Compact Pascal deliberately excludes several features common in modern languages. These are not oversights — each was evaluated against the project's constraints and found to conflict with single-pass compilation, the WASM 1.0 target, the self-hosting requirement, or the language's minimalist character.
+
+- **Traits and bounded generics.** Rust-style trait bounds require either monomorphization (multi-pass, code explosion) or dictionary passing (complex calling convention). Both conflict with single-pass compilation. The Go-style structural interfaces planned for a later phase provide polymorphism without generics machinery.
+- **Monomorphized generics.** Template instantiation is fundamentally multi-pass — the generic body must be stored and replayed for each type argument. This conflicts with the single-pass architecture and grows WASM output.
+- **First-class closures.** Nested procedures already capture enclosing variables, but making them first-class values requires heap-allocated closure environments and fat-pointer dispatch (`call_indirect` + environment pointer). Procedural types (function pointers without capture) are supported; full closures are deferred.
+- **Reflection and RTTI.** Runtime type descriptors cause code size explosion and complicate single-pass emission. In the embedding model, the host already has full visibility into guest memory and can provide serialization via FFI.
+- **Async/await.** Requires continuation-passing transformation or stackful coroutines, neither of which is compatible with WASM 1.0 or single-pass compilation. The host manages concurrency; guest code runs synchronously.
+
+Some features are compatible with the architecture and may be interesting as future extensions or student projects: exceptions (implementable via WASM `block`/`br` chains), operator overloading (symbol table dispatch), and pattern matching (destructuring `case` statements).
+
 ## Architecture
 
 ### Overview
@@ -250,7 +262,7 @@ The fpc dependency is only needed for the initial bootstrap or if the snapshot b
 
 ### Compiler Tutorial
 
-The Phase 1 compiler serves as the subject of a step-by-step compiler construction tutorial (`doc/compact-pascal-tutorial.md`). The tutorial walks through implementing the compiler from scratch — lexer, expressions, statements, procedures, nested scopes, strings, and structured types — with each chapter producing a working compiler that handles a progressively larger subset of the language. Phase 1's architecture (single-pass recursive descent, WASM stack machine target, stack-only allocation) is well-suited for teaching: the concepts map directly without the distractions of register allocation, garbage collection, or multi-pass optimization. The tutorial targets both students learning Compact Pascal and students studying compiler construction.
+The Phase 1 compiler serves as the subject of a step-by-step compiler construction tutorial (`doc/compact-pascal-tutorial.md`). The tutorial walks through implementing the compiler from scratch — lexer, expressions, statements, procedures, nested scopes, strings, and structured types — with each chapter producing a working compiler that handles a progressively larger subset of the language. Phase 1's architecture (single-pass recursive descent, WASM stack machine target, stack-only allocation) is well-suited for teaching: the concepts map directly without the distractions of register allocation, garbage collection, or multi-pass optimization. The tutorial targets both students learning Compact Pascal and students studying compiler construction. An afterword suggests next steps for readers who want to extend the compiler: exceptions, operator overloading, pattern matching, closures, and generics — explaining what each feature requires and why it was excluded from the core language.
 
 ## Project Layout
 
