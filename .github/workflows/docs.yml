@@ -43,8 +43,10 @@ jobs:
           cp pages/index.html _site/
           cp build/compact-pascal-wp.pdf _site/
           cp build/compact-pascal-ref.pdf _site/
+          cp build/compact-pascal-tutorial.pdf _site/
           cp doc/compact-pascal-wp.md _site/
           cp doc/compact-pascal-ref.md _site/
+          cp doc/compact-pascal-tutorial.md _site/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
