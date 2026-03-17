@@ -1,23 +1,36 @@
 ---
-title: |
-  Building a Pascal Compiler\
-  That Targets WebAssembly
-subtitle: A Step-by-Step Guide Using Compact Pascal
-author: Jon Mayo
-date: 2026
 header-includes:
   - |
     ```{=typst}
-    #set page(margin: (top: 2.5cm, bottom: 2.5cm, left: 2.5cm, right: 2.5cm))
+    #set page(margin: (top: 2cm, bottom: 2cm, left: 2cm, right: 2cm))
     #set par(leading: 0.7em)
     #set block(spacing: 1.2em)
-    #align(center, image("doc/compact-pascal-cover.svg", width: 40%))
-    #v(1em)
-    #align(center, text(weight: "bold", size: 12pt, fill: rgb("#cc0000"))[DRAFT — This document is a work in progress and subject to change.])
+    ```
+include-before:
+  - |
+    ```{=typst}
+    #page(header: none, footer: none)[
+      #v(1fr)
+      #align(center)[
+        #text(size: 18pt, weight: "bold")[Writing a Pascal-to-WASM Compiler]
+        #v(0.5em)
+        #text(size: 12pt, style: "italic")[A Compact Pascal Tutorial]
+        #v(1.5em)
+        #text(size: 11pt)[Jon Mayo]
+        #v(0.3em)
+        #text(size: 11pt)[2026]
+      ]
+      #v(1fr)
+    ]
+    #page(header: none, footer: none)[
+      #v(1fr)
+      #align(center, image("doc/compact-pascal-cover.svg", width: 50%))
+      #v(1em)
+      #align(center, text(weight: "bold", size: 12pt, fill: rgb("#cc0000"))[DRAFT — This document is a work in progress and subject to change.])
+      #v(1fr)
+    ]
     ```
 ---
-
-\newpage
 
 ## Preface
 
