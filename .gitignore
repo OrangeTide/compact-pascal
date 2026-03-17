@@ -4,3 +4,8 @@ target/
 zig-out/
 zig-cache/
 .zig-cache/
+
+# fpc compiler artifacts
+compiler/cpas
+compiler/*.o
+compiler/*.ppu
