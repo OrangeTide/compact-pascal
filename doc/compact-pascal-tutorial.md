@@ -1,4 +1,7 @@
 ---
+title: "Writing a Pascal-to-WASM Compiler"
+author: Jon Mayo
+date: 2026
 header-includes:
   - |
     ```{=typst}
