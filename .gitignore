@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+pages/compact-pascal-*.html
 target/
 zig-out/
 zig-cache/
