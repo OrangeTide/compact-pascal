@@ -11,7 +11,7 @@ program cpas;
 { ---- Constants ---- }
 
 const
-  Version = '0.1.0';
+  Version = '0.1';
 
   { Section buffer sizes }
   SmallBufMax = 4095;    { 4 KB for small sections }
@@ -21,6 +21,7 @@ const
   { Symbol table limits }
   MaxSyms    = 1024;
   MaxScopes  = 32;
+  MaxFuncs   = 256;   { max user-defined functions }
 
   { WASM section IDs }
   SecIdType   = 1;
@@ -246,6 +247,16 @@ type
     typeidx: longint;
   end;
 
+  { Defined function record — tracks each compiled function body }
+  TFuncEntry = record
+    name: string[63];     { function name for WASM name section }
+    typeidx: longint;     { index into wasmTypes }
+    bodyStart: longint;   { offset into funcBodies buffer }
+    bodyLen: longint;     { length of body bytes in funcBodies }
+    nlocals: longint;     { number of extra locals (beyond params) }
+    nparams: longint;     { number of WASM parameters }
+  end;
+
 { ---- Global Variables ---- }
 
 var
@@ -287,6 +298,11 @@ var
 
   { Function tracking }
   numDefinedFuncs: longint;
+  funcs: array[0..MaxFuncs-1] of TFuncEntry;
+  numFuncs: longint;  { entries in funcs[] (excludes _start and __write_int) }
+
+  { Accumulated function bodies (user procs compiled during parsing) }
+  funcBodies: TCodeBuf;
 
   { Data segment }
   dataPos: longint;  { next free address in linear memory data segment }
@@ -330,6 +346,7 @@ var
 procedure ParseBlock; forward;
 procedure ParseStatement; forward;
 procedure ParseExpression(minPrec: longint); forward;
+procedure ParseProcDecl; forward;
 
 { ---- Error handling ---- }
 
@@ -1097,15 +1114,11 @@ end;
 
 function EnsureProcExit: longint;
 begin
-  if idxProcExit < 0 then
-    idxProcExit := AddImport('wasi_snapshot_preview1', 'proc_exit', TypeI32Void);
   EnsureProcExit := idxProcExit;
 end;
 
 function EnsureFdWrite: longint;
 begin
-  if idxFdWrite < 0 then
-    idxFdWrite := AddImport('wasi_snapshot_preview1', 'fd_write', TypeI32x4I32);
   EnsureFdWrite := idxFdWrite;
 end;
 
@@ -1346,18 +1359,17 @@ end;
 
 function EnsureWriteInt: longint;
 {** Ensure the __write_int helper function is registered.
-  Returns its WASM function index. The actual function body is
-  emitted at module assembly time by BuildWriteIntHelper. }
+  Returns its WASM function index.
+  __write_int is pre-allocated at slot 1 (right after _start)
+  so its index is stable: numImports + 1. User-defined functions
+  go into slots 2+. }
 begin
-  if idxIntToStr < 0 then begin
+  if not needsWriteInt then begin
     EnsureIntToStr;
     EnsureIOBuffers;
-    EnsureFdWrite;
     needsWriteInt := true;
-    idxIntToStr := numImports + numDefinedFuncs;
-    numDefinedFuncs := numDefinedFuncs + 1;
   end;
-  EnsureWriteInt := idxIntToStr;
+  EnsureWriteInt := numImports + 1; { slot 1 = __write_int }
 end;
 
 procedure EmitWriteInt;
@@ -1412,14 +1424,34 @@ begin
           NextToken;
         end;
         skVar: begin
-          { Load variable from stack frame }
-          { global.get $sp, i32.const offset, i32.add, i32.load }
-          EmitOp(OpGlobalGet);
-          EmitULEB128(startCode, 0);  { global 0 = $sp }
-          EmitI32Const(syms[sym].offset);
-          EmitOp(OpI32Add);
-          EmitI32Load(2, 0);
+          if syms[sym].offset < 0 then begin
+            { WASM local (parameter or function return value) }
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, -(syms[sym].offset + 1));
+          end else begin
+            { Load variable from stack frame }
+            EmitOp(OpGlobalGet);
+            EmitULEB128(startCode, 0);  { global 0 = $sp }
+            EmitI32Const(syms[sym].offset);
+            EmitOp(OpI32Add);
+            EmitI32Load(2, 0);
+          end;
           NextToken;
+        end;
+        skFunc: begin
+          { Function call in expression }
+          NextToken;
+          if tokKind = tkLParen then begin
+            NextToken;
+            while tokKind <> tkRParen do begin
+              ParseExpression(PrecNone);
+              if tokKind = tkComma then
+                NextToken;
+            end;
+            Expect(tkRParen);
+          end;
+          EmitCall(syms[sym].offset);
+          { Return value is left on WASM stack }
         end;
       else
         Error('cannot use ' + tokStr + ' in expression');
@@ -1625,17 +1657,45 @@ begin
       if (syms[sym].kind = skVar) and (tokKind = tkAssign) then begin
         { Assignment: var := expr }
         NextToken;
-        { Compute address }
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);  { $sp }
-        EmitI32Const(syms[sym].offset);
-        EmitOp(OpI32Add);
-        { Evaluate expression }
+        if syms[sym].offset < 0 then begin
+          { WASM local (parameter or function return value) }
+          ParseExpression(PrecNone);
+          EmitOp(OpLocalSet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+        end else begin
+          { Stack frame variable }
+          EmitOp(OpGlobalGet);
+          EmitULEB128(startCode, 0);  { $sp }
+          EmitI32Const(syms[sym].offset);
+          EmitOp(OpI32Add);
+          ParseExpression(PrecNone);
+          EmitI32Store(2, 0);
+        end;
+      end
+      else if (syms[sym].kind = skFunc) and (tokKind = tkAssign) then begin
+        { Function return value assignment: FuncName := expr }
+        NextToken;
         ParseExpression(PrecNone);
-        { Store }
-        EmitI32Store(2, 0);
+        { Store in the hidden WASM local at index nparams }
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, funcs[syms[sym].size].nparams);
+      end
+      else if (syms[sym].kind = skProc) or (syms[sym].kind = skFunc) then begin
+        { Procedure/function call (discard result for functions) }
+        if tokKind = tkLParen then begin
+          NextToken;
+          while tokKind <> tkRParen do begin
+            ParseExpression(PrecNone);
+            if tokKind = tkComma then
+              NextToken;
+          end;
+          Expect(tkRParen);
+        end;
+        EmitCall(syms[sym].offset);
+        if syms[sym].kind = skFunc then
+          EmitOp(OpDrop); { discard return value }
       end else
-        Error('assignment expected after ' + name);
+        Error('assignment or procedure call expected after ' + name);
     end;
 
     tkHalt: begin
@@ -1862,6 +1922,12 @@ begin
       EmitOp(OpEnd);
     end;
 
+    tkExit: begin
+      NextToken;
+      { ;; WAT: return }
+      EmitOp(OpReturn);
+    end;
+
     { Empty statement (e.g. before 'end' or after last ';') }
     tkEnd, tkSemicolon, tkUntil, tkElse: begin
       { no-op }
@@ -1871,6 +1937,263 @@ begin
   end;
 end;
 
+procedure ParseProcDecl;
+{** Parse a procedure or function declaration.
+  procedure Name;          -- parameterless procedure
+  procedure Name(params);  -- procedure with parameters (milestone 5b)
+  function Name: Type;     -- parameterless function
+  function Name(params): Type;  -- function with parameters (milestone 5b)
+
+  The body is compiled into startCode (which is empty during declarations),
+  then copied to funcBodies. startCode is reset afterward. }
+var
+  isFunc: boolean;
+  procName: string;
+  sym: longint;
+  slot: longint;
+  savedFrameSize: longint;
+  savedStartCode: TCodeBuf;
+  bodyStart: longint;
+  funcIdx: longint;
+  retTyp: longint;
+  retTypSym: longint;
+  nlocals: longint;
+  nparams: longint;
+  typIdx: longint;
+  paramNames: array[0..15] of string[63];
+  paramTypes: array[0..15] of longint;
+  paramIsVar: array[0..15] of boolean;
+  np: longint;
+  i: longint;
+  groupStart, groupEnd: longint;
+  isVarParam: boolean;
+  pTypeName: string;
+  pTypSym: longint;
+  wasmParams: array[0..15] of byte;
+  wasmResults: array[0..0] of byte;
+  nWasmResults: longint;
+begin
+  isFunc := tokKind = tkFunction;
+  NextToken; { consume 'procedure' or 'function' }
+
+  if tokKind <> tkIdent then
+    Expected('identifier');
+  procName := tokStr;
+  NextToken;
+
+  { Parse parameters }
+  np := 0;
+  if tokKind = tkLParen then begin
+    NextToken;
+    while tokKind <> tkRParen do begin
+      { Check for var parameter }
+      isVarParam := false;
+      if tokKind = tkVar then begin
+        isVarParam := true;
+        NextToken;
+      end;
+
+      { Collect parameter names in this group }
+      groupStart := np;
+      repeat
+        if np > 15 then
+          Error('too many parameters');
+        if tokKind <> tkIdent then
+          Expected('parameter name');
+        paramNames[np] := tokStr;
+        paramIsVar[np] := isVarParam;
+        np := np + 1;
+        NextToken;
+        if tokKind = tkComma then
+          NextToken
+        else
+          break;
+      until false;
+      groupEnd := np;
+
+      Expect(tkColon);
+
+      { Parse parameter type }
+      if tokKind <> tkIdent then
+        Expected('type name');
+      pTypeName := tokStr;
+      pTypSym := LookupSym(pTypeName);
+      if pTypSym < 0 then
+        Error('unknown type: ' + pTypeName);
+      if syms[pTypSym].kind <> skType then
+        Error(pTypeName + ' is not a type');
+      NextToken;
+
+      { Apply type to all names in this group }
+      for i := groupStart to groupEnd - 1 do
+        paramTypes[i] := syms[pTypSym].typ;
+
+      if tokKind = tkSemicolon then
+        NextToken;
+    end;
+    Expect(tkRParen);
+  end;
+
+  { Parse return type for functions }
+  retTyp := tyNone;
+  if isFunc then begin
+    Expect(tkColon);
+    if tokKind <> tkIdent then
+      Expected('return type');
+    retTypSym := LookupSym(tokStr);
+    if retTypSym < 0 then
+      Error('unknown type: ' + tokStr);
+    if syms[retTypSym].kind <> skType then
+      Error(tokStr + ' is not a type');
+    retTyp := syms[retTypSym].typ;
+    NextToken;
+  end;
+
+  Expect(tkSemicolon);
+
+  { Check for forward declaration }
+  if tokKind = tkForward then begin
+    NextToken;
+    Expect(tkSemicolon);
+    { Allocate function slot now, body comes later }
+    slot := numDefinedFuncs;
+    numDefinedFuncs := numDefinedFuncs + 1;
+
+    { Build WASM type signature }
+    for i := 0 to np - 1 do
+      wasmParams[i] := WasmI32;
+    nWasmResults := 0;
+    if isFunc then begin
+      wasmResults[0] := WasmI32;
+      nWasmResults := 1;
+    end;
+    typIdx := AddWasmType(np, wasmParams, nWasmResults, wasmResults);
+
+    { Register in funcs table with empty body }
+    if numFuncs >= MaxFuncs then
+      Error('too many functions');
+    funcs[numFuncs].name := procName;
+    funcs[numFuncs].typeidx := typIdx;
+    funcs[numFuncs].bodyStart := -1; { marker: forward-declared, no body yet }
+    funcs[numFuncs].bodyLen := 0;
+    funcs[numFuncs].nlocals := 0;
+    funcs[numFuncs].nparams := np;
+
+    { Add symbol }
+    if isFunc then
+      sym := AddSym(procName, skFunc, retTyp)
+    else
+      sym := AddSym(procName, skProc, tyNone);
+    syms[sym].offset := numImports + slot; { absolute function index }
+    syms[sym].size := numFuncs; { store funcs[] index for later body fill }
+
+    numFuncs := numFuncs + 1;
+    exit;
+  end;
+
+  { Check if this is a body for a forward-declared procedure }
+  sym := LookupSym(procName);
+  if (sym >= 0) and ((syms[sym].kind = skProc) or (syms[sym].kind = skFunc)) then begin
+    { Forward body - reuse existing slot }
+    slot := syms[sym].offset - numImports;
+    funcIdx := syms[sym].size; { funcs[] index }
+    if funcs[funcIdx].bodyStart >= 0 then
+      Error('duplicate definition of ' + procName);
+  end else begin
+    { New declaration - allocate slot }
+    slot := numDefinedFuncs;
+    numDefinedFuncs := numDefinedFuncs + 1;
+
+    { Build WASM type signature }
+    for i := 0 to np - 1 do
+      wasmParams[i] := WasmI32;
+    nWasmResults := 0;
+    if isFunc then begin
+      wasmResults[0] := WasmI32;
+      nWasmResults := 1;
+    end;
+    typIdx := AddWasmType(np, wasmParams, nWasmResults, wasmResults);
+
+    { Register in funcs table }
+    if numFuncs >= MaxFuncs then
+      Error('too many functions');
+    funcIdx := numFuncs;
+    funcs[numFuncs].name := procName;
+    funcs[numFuncs].typeidx := typIdx;
+    funcs[numFuncs].bodyStart := 0;
+    funcs[numFuncs].bodyLen := 0;
+    funcs[numFuncs].nlocals := 0;
+    funcs[numFuncs].nparams := np;
+    numFuncs := numFuncs + 1;
+
+    { Add symbol }
+    if isFunc then
+      sym := AddSym(procName, skFunc, retTyp)
+    else
+      sym := AddSym(procName, skProc, tyNone);
+    syms[sym].offset := numImports + slot;
+    syms[sym].size := funcIdx;
+  end;
+
+  { Save and reset code emission state }
+  savedStartCode := startCode;
+  CodeBufInit(startCode);
+  savedFrameSize := curFrameSize;
+  curFrameSize := 0;
+
+  { Enter scope for procedure body }
+  EnterScope;
+
+  { Add parameters as locals (WASM params are local 0..np-1) }
+  nparams := np;
+  for i := 0 to np - 1 do begin
+    sym := AddSym(paramNames[i], skVar, paramTypes[i]);
+    { Parameters are WASM locals, not stack frame vars.
+      Use negative offset as a flag: -(local_index + 1) }
+    syms[sym].offset := -(i + 1);
+    syms[sym].size := 4;
+  end;
+
+  { For functions, the return value is a hidden WASM local at index np.
+    Assignment to the function name is handled specially in ParseStatement
+    by checking skFunc, so no skVar symbol is needed here. }
+
+  { Parse the block (declarations + begin...end) }
+  ParseBlock;
+
+  { For functions, push return value onto WASM stack }
+  if isFunc then begin
+    EmitOp(OpLocalGet);
+    EmitULEB128(startCode, np); { local index for return value }
+  end;
+
+  Expect(tkSemicolon);
+
+  { Leave scope }
+  LeaveScope;
+
+  { Count extra locals: frame vars (as stack frame) don't need WASM locals,
+    but function return values do. For now, function return value = 1 extra local. }
+  nlocals := 0;
+  if isFunc then
+    nlocals := 1;
+
+  { Copy compiled body to funcBodies }
+  bodyStart := funcBodies.len;
+  for i := 0 to startCode.len - 1 do
+    CodeBufEmit(funcBodies, startCode.data[i]);
+
+  { Update func entry }
+  funcs[funcIdx].bodyStart := bodyStart;
+  funcs[funcIdx].bodyLen := startCode.len;
+  funcs[funcIdx].nlocals := nlocals;
+  funcs[funcIdx].nparams := nparams;
+
+  { Restore code emission state }
+  startCode := savedStartCode;
+  curFrameSize := savedFrameSize;
+end;
+
 procedure ParseBlock;
 var
   savedFrameSize: longint;
@@ -1878,7 +2201,8 @@ begin
   savedFrameSize := curFrameSize;
 
   { Declarations }
-  while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType) do begin
+  while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
+        or (tokKind = tkProcedure) or (tokKind = tkFunction) do begin
     case tokKind of
       tkConst: begin
         NextToken;
@@ -1891,6 +2215,9 @@ begin
       tkType: begin
         NextToken;
         Error('type declarations not yet implemented');
+      end;
+      tkProcedure, tkFunction: begin
+        ParseProcDecl;
       end;
     end;
   end;
@@ -2021,14 +2348,17 @@ begin
 end;
 
 procedure AssembleFunctionSection;
+var i: longint;
 begin
   SmallBufInit(secFunc);
   SmallBufEmit(secFunc, numDefinedFuncs);
-  { _start uses type void -> void }
+  { Slot 0: _start uses type void -> void }
   SmallEmitULEB128(secFunc, TypeVoidVoid);
-  { __write_int uses type i32 -> void }
-  if needsWriteInt then
-    SmallEmitULEB128(secFunc, TypeI32Void);
+  { Slot 1: __write_int uses type i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32Void);
+  { Slots 2+: User-defined functions }
+  for i := 0 to numFuncs - 1 do
+    SmallEmitULEB128(secFunc, funcs[i].typeidx);
 end;
 
 procedure AssembleMemorySection;
@@ -2234,33 +2564,58 @@ begin
 end;
 
 procedure AssembleCodeSectionFixed;
-{** Assemble the code section with _start and optional helper functions. }
+{** Assemble the code section.
+  Function order: slot 0 = _start, slot 1 = __write_int, slots 2+ = user funcs. }
 var
   bodyLen: longint;
+  i, j: longint;
 begin
   CodeBufInit(secCode);
 
   { Function count }
   EmitULEB128(secCode, numDefinedFuncs);
 
-  { _start body: 0 locals + code + end }
+  { Slot 0: _start body — 0 locals + code + end }
   bodyLen := 1 + startCode.len + 1;
   EmitULEB128(secCode, bodyLen);
   CodeBufEmit(secCode, 0);  { 0 local declarations }
   CopyBufToCode(startCode);
   CodeBufEmit(secCode, OpEnd);
 
-  { __write_int body: 2 extra locals (pos, neg_flag) + code + end }
+  { Slot 1: __write_int body — always present (empty stub if unused) }
   if needsWriteInt then begin
     BuildWriteIntHelper;
     (* locals: 1 declaration block = 2 locals of type i32 *)
     bodyLen := 1 + 1 + 1 + helperCode.len + 1;
-    (* = local_decl_count(1) + count(2) + type(i32) + code + end *)
     EmitULEB128(secCode, bodyLen);
     CodeBufEmit(secCode, 1);      { 1 local declaration block }
     CodeBufEmit(secCode, 2);      { 2 locals }
     CodeBufEmit(secCode, WasmI32); { of type i32 }
     CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);     { body size: 1 (locals) + 1 (unreachable) + 1 (end) }
+    CodeBufEmit(secCode, 0);     { 0 local declarations }
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 2+: User-defined function bodies }
+  for i := 0 to numFuncs - 1 do begin
+    if funcs[i].nlocals > 0 then begin
+      bodyLen := 1 + 1 + 1 + funcs[i].bodyLen + 1;
+      EmitULEB128(secCode, bodyLen);
+      CodeBufEmit(secCode, 1);               { 1 local decl block }
+      CodeBufEmit(secCode, funcs[i].nlocals); { N locals }
+      CodeBufEmit(secCode, WasmI32);          { of type i32 }
+    end else begin
+      bodyLen := 1 + funcs[i].bodyLen + 1;
+      EmitULEB128(secCode, bodyLen);
+      CodeBufEmit(secCode, 0);  { 0 local declarations }
+    end;
+    for j := 0 to funcs[i].bodyLen - 1 do
+      CodeBufEmit(secCode, funcBodies.data[funcs[i].bodyStart + j]);
     CodeBufEmit(secCode, OpEnd);
   end;
 end;
@@ -2298,8 +2653,7 @@ begin
 
   { Pre-register all WASM types before assembling sections }
   TypeVoidVoid;
-  if needsWriteInt then
-    TypeI32Void;
+  TypeI32Void;  { always needed for __write_int stub and proc_exit }
 
   { Assemble all sections }
   AssembleTypeSection;
@@ -2354,6 +2708,7 @@ begin
   CodeBufInit(outBuf);
   CodeBufInit(startCode);
   CodeBufInit(helperCode);
+  CodeBufInit(funcBodies);
 
   srcLine := 1;
   srcCol := 0;
@@ -2363,7 +2718,8 @@ begin
 
   numWasmTypes := 0;
   numImports := 0;
-  numDefinedFuncs := 1; { _start }
+  numDefinedFuncs := 2; { slot 0 = _start, slot 1 = __write_int (reserved) }
+  numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
   curFrameSize := 0;
@@ -2371,9 +2727,6 @@ begin
 
   dataPos := 4;  { skip nil guard }
 
-  idxProcExit := -1;
-  idxFdWrite := -1;
-  idxFdRead := -1;
   idxIntToStr := -1;
   addrIovec := -1;
   addrNwritten := -1;
@@ -2384,6 +2737,12 @@ begin
   needsFdRead := false;
   needsProcExit := false;
   needsWriteInt := false;
+
+  { Pre-register all WASI imports so numImports is stable before
+    any code emission. WASI hosts always provide these functions. }
+  idxFdWrite := AddImport('wasi_snapshot_preview1', 'fd_write', TypeI32x4I32);
+  idxFdRead := -1;  { TODO: register when read/readln is implemented }
+  idxProcExit := AddImport('wasi_snapshot_preview1', 'proc_exit', TypeI32Void);
 
   InitSymTable;
   AddBuiltins;
