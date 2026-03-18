@@ -1,12 +1,20 @@
-.PHONY: pdf clean
+.PHONY: pdf html clean
 
 PANDOC := pandoc
 TYPST := typst
 
 PDF_DIR := build
+PAGES_DIR := pages
+
 WP_PDF := $(PDF_DIR)/compact-pascal-wp.pdf
 REF_PDF := $(PDF_DIR)/compact-pascal-ref.pdf
 TUTORIAL_PDF := $(PDF_DIR)/compact-pascal-tutorial.pdf
+
+WP_HTML := $(PAGES_DIR)/compact-pascal-wp.html
+REF_HTML := $(PAGES_DIR)/compact-pascal-ref.html
+TUTORIAL_HTML := $(PAGES_DIR)/compact-pascal-tutorial.html
+
+TEMPLATE := doc/article-template.html
 
 PANDOC_FLAGS := --pdf-engine=$(TYPST) \
 	--table-of-contents \
@@ -26,7 +34,16 @@ BOOK_FLAGS := $(PANDOC_FLAGS) \
 	-V margin-left=2cm \
 	-V margin-right=2cm
 
+HTML_FLAGS := --template=$(TEMPLATE) \
+	--table-of-contents \
+	--number-sections \
+	--standalone \
+	--resource-path=doc \
+	--shift-heading-level-by=0
+
 pdf: $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF)
+
+html: $(WP_HTML) $(REF_HTML) $(TUTORIAL_HTML)
 
 $(PDF_DIR):
 	mkdir -p $(PDF_DIR)
@@ -39,6 +56,25 @@ $(REF_PDF): doc/compact-pascal-ref.md | $(PDF_DIR)
 
 $(TUTORIAL_PDF): doc/compact-pascal-tutorial.md | $(PDF_DIR)
 	$(PANDOC) $< -o $@ $(BOOK_FLAGS)
+
+$(WP_HTML): doc/compact-pascal-wp.md $(TEMPLATE) | $(PAGES_DIR)
+	$(PANDOC) $< -o $@ $(HTML_FLAGS) \
+		-V category="White Paper" \
+		-V pdf-file="compact-pascal-wp.pdf" \
+		-V md-file="compact-pascal-wp.md"
+
+$(REF_HTML): doc/compact-pascal-ref.md $(TEMPLATE) | $(PAGES_DIR)
+	$(PANDOC) $< -o $@ $(HTML_FLAGS) \
+		-V category="Language Reference" \
+		-V pdf-file="compact-pascal-ref.pdf" \
+		-V md-file="compact-pascal-ref.md"
+
+$(TUTORIAL_HTML): doc/compact-pascal-tutorial.md $(TEMPLATE) | $(PAGES_DIR)
+	$(PANDOC) $< -o $@ $(HTML_FLAGS) \
+		--top-level-division=chapter \
+		-V category="Tutorial" \
+		-V pdf-file="compact-pascal-tutorial.pdf" \
+		-V md-file="compact-pascal-tutorial.md"
 
 clean:
 	rm -rf $(PDF_DIR)

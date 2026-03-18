@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>$title$ — Compact Pascal</title>
+  <link rel="stylesheet" href="article.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@400;600&family=IBM+Plex+Mono:wght@400&display=swap">
+</head>
+<body>
+  <nav class="top-bar">
+    <a href="index.html" class="back-link">&larr; Compact Pascal</a>
+    <div class="format-links">
+$if(pdf-file)$
+      <a href="$pdf-file$" class="pdf-link">PDF</a>
+$endif$
+$if(md-file)$
+      <a href="$md-file$" class="md-link">Markdown</a>
+$endif$
+    </div>
+  </nav>
+  <article class="doc-article">
+    <header>
+      <span class="doc-category">$if(category)$$category$$else$Documentation$endif$</span>
+      <h1>$title$</h1>
+      <div class="doc-meta">
+$if(date)$
+        <time>$date$</time>
+$endif$
+$if(author)$
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:0.8rem;color:#8b7a68">$author$</span>
+$endif$
+        <span class="doc-draft">DRAFT</span>
+      </div>
+    </header>
+    <div class="doc-body">
+$body$
+    </div>
+  </article>
+$if(toc)$
+  <input type="checkbox" class="toc-state" id="toc-toggle">
+  <label for="toc-toggle" class="toc-btn">Contents</label>
+  <label for="toc-toggle" class="toc-close">&times;</label>
+  <div class="toc-panel">
+    <div class="toc-header"><span>Contents</span></div>
+    <nav class="toc-list" role="doc-toc">
+$toc$
+    </nav>
+  </div>
+  <script>
+    (function() {
+      var toc = document.querySelector('.toc-list');
+      var cb = document.getElementById('toc-toggle');
+      if (toc && cb) toc.addEventListener('click', function() { cb.checked = false; });
+    })();
+  </script>
+$endif$
+  <footer class="bottom-bar">
+    <span class="site-title"><a href="index.html">Compact Pascal</a> &mdash; <a href="https://github.com/OrangeTide/compact-pascal">GitHub</a></span>
+  </footer>
+  <script>
+    (function() {
+      var body = document.querySelector('.doc-body');
+      if (!body) return;
+      body.addEventListener('click', function(e) {
+        var el = e.target;
+        if (el.tagName !== 'IMG' && el.tagName !== 'svg' && !el.closest('svg')) return;
+        if (el.closest('a') || el.closest('pre')) return;
+        var src = el.closest('svg') || el;
+        var overlay = document.createElement('div');
+        overlay.className = 'img-lightbox';
+        var close = document.createElement('button');
+        close.className = 'close-btn';
+        close.textContent = '\u00d7';
+        var clone = src.cloneNode(true);
+        clone.style.cssText = '';
+        clone.removeAttribute('width');
+        clone.removeAttribute('height');
+        overlay.appendChild(clone);
+        document.body.appendChild(close);
+        document.body.appendChild(overlay);
+        function dismiss() {
+          overlay.remove();
+          close.remove();
+        }
+        close.addEventListener('click', dismiss);
+        overlay.addEventListener('click', function(ev) {
+          if (ev.target === overlay) dismiss();
+        });
+        document.addEventListener('keydown', function esc(ev) {
+          if (ev.key === 'Escape') { dismiss(); document.removeEventListener('keydown', esc); }
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
