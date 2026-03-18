@@ -34,16 +34,21 @@ jobs:
           curl -fsSL https://github.com/typst/typst/releases/latest/download/typst-x86_64-unknown-linux-musl.tar.xz \
             | tar -xJ --strip-components=1 -C /usr/local/bin/
 
-      - name: Build PDFs
-        run: make pdf
+      - name: Build PDFs and HTML
+        run: make pdf html
 
       - name: Assemble site
         run: |
           mkdir -p _site
           cp pages/index.html _site/
+          cp pages/article.css _site/
+          cp -r pages/logo _site/
           cp build/compact-pascal-wp.pdf _site/
           cp build/compact-pascal-ref.pdf _site/
           cp build/compact-pascal-tutorial.pdf _site/
+          cp pages/compact-pascal-wp.html _site/
+          cp pages/compact-pascal-ref.html _site/
+          cp pages/compact-pascal-tutorial.html _site/
           cp doc/compact-pascal-wp.md _site/
           cp doc/compact-pascal-ref.md _site/
           cp doc/compact-pascal-tutorial.md _site/
