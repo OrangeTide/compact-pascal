@@ -229,6 +229,7 @@ type
     level: longint;  { nesting level }
     offset: longint; { stack offset for vars, value for consts, func index for procs }
     size: longint;   { byte size of var }
+    isVarParam: boolean; { true if this is a var parameter (passed by reference) }
   end;
 
   { WASM type signature }
@@ -255,6 +256,7 @@ type
     bodyLen: longint;     { length of body bytes in funcBodies }
     nlocals: longint;     { number of extra locals (beyond params) }
     nparams: longint;     { number of WASM parameters }
+    varParams: array[0..15] of boolean; { which params are var (by-reference) }
   end;
 
 { ---- Global Variables ---- }
@@ -469,6 +471,18 @@ begin
         UnreadCh(ch);
         ch := '(';
         (* ch is now '(' and NextToken will handle it *)
+      end;
+    end
+    else if (not atEof) and (ch = '/') then begin
+      ReadCh;
+      if ch = '/' then begin
+        SkipLineComment;
+        done := false;
+      end else begin
+        { Not a comment - push back the char after / }
+        UnreadCh(ch);
+        ch := '/';
+        { ch is now '/' and NextToken will handle it as division }
       end;
     end;
   end;
@@ -836,15 +850,7 @@ begin
     '+': begin tokKind := tkPlus; ReadCh; end;
     '-': begin tokKind := tkMinus; ReadCh; end;
     '*': begin tokKind := tkStar; ReadCh; end;
-    '/': begin
-      ReadCh;
-      if ch = '/' then begin
-        SkipLineComment;
-        NextToken; { recurse to get next real token }
-        exit;
-      end else
-        tokKind := tkSlash;
-    end;
+    '/': begin tokKind := tkSlash; ReadCh; end;
     '=': begin tokKind := tkEqual; ReadCh; end;
     '<': begin
       ReadCh;
@@ -1256,6 +1262,7 @@ begin
   syms[numSyms].level := curNestLevel;
   syms[numSyms].offset := 0;
   syms[numSyms].size := 0;
+  syms[numSyms].isVarParam := false;
   AddSym := numSyms;
   numSyms := numSyms + 1;
 end;
@@ -1390,6 +1397,8 @@ var
   prec: longint;
   op: longint;
   sym: longint;
+  argIdx: longint;
+  argSym: longint;
 begin
   { Prefix }
   case tokKind of
@@ -1428,6 +1437,10 @@ begin
             { WASM local (parameter or function return value) }
             EmitOp(OpLocalGet);
             EmitULEB128(startCode, -(syms[sym].offset + 1));
+            if syms[sym].isVarParam then begin
+              { ;; WAT: i32.load  — dereference var param pointer }
+              EmitI32Load(2, 0);
+            end;
           end else begin
             { Load variable from stack frame }
             EmitOp(OpGlobalGet);
@@ -1443,8 +1456,35 @@ begin
           NextToken;
           if tokKind = tkLParen then begin
             NextToken;
+            argIdx := 0;
             while tokKind <> tkRParen do begin
-              ParseExpression(PrecNone);
+              if funcs[syms[sym].size].varParams[argIdx] then begin
+                { var param: pass address of the variable }
+                if tokKind <> tkIdent then
+                  Error('variable expected for var parameter');
+                argSym := LookupSym(tokStr);
+                if argSym < 0 then
+                  Error('undeclared identifier: ' + tokStr);
+                if syms[argSym].kind <> skVar then
+                  Error('variable expected for var parameter');
+                if syms[argSym].isVarParam then begin
+                  { Already a pointer — pass it through }
+                  EmitOp(OpLocalGet);
+                  EmitULEB128(startCode, -(syms[argSym].offset + 1));
+                end
+                else if syms[argSym].offset < 0 then
+                  Error('cannot pass value parameter by reference')
+                else begin
+                  { Address = $sp + offset }
+                  EmitOp(OpGlobalGet);
+                  EmitULEB128(startCode, 0);
+                  EmitI32Const(syms[argSym].offset);
+                  EmitOp(OpI32Add);
+                end;
+                NextToken;
+              end else
+                ParseExpression(PrecNone);
+              argIdx := argIdx + 1;
               if tokKind = tkComma then
                 NextToken;
             end;
@@ -1635,6 +1675,8 @@ procedure ParseStatement;
 var
   sym: longint;
   name: string;
+  argIdx: longint;
+  argSym: longint;
 begin
   case tokKind of
     tkBegin: begin
@@ -1657,8 +1699,17 @@ begin
       if (syms[sym].kind = skVar) and (tokKind = tkAssign) then begin
         { Assignment: var := expr }
         NextToken;
-        if syms[sym].offset < 0 then begin
-          { WASM local (parameter or function return value) }
+        if syms[sym].isVarParam then begin
+          { ;; WAT: local.get <param>  — get pointer }
+          { ;;      <expr>              — value to store }
+          { ;;      i32.store           — store through pointer }
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          ParseExpression(PrecNone);
+          EmitI32Store(2, 0);
+        end
+        else if syms[sym].offset < 0 then begin
+          { WASM local (value parameter or function return value) }
           ParseExpression(PrecNone);
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
@@ -1684,8 +1735,36 @@ begin
         { Procedure/function call (discard result for functions) }
         if tokKind = tkLParen then begin
           NextToken;
+          argIdx := 0;
           while tokKind <> tkRParen do begin
-            ParseExpression(PrecNone);
+            if funcs[syms[sym].size].varParams[argIdx] then begin
+              { var param: pass address of the variable }
+              if tokKind <> tkIdent then
+                Error('variable expected for var parameter');
+              argSym := LookupSym(tokStr);
+              if argSym < 0 then
+                Error('undeclared identifier: ' + tokStr);
+              if syms[argSym].kind <> skVar then
+                Error('variable expected for var parameter');
+              if syms[argSym].isVarParam then begin
+                { Already a pointer — pass it through }
+                EmitOp(OpLocalGet);
+                EmitULEB128(startCode, -(syms[argSym].offset + 1));
+              end
+              else if syms[argSym].offset < 0 then
+                { Can't take address of a value parameter }
+                Error('cannot pass value parameter by reference')
+              else begin
+                { Address = $sp + offset }
+                EmitOp(OpGlobalGet);
+                EmitULEB128(startCode, 0);
+                EmitI32Const(syms[argSym].offset);
+                EmitOp(OpI32Add);
+              end;
+              NextToken;
+            end else
+              ParseExpression(PrecNone);
+            argIdx := argIdx + 1;
             if tokKind = tkComma then
               NextToken;
           end;
@@ -2078,6 +2157,8 @@ begin
     funcs[numFuncs].bodyLen := 0;
     funcs[numFuncs].nlocals := 0;
     funcs[numFuncs].nparams := np;
+    for i := 0 to np - 1 do
+      funcs[numFuncs].varParams[i] := paramIsVar[i];
 
     { Add symbol }
     if isFunc then
@@ -2152,6 +2233,7 @@ begin
       Use negative offset as a flag: -(local_index + 1) }
     syms[sym].offset := -(i + 1);
     syms[sym].size := 4;
+    syms[sym].isVarParam := paramIsVar[i];
   end;
 
   { For functions, the return value is a hidden WASM local at index np.
@@ -2188,6 +2270,8 @@ begin
   funcs[funcIdx].bodyLen := startCode.len;
   funcs[funcIdx].nlocals := nlocals;
   funcs[funcIdx].nparams := nparams;
+  for i := 0 to np - 1 do
+    funcs[funcIdx].varParams[i] := paramIsVar[i];
 
   { Restore code emission state }
   startCode := savedStartCode;
@@ -2753,6 +2837,11 @@ begin
 
   { Read first character }
   ReadCh;
+
+  { Skip shebang line (e.g., #!/usr/bin/env cpas) }
+  if (not atEof) and (ch = '#') then
+    while (not atEof) and (ch <> #10) do
+      ReadCh;
 
   { Read first token }
   NextToken;
