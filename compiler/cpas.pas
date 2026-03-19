@@ -229,7 +229,8 @@ type
     level: longint;  { nesting level }
     offset: longint; { stack offset for vars, value for consts, func index for procs }
     size: longint;   { byte size of var }
-    isVarParam: boolean; { true if this is a var parameter (passed by reference) }
+    isVarParam: boolean;   { true if this is a var parameter (passed by reference) }
+    isConstParam: boolean; { true if this is a const parameter (read-only) }
   end;
 
   { WASM type signature }
@@ -246,6 +247,12 @@ type
     fieldname: string[63];
     kind: byte;
     typeidx: longint;
+  end;
+
+  (* User export record — tracks EXPORT directives *)
+  TExportEntry = record
+    name: string[63];
+    funcIdx: longint;  { absolute WASM function index }
   end;
 
   { Defined function record — tracks each compiled function body }
@@ -337,6 +344,17 @@ var
   needsProcExit: boolean;
   needsWriteInt: boolean;
 
+  { Pending compiler directives }
+  hasPendingImport: boolean;
+  pendingImportMod: string[63];
+  pendingImportName: string[63];
+  hasPendingExport: boolean;
+  pendingExportName: string[63];
+
+  (* User-defined exports from EXPORT directives *)
+  userExports: array[0..31] of TExportEntry;
+  numUserExports: longint;
+
   { Output file for binary WASM }
   outFile: file;
 
@@ -419,11 +437,77 @@ begin
 end;
 
 procedure SkipBraceComment;
+(* Parse brace comment or compiler directive (IMPORT, EXPORT).
+   On entry, ch = opening brace. On exit, ch = character after closing brace. *)
+var
+  directive: string;
+  modName: string[63];
+  impName: string[63];
+  expName: string[63];
+  i: longint;
 begin
-  (* brace comment or directive - for now skip all *)
-  ReadCh; (* skip opening brace *)
-  while (not atEof) and (ch <> '}') do
-    ReadCh;
+  ReadCh; { skip opening brace }
+  if ch = '$' then begin
+    { Potential compiler directive }
+    ReadCh; { skip $ }
+    directive := '';
+    while (not atEof) and (ch <> '}') and (ch > ' ') do begin
+      if ch in ['a'..'z'] then
+        directive := directive + chr(ord(ch) - 32)
+      else
+        directive := directive + ch;
+      ReadCh;
+    end;
+    if directive = 'IMPORT' then begin
+      (* IMPORT 'module' name *)
+      while (not atEof) and (ch <= ' ') and (ch <> '}') do
+        ReadCh;
+      if ch <> '''' then
+        Error('{$IMPORT} expects quoted module name');
+      ReadCh; { skip opening quote }
+      modName := '';
+      while (not atEof) and (ch <> '''') do begin
+        modName := modName + ch;
+        ReadCh;
+      end;
+      if ch <> '''' then
+        Error('unterminated module name in {$IMPORT}');
+      ReadCh; { skip closing quote }
+      while (not atEof) and (ch <= ' ') and (ch <> '}') do
+        ReadCh;
+      impName := '';
+      while (not atEof) and (ch <> '}') and (ch > ' ') do begin
+        impName := impName + ch;
+        ReadCh;
+      end;
+      if length(impName) = 0 then
+        Error('{$IMPORT} expects import name after module');
+      hasPendingImport := true;
+      pendingImportMod := modName;
+      pendingImportName := impName;
+    end else if directive = 'EXPORT' then begin
+      (* EXPORT name *)
+      while (not atEof) and (ch <= ' ') and (ch <> '}') do
+        ReadCh;
+      expName := '';
+      while (not atEof) and (ch <> '}') and (ch > ' ') do begin
+        expName := expName + ch;
+        ReadCh;
+      end;
+      if length(expName) = 0 then
+        Error('{$EXPORT} expects export name');
+      hasPendingExport := true;
+      pendingExportName := expName;
+    end else begin
+      { Unknown directive - skip rest as comment }
+      while (not atEof) and (ch <> '}') do
+        ReadCh;
+    end;
+  end else begin
+    { Regular brace comment }
+    while (not atEof) and (ch <> '}') do
+      ReadCh;
+  end;
   if ch = '}' then
     ReadCh
   else
@@ -1263,6 +1347,7 @@ begin
   syms[numSyms].offset := 0;
   syms[numSyms].size := 0;
   syms[numSyms].isVarParam := false;
+  syms[numSyms].isConstParam := false;
   AddSym := numSyms;
   numSyms := numSyms + 1;
 end;
@@ -1698,6 +1783,8 @@ begin
       NextToken;
       if (syms[sym].kind = skVar) and (tokKind = tkAssign) then begin
         { Assignment: var := expr }
+        if syms[sym].isConstParam then
+          Error('cannot assign to const parameter ''' + name + '''');
         NextToken;
         if syms[sym].isVarParam then begin
           { ;; WAT: local.get <param>  — get pointer }
@@ -2029,6 +2116,7 @@ var
   isFunc: boolean;
   procName: string;
   sym: longint;
+  procSym: longint;
   slot: longint;
   savedFrameSize: longint;
   savedStartCode: TCodeBuf;
@@ -2042,10 +2130,12 @@ var
   paramNames: array[0..15] of string[63];
   paramTypes: array[0..15] of longint;
   paramIsVar: array[0..15] of boolean;
+  paramIsConst: array[0..15] of boolean;
   np: longint;
   i: longint;
   groupStart, groupEnd: longint;
   isVarParam: boolean;
+  isConstParam: boolean;
   pTypeName: string;
   pTypSym: longint;
   wasmParams: array[0..15] of byte;
@@ -2065,10 +2155,14 @@ begin
   if tokKind = tkLParen then begin
     NextToken;
     while tokKind <> tkRParen do begin
-      { Check for var parameter }
+      { Check for var or const parameter }
       isVarParam := false;
+      isConstParam := false;
       if tokKind = tkVar then begin
         isVarParam := true;
+        NextToken;
+      end else if tokKind = tkConst then begin
+        isConstParam := true;
         NextToken;
       end;
 
@@ -2081,6 +2175,7 @@ begin
           Expected('parameter name');
         paramNames[np] := tokStr;
         paramIsVar[np] := isVarParam;
+        paramIsConst[np] := isConstParam;
         np := np + 1;
         NextToken;
         if tokKind = tkComma then
@@ -2130,8 +2225,55 @@ begin
 
   Expect(tkSemicolon);
 
+  { Check for external declaration (WASM import) }
+  if tokKind = tkExternal then begin
+    NextToken;
+    Expect(tkSemicolon);
+    if not hasPendingImport then
+      Error('external requires preceding {$IMPORT} directive');
+
+    { Build WASM type signature for the import }
+    for i := 0 to np - 1 do
+      wasmParams[i] := WasmI32;
+    nWasmResults := 0;
+    if isFunc then begin
+      wasmResults[0] := WasmI32;
+      nWasmResults := 1;
+    end;
+    typIdx := AddWasmType(np, wasmParams, nWasmResults, wasmResults);
+
+    { Register as WASM import }
+    funcIdx := AddImport(pendingImportMod, pendingImportName, typIdx);
+
+    { Register in funcs table so call sites can look up param metadata }
+    if numFuncs >= MaxFuncs then
+      Error('too many functions');
+    funcs[numFuncs].name := procName;
+    funcs[numFuncs].typeidx := typIdx;
+    funcs[numFuncs].bodyStart := -2; { marker: external import }
+    funcs[numFuncs].bodyLen := 0;
+    funcs[numFuncs].nlocals := 0;
+    funcs[numFuncs].nparams := np;
+    for i := 0 to np - 1 do
+      funcs[numFuncs].varParams[i] := false; { imports have no var params }
+
+    { Add symbol - offset is the import index (absolute function index) }
+    if isFunc then
+      sym := AddSym(procName, skFunc, retTyp)
+    else
+      sym := AddSym(procName, skProc, tyNone);
+    syms[sym].offset := funcIdx; { import index = absolute function index }
+    syms[sym].size := numFuncs; { funcs[] index for param metadata }
+
+    numFuncs := numFuncs + 1;
+    hasPendingImport := false;
+    exit;
+  end;
+
   { Check for forward declaration }
   if tokKind = tkForward then begin
+    if hasPendingExport then
+      Error('{$EXPORT} cannot be used with forward declarations');
     NextToken;
     Expect(tkSemicolon);
     { Allocate function slot now, body comes later }
@@ -2176,6 +2318,7 @@ begin
   sym := LookupSym(procName);
   if (sym >= 0) and ((syms[sym].kind = skProc) or (syms[sym].kind = skFunc)) then begin
     { Forward body - reuse existing slot }
+    procSym := sym;
     slot := syms[sym].offset - numImports;
     funcIdx := syms[sym].size; { funcs[] index }
     if funcs[funcIdx].bodyStart >= 0 then
@@ -2214,6 +2357,7 @@ begin
       sym := AddSym(procName, skProc, tyNone);
     syms[sym].offset := numImports + slot;
     syms[sym].size := funcIdx;
+    procSym := sym;
   end;
 
   { Save and reset code emission state }
@@ -2234,6 +2378,7 @@ begin
     syms[sym].offset := -(i + 1);
     syms[sym].size := 4;
     syms[sym].isVarParam := paramIsVar[i];
+    syms[sym].isConstParam := paramIsConst[i];
   end;
 
   { For functions, the return value is a hidden WASM local at index np.
@@ -2272,6 +2417,16 @@ begin
   funcs[funcIdx].nparams := nparams;
   for i := 0 to np - 1 do
     funcs[funcIdx].varParams[i] := paramIsVar[i];
+
+  (* Record user export if EXPORT was pending *)
+  if hasPendingExport then begin
+    if numUserExports >= 32 then
+      Error('too many exports');
+    userExports[numUserExports].name := pendingExportName;
+    userExports[numUserExports].funcIdx := syms[procSym].offset;
+    numUserExports := numUserExports + 1;
+    hasPendingExport := false;
+  end;
 
   { Restore code emission state }
   startCode := savedStartCode;
@@ -2440,9 +2595,10 @@ begin
   SmallEmitULEB128(secFunc, TypeVoidVoid);
   { Slot 1: __write_int uses type i32 -> void (always present) }
   SmallEmitULEB128(secFunc, TypeI32Void);
-  { Slots 2+: User-defined functions }
+  { Slots 2+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
-    SmallEmitULEB128(secFunc, funcs[i].typeidx);
+    if funcs[i].bodyStart <> -2 then
+      SmallEmitULEB128(secFunc, funcs[i].typeidx);
 end;
 
 procedure AssembleMemorySection;
@@ -2470,9 +2626,11 @@ begin
 end;
 
 procedure AssembleExportSection;
+var
+  i, j: longint;
 begin
   SmallBufInit(secExport);
-  SmallBufEmit(secExport, 2);  { 2 exports }
+  SmallEmitULEB128(secExport, 2 + numUserExports); { _start + memory + user exports }
   { Export "_start" }
   SmallBufEmit(secExport, 6);  { name length }
   SmallBufEmit(secExport, ord('_'));
@@ -2493,6 +2651,14 @@ begin
   SmallBufEmit(secExport, ord('y'));
   SmallBufEmit(secExport, ExportMem);
   SmallBufEmit(secExport, 0);  { memory index 0 }
+  (* User-defined exports from EXPORT directives *)
+  for i := 0 to numUserExports - 1 do begin
+    SmallEmitULEB128(secExport, length(userExports[i].name));
+    for j := 1 to length(userExports[i].name) do
+      SmallBufEmit(secExport, ord(userExports[i].name[j]));
+    SmallBufEmit(secExport, ExportFunc);
+    SmallEmitULEB128(secExport, userExports[i].funcIdx);
+  end;
 end;
 
 procedure EmitHelper(op: byte);
@@ -2685,8 +2851,9 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 2+: User-defined function bodies }
+  { Slots 2+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
+    if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
       bodyLen := 1 + 1 + 1 + funcs[i].bodyLen + 1;
       EmitULEB128(secCode, bodyLen);
@@ -2821,6 +2988,10 @@ begin
   needsFdRead := false;
   needsProcExit := false;
   needsWriteInt := false;
+
+  hasPendingImport := false;
+  hasPendingExport := false;
+  numUserExports := 0;
 
   { Pre-register all WASI imports so numImports is stable before
     any code emission. WASI hosts always provide these functions. }
