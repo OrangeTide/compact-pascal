@@ -9,6 +9,9 @@ PAGES_DIR := pages
 WP_PDF := $(PDF_DIR)/compact-pascal-wp.pdf
 REF_PDF := $(PDF_DIR)/compact-pascal-ref.pdf
 TUTORIAL_PDF := $(PDF_DIR)/compact-pascal-tutorial.pdf
+TN_SRC := $(wildcard doc/compact-pascal-tn*.md)
+TN_PDF := $(patsubst doc/%.md,$(PDF_DIR)/%.pdf,$(TN_SRC))
+TN_HTML := $(patsubst doc/%.md,$(PAGES_DIR)/%.html,$(TN_SRC))
 
 WP_HTML := $(PAGES_DIR)/compact-pascal-wp.html
 REF_HTML := $(PAGES_DIR)/compact-pascal-ref.html
@@ -41,9 +44,9 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 	--resource-path=doc \
 	--shift-heading-level-by=0
 
-pdf: $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF)
+pdf: $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF) $(TN_PDF)
 
-html: $(WP_HTML) $(REF_HTML) $(TUTORIAL_HTML)
+html: $(WP_HTML) $(REF_HTML) $(TUTORIAL_HTML) $(TN_HTML)
 
 $(PDF_DIR):
 	mkdir -p $(PDF_DIR)
@@ -56,6 +59,9 @@ $(REF_PDF): doc/compact-pascal-ref.md | $(PDF_DIR)
 
 $(TUTORIAL_PDF): doc/compact-pascal-tutorial.md | $(PDF_DIR)
 	$(PANDOC) $< -o $@ $(BOOK_FLAGS)
+
+$(PDF_DIR)/compact-pascal-tn%.pdf: doc/compact-pascal-tn%.md | $(PDF_DIR)
+	$(PANDOC) $< -o $@ $(PANDOC_FLAGS)
 
 $(WP_HTML): doc/compact-pascal-wp.md $(TEMPLATE) | $(PAGES_DIR)
 	$(PANDOC) $< -o $@ $(HTML_FLAGS) \
@@ -75,6 +81,12 @@ $(TUTORIAL_HTML): doc/compact-pascal-tutorial.md $(TEMPLATE) | $(PAGES_DIR)
 		-V category="Tutorial" \
 		-V pdf-file="compact-pascal-tutorial.pdf" \
 		-V md-file="compact-pascal-tutorial.md"
+
+$(PAGES_DIR)/compact-pascal-tn%.html: doc/compact-pascal-tn%.md $(TEMPLATE) | $(PAGES_DIR)
+	$(PANDOC) $< -o $@ $(HTML_FLAGS) \
+		-V category="Technical Note" \
+		-V pdf-file="$(notdir $(patsubst %.html,%.pdf,$@))" \
+		-V md-file="$(notdir $<)"
 
 clean:
 	rm -rf $(PDF_DIR)
