@@ -418,7 +418,11 @@ BlockWrite(outFile, outBuf.data, outBuf.len);
 Close(outFile);
 ```
 
-This is a bootstrap-only concern. When the compiler runs as WASM (self-hosted), it writes to stdout via WASI `fd_write` directly.
+`BlockRead` and `BlockWrite` are the byte-level I/O primitives throughout the compiler — for reading source from stdin and writing binary WASM to stdout. They are standard Pascal, available in fpc's System unit on every platform (Linux, macOS, Windows) with no `uses` clause needed.
+
+When the compiler compiles itself, it needs to emit code for these same `BlockRead`/`BlockWrite` calls. Here the self-hosted compiler takes a shortcut: it treats `file` as a `longint` — just an integer file descriptor. `Assign`, `Reset`, and `Rewrite` become no-ops. `BlockRead` and `BlockWrite` become thin wrappers around WASI `fd_read` and `fd_write`, building a single iovec in scratch memory and making the WASI call.
+
+This works because the compiler's I/O is extremely narrow. It never opens files by name or accesses the filesystem — source comes from stdin (fd 0), binary output goes to stdout (fd 1), and error diagnostics go to stderr (fd 2). These three file descriptors are pre-opened by the WASI runtime. The `Assign`/`Reset`/`Rewrite` calls in the bootstrap source become dead code under self-hosting, and the `file` variables are just integer constants 0, 1, and 2. A general-purpose Pascal compiler could not get away with this, but a compiler that reads one stream and writes another can.
 
 ### Minimal Parser
 
