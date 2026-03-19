@@ -52,6 +52,10 @@ jobs:
           cp doc/compact-pascal-wp.md _site/
           cp doc/compact-pascal-ref.md _site/
           cp doc/compact-pascal-tutorial.md _site/
+          # Technical Notes (wildcard picks up all current and future TNs)
+          cp build/compact-pascal-tn*.pdf _site/ 2>/dev/null || true
+          cp pages/compact-pascal-tn*.html _site/ 2>/dev/null || true
+          cp doc/compact-pascal-tn*.md _site/ 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
