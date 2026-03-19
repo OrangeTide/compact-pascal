@@ -319,6 +319,7 @@ var
   { Code generation state }
   curFrameSize: longint;   { current function's stack frame size }
   curNestLevel: longint;   { current nesting level }
+  displayLocalIdx: longint; { WASM local index for saved display, -1 if none }
 
   { Special function indices (resolved during compilation) }
   idxProcExit: longint;    { proc_exit import index, -1 if not imported }
@@ -1373,6 +1374,22 @@ begin
   syms[idx].offset := 2147483647;
 end;
 
+{ ---- Display and frame access ---- }
+
+procedure EmitFramePtr(level: longint);
+(* Emit code to push the frame pointer for the given nesting level.
+   If level = curNestLevel, use $sp (global 0).
+   Otherwise, use display[level] (global level+1) for upvalue access. *)
+begin
+  if level = curNestLevel then begin
+    EmitOp(OpGlobalGet);
+    EmitULEB128(startCode, 0);  { $sp }
+  end else begin
+    EmitOp(OpGlobalGet);
+    EmitULEB128(startCode, level + 1);  { display[level] = global level+1 }
+  end;
+end;
+
 { ---- Write/Writeln code generation ---- }
 
 procedure EmitWriteString(addr, len: longint);
@@ -1527,9 +1544,8 @@ begin
               EmitI32Load(2, 0);
             end;
           end else begin
-            { Load variable from stack frame }
-            EmitOp(OpGlobalGet);
-            EmitULEB128(startCode, 0);  { global 0 = $sp }
+            { Load variable from stack frame (local or upvalue) }
+            EmitFramePtr(syms[sym].level);
             EmitI32Const(syms[sym].offset);
             EmitOp(OpI32Add);
             EmitI32Load(2, 0);
@@ -1560,9 +1576,8 @@ begin
                 else if syms[argSym].offset < 0 then
                   Error('cannot pass value parameter by reference')
                 else begin
-                  { Address = $sp + offset }
-                  EmitOp(OpGlobalGet);
-                  EmitULEB128(startCode, 0);
+                  { Address = frame[level] + offset }
+                  EmitFramePtr(syms[argSym].level);
                   EmitI32Const(syms[argSym].offset);
                   EmitOp(OpI32Add);
                 end;
@@ -1801,9 +1816,8 @@ begin
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
         end else begin
-          { Stack frame variable }
-          EmitOp(OpGlobalGet);
-          EmitULEB128(startCode, 0);  { $sp }
+          { Stack frame variable (local or upvalue) }
+          EmitFramePtr(syms[sym].level);
           EmitI32Const(syms[sym].offset);
           EmitOp(OpI32Add);
           ParseExpression(PrecNone);
@@ -1842,9 +1856,8 @@ begin
                 { Can't take address of a value parameter }
                 Error('cannot pass value parameter by reference')
               else begin
-                { Address = $sp + offset }
-                EmitOp(OpGlobalGet);
-                EmitULEB128(startCode, 0);
+                { Address = frame[level] + offset }
+                EmitFramePtr(syms[argSym].level);
                 EmitI32Const(syms[argSym].offset);
                 EmitOp(OpI32Add);
               end;
@@ -1941,8 +1954,7 @@ begin
       NextToken;
       Expect(tkAssign);
       { Assign initial value }
-      EmitOp(OpGlobalGet);
-      EmitULEB128(startCode, 0);
+      EmitFramePtr(syms[sym].level);
       EmitI32Const(syms[sym].offset);
       EmitOp(OpI32Add);
       ParseExpression(PrecNone);
@@ -1983,8 +1995,7 @@ begin
         EmitOp(WasmVoid);
 
         { Check: counter > limit? }
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);
+        EmitFramePtr(syms[sym].level);
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
@@ -1998,13 +2009,11 @@ begin
         ParseStatement;
 
         { Increment counter }
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);
+        EmitFramePtr(syms[sym].level);
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         { Load current value }
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);
+        EmitFramePtr(syms[sym].level);
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
@@ -2032,8 +2041,7 @@ begin
         EmitOp(WasmVoid);
 
         { Check: counter < limit? }
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);
+        EmitFramePtr(syms[sym].level);
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
@@ -2046,12 +2054,10 @@ begin
         ParseStatement;
 
         { Decrement counter }
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);
+        EmitFramePtr(syms[sym].level);
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
-        EmitOp(OpGlobalGet);
-        EmitULEB128(startCode, 0);
+        EmitFramePtr(syms[sym].level);
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
@@ -2141,6 +2147,9 @@ var
   wasmParams: array[0..15] of byte;
   wasmResults: array[0..0] of byte;
   nWasmResults: longint;
+  savedNestLevel: longint;
+  savedDisplayLocal: longint;
+  myDisplayLocal: longint;
 begin
   isFunc := tokKind = tkFunction;
   NextToken; { consume 'procedure' or 'function' }
@@ -2366,6 +2375,19 @@ begin
   savedFrameSize := curFrameSize;
   curFrameSize := 0;
 
+  { Save and increment nesting level }
+  savedNestLevel := curNestLevel;
+  curNestLevel := curNestLevel + 1;
+  if curNestLevel > 8 then
+    Error('nesting too deep (max 8 levels)');
+
+  { Save and set display local index }
+  savedDisplayLocal := displayLocalIdx;
+  myDisplayLocal := np;
+  if isFunc then
+    myDisplayLocal := myDisplayLocal + 1; { after return value local }
+  displayLocalIdx := myDisplayLocal;
+
   { Enter scope for procedure body }
   EnterScope;
 
@@ -2385,6 +2407,15 @@ begin
     Assignment to the function name is handled specially in ParseStatement
     by checking skFunc, so no skVar symbol is needed here. }
 
+  { Save display[N] into WASM local (before ParseBlock's prologue).
+    Global index = curNestLevel + 1 (global 0 = $sp, globals 1..8 = display[0..7]).
+    But we save display[curNestLevel], which is our OWN level.
+    Actually, we save display at our level so recursion works correctly. }
+  EmitOp(OpGlobalGet);
+  EmitULEB128(startCode, curNestLevel + 1);  { display[N] = global N+1 }
+  EmitOp(OpLocalSet);
+  EmitULEB128(startCode, displayLocalIdx);
+
   { Parse the block (declarations + begin...end) }
   ParseBlock;
 
@@ -2399,11 +2430,16 @@ begin
   { Leave scope }
   LeaveScope;
 
-  { Count extra locals: frame vars (as stack frame) don't need WASM locals,
-    but function return values do. For now, function return value = 1 extra local. }
-  nlocals := 0;
+  { Restore nesting level and display local }
+  curNestLevel := savedNestLevel;
+  displayLocalIdx := savedDisplayLocal;
+
+  { Count extra locals beyond params:
+    - function return value: 1 local
+    - saved display value: 1 local (always present for all procs) }
+  nlocals := 1; { saved display }
   if isFunc then
-    nlocals := 1;
+    nlocals := 2; { return value + saved display }
 
   { Copy compiled body to funcBodies }
   bodyStart := funcBodies.len;
@@ -2478,11 +2514,26 @@ begin
     EmitULEB128(startCode, 0);
   end;
 
+  { Set display[curNestLevel] := $sp so nested procs can find this frame.
+    Global index = curNestLevel + 1 (global 0 = $sp, globals 1..8 = display[0..7]). }
+  EmitOp(OpGlobalGet);
+  EmitULEB128(startCode, 0);  { $sp }
+  EmitOp(OpGlobalSet);
+  EmitULEB128(startCode, curNestLevel + 1); { display[N] = global N+1 }
+
   { Statement part }
   if tokKind = tkBegin then
     ParseStatement
   else
     Expected('"begin"');
+
+  { Restore display[N] before frame deallocation (procedures only) }
+  if displayLocalIdx >= 0 then begin
+    EmitOp(OpLocalGet);
+    EmitULEB128(startCode, displayLocalIdx);
+    EmitOp(OpGlobalSet);
+    EmitULEB128(startCode, curNestLevel + 1); { display[N] = global N+1 }
+  end;
 
   { Emit frame epilogue: $sp += frameSize }
   if curFrameSize > 0 then begin
@@ -2611,9 +2662,14 @@ begin
 end;
 
 procedure AssembleGlobalSection;
+const
+  MaxDisplayDepth = 8;
+var
+  i: longint;
 begin
   SmallBufInit(secGlobal);
-  SmallBufEmit(secGlobal, 1);        { 1 global }
+  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth); { $sp + 8 display globals }
+  { Global 0: $sp (stack pointer) }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
   SmallBufEmit(secGlobal, 1);        { mutable }
   { init expr: i32.const 65536 (top of 1 page) }
@@ -2623,6 +2679,14 @@ begin
   SmallBufEmit(secGlobal, $80);
   SmallBufEmit(secGlobal, $04);
   SmallBufEmit(secGlobal, OpEnd);
+  { Globals 1..8: display[0]..display[7] — frame pointers for nested scopes }
+  for i := 1 to MaxDisplayDepth do begin
+    SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
+    SmallBufEmit(secGlobal, 1);        { mutable }
+    SmallBufEmit(secGlobal, OpI32Const);
+    SmallBufEmit(secGlobal, 0);        { init to 0 }
+    SmallBufEmit(secGlobal, OpEnd);
+  end;
 end;
 
 procedure AssembleExportSection;
@@ -2975,6 +3039,7 @@ begin
   scopeDepth := 0;
   curFrameSize := 0;
   curNestLevel := 0;
+  displayLocalIdx := -1;
 
   dataPos := 4;  { skip nil guard }
 
