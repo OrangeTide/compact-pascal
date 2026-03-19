@@ -305,6 +305,20 @@ Since the compiler and compiled programs both use standard WASI for I/O, tests r
 
 Tests cover key compiler features: types, expressions, control flow, procedures/functions, pointers, strings, and scoping rules.
 
+## Similar Projects
+
+Several other projects occupy related niches -- small compilers, embeddable languages, Pascal variants, or languages targeting WASM. Compact Pascal shares goals with each but differs in important ways.
+
+**Cowgol** [15] is a self-hosting, Ada-inspired language targeting 8-bit microcomputers (6502, Z80, 8080) and several larger platforms. Like Compact Pascal, it emphasizes compiler minimalism and self-hosting on constrained targets. Cowgol forbids recursion to enable static variable overlap analysis -- a technique that allows the linker to map non-concurrent variables to the same memory addresses, critical for machines with tiny address spaces. Compact Pascal faces no such constraint (WASM provides a proper call stack) and instead focuses on embeddability via WASM rather than running on vintage hardware.
+
+**PascalScript** (RemObjects) [16] is an embeddable Pascal scripting engine used in Inno Setup and other applications. It interprets Pascal source at runtime, providing scripting capabilities within a host application. Unlike Compact Pascal, PascalScript is an interpreter rather than a compiler, and it does not produce portable bytecode -- the host must include the PascalScript runtime. Compact Pascal compiles to WASM, producing standalone modules that any WASM runtime can execute.
+
+**Turbo Rascal Syntax Error (TRSE)** [17] is a Pascal-like IDE and compiler targeting retro platforms (6502, Z80, 68000, x86). It shares Cowgol's focus on vintage hardware but takes a different approach: TRSE is written in C++ and provides a full IDE with sprite editors and graphics tools, making it more of a development environment than a minimal compiler. Its Pascal dialect includes platform-specific extensions for hardware access.
+
+**Grain** [18] is a functional programming language designed for WASM from the ground up. Like Compact Pascal, it compiles to WASM and treats it as the primary (and only) target. However, Grain is a modern functional language with algebraic data types, pattern matching, and a garbage collector -- a very different design philosophy from Compact Pascal's minimalist, imperative approach.
+
+**AssemblyScript** [19] is a TypeScript-like language that compiles to WASM. It occupies a similar "language designed for WASM" niche but targets developers already familiar with TypeScript/JavaScript rather than the Pascal community. Its compiler is itself written in AssemblyScript and runs as WASM, paralleling Compact Pascal's self-hosting-via-WASM approach.
+
 ---
 
 ## Appendix A: Grammar Summary
@@ -612,6 +626,16 @@ This document and the Compact Pascal language design were developed with the ass
 [13] BSI Pascal Validation Suite. https://github.com/pascal-validation/validation-suite
 
 [14] Anthropic, "Claude Code," 2025. https://docs.anthropic.com/en/docs/claude-code
+
+[15] D. Given, "Cowgol 2.0," 2022. An Ada-inspired language for very small systems. https://cowlark.com/cowgol/
+
+[16] RemObjects Software, "PascalScript." An embeddable Pascal scripting engine. https://github.com/nickelsworth/pascalscript
+
+[17] N. Morten, "Turbo Rascal Syntax Error (TRSE)." A Pascal-like IDE and compiler for retro platforms. https://lemonspawn.com/turbo-rascal-syntax-error-expected-but-alarm/
+
+[18] O. Falvai et al., "Grain: A strongly-typed functional programming language for WebAssembly." https://grain-lang.org/
+
+[19] AssemblyScript Contributors, "AssemblyScript." A TypeScript-like language targeting WebAssembly. https://www.assemblyscript.org/
 
 ---
 
