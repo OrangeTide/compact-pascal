@@ -574,7 +574,14 @@ Compact Pascal supports three comment styles:
 - **Parenthesis-star comments:** `(* ... *)` — the alternative Pascal comment.
 - **Line comments:** `// ...` — the Turbo Pascal/Delphi extension.
 
-Comments are stripped by `SkipWhitespaceAndComments`, which runs at the start of every `NextToken` call. The tricky part is distinguishing `(` (a left parenthesis token) from `(*` (start of comment). The scanner reads the character after `(`; if it is `*`, we enter comment-skipping mode. If not, we push the character back with `UnreadCh` and return `(` to the parser:
+Additionally, if the very first byte of the source is `#`, the rest of the first line is ignored. This permits Unix-style interpreter directives (`#!/usr/bin/env cpas`). The check fires once during scanner initialization, before any tokens are read, so it does not conflict with the `#n` character constant syntax — a valid Pascal source file always begins with a keyword like `program`, never with `#`.
+
+Comments are stripped by `SkipWhitespaceAndComments`, which runs at the start of every `NextToken` call. Two cases require lookahead to distinguish a comment from an operator:
+
+- `(` vs `(*` — The scanner reads the character after `(`; if it is `*`, we enter comment-skipping mode. If not, we push the character back with `UnreadCh` and return `(` to the parser.
+- `/` vs `//` — The scanner reads the character after `/`; if it is also `/`, we skip to end-of-line. If not, we push the character back and return `/` as the real division operator. (In Phase 1, `/` is recognized but rejected since the `real` type is deferred.)
+
+The `(*` case:
 
 ```pascal
 else if (not atEof) and (ch = '(') then begin

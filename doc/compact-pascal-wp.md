@@ -577,7 +577,8 @@ Note: `self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-i
 
 ```ebnf
 Comment          = '{' { CHARACTER } '}'
-                 | '(*' { CHARACTER } '*)' .
+                 | '(*' { CHARACTER } '*)'
+                 | '//' { CHARACTER } EOL .
 
 Directive        = '{' '$' DirectiveName [ DirectiveValue ] '}'
                  | '(*' '$' DirectiveName [ DirectiveValue ] '*)' .
@@ -587,7 +588,9 @@ DirectiveValue   = SwitchValue | Identifier | INTEGER_LITERAL | STRING_LITERAL .
 SwitchValue      = '+' | '-' .
 ```
 
-Comments do not nest. They may appear anywhere whitespace is permitted.
+Comments do not nest. They may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line.
+
+If the first byte of the source is `#`, the remainder of the first line is ignored. This permits Unix-style interpreter directives (e.g., `#!/usr/bin/env cpas`).
 
 Compiler directives use the Free Pascal convention: a `$` immediately after the opening brace. Switch directives use `+`/`-` (e.g., `{$R+}`). Directives are either global (before any declarations) or local (anywhere, effective from that point). See the Language Reference for the full directive list.
 
