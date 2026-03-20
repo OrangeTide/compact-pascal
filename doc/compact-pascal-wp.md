@@ -365,9 +365,17 @@ DeclSection      = ConstDeclPart
                  | ImplementBlock .
 
 ConstDeclPart    = 'const' ConstDef { ConstDef } .
-ConstDef         = Identifier '=' Expression ';'
-                 | Identifier ':' Type '=' Expression ';' .
-                 (* second form is a typed constant / initialized variable *)
+ConstDef         = Identifier '=' ConstExpr ';'
+                 | Identifier ':' Type '=' ConstExpr ';' .
+                 (* First form is an untyped constant.
+                    Second form is a typed constant / initialized variable.
+                    ConstExpr is evaluated at compile time. *)
+
+ConstExpr        = Expression .
+                 (* Syntactically identical to Expression but evaluated at
+                    compile time. May reference previously declared constants,
+                    literals, string concatenation (+), and standard functions
+                    (ord, chr, abs, etc.). *)
 
 TypeDeclPart     = 'type' TypeDef { TypeDef } .
 TypeDef          = Identifier '=' Type ';' .
@@ -538,9 +546,7 @@ ExprList         = Expression { ',' Expression } .
 ### Constants
 
 ```ebnf
-Constant         = [ '+' | '-' ] ( INTEGER_LITERAL | REAL_LITERAL | Identifier )
-                 | STRING_LITERAL
-                 | RUNE_LITERAL .
+Constant         = ConstExpr .
                  (* RUNE_LITERAL = '#u' followed by hex digits, e.g. #u2261.
                     STRING_LITERAL includes #n char constants folded by the scanner. *)
 ```

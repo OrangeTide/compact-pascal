@@ -75,7 +75,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 
 ### Declarations
 
-- `const` — named constants.
+- `const` — named constants with compile-time constant expressions (`const a = 1; b = a + 10;`).
 - Typed constants — `const x: integer = 5` (initialized variables, as in Turbo Pascal).
 - `type` — type definitions.
 - `var` — variable declarations.
@@ -849,9 +849,23 @@ DeclSection      = ConstDeclPart
                  | ImplementBlock .
 
 ConstDeclPart    = 'const' ConstDef { ConstDef } .
-ConstDef         = Identifier '=' Expression ';'
-                 | Identifier ':' Type '=' Expression ';' .
-                 (* second form is a typed constant / initialized variable *)
+ConstDef         = Identifier '=' ConstExpr ';'
+                 | Identifier ':' Type '=' ConstExpr ';' .
+                 (* First form is an untyped constant.
+                    Second form is a typed constant / initialized variable.
+                    ConstExpr is evaluated at compile time. *)
+
+ConstExpr        = Expression .
+                 (* A ConstExpr is syntactically identical to Expression but
+                    is evaluated at compile time. It may contain integer,
+                    string, char, and boolean literals; references to
+                    previously declared constants; arithmetic operators
+                    (+, -, *, div, mod); boolean operators (not, and, or);
+                    comparisons; string concatenation (+); and the standard
+                    functions ord, chr, odd, abs, succ, pred, lo, hi, sizeof.
+                    Example:
+                      const hello = 'Hello'; world = 'World';
+                            message = hello + ' ' + world; *)
 
 TypeDeclPart     = 'type' TypeDef { TypeDef } .
 TypeDef          = Identifier '=' Type ';' .
@@ -1040,9 +1054,7 @@ ExprList         = Expression { ',' Expression } .
 ### Constants
 
 ```ebnf
-Constant         = [ '+' | '-' ] ( INTEGER_LITERAL | REAL_LITERAL | Identifier )
-                 | STRING_LITERAL
-                 | RUNE_LITERAL .
+Constant         = ConstExpr .
                  (* RUNE_LITERAL = '#u' followed by hex digits, e.g. #u2261.
                     STRING_LITERAL includes #n char constants folded by the scanner. *)
 ```
