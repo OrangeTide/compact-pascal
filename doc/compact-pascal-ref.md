@@ -926,7 +926,27 @@ FuncDecl         = 'function'  Identifier
                     'external' is used with {$IMPORT} for WASM host-provided procedures.
                     Return type is any Type, including arrays and records —
                     see Structured Return Types under Extensions. *)
+```
 
+**Forward declarations.** A procedure or function may be declared `forward` to allow mutual recursion. The body must appear later in the same declaration section, and it must **repeat the full header** — parameter list, parameter types, and (for functions) the return type:
+
+```pascal
+procedure PrintResult(x: integer); forward;
+
+function Compute(a, b: integer): integer;
+begin
+  Compute := a * b + 1
+end;
+
+procedure PrintResult(x: integer);
+begin
+  writeln(x)
+end;
+```
+
+This differs from Turbo Pascal, where the forward body omits the parameter list. Compact Pascal follows the IP Pascal convention of repeating the full header, which keeps the parameter list visible at the definition site and avoids the need to look up the forward declaration to understand the body's signature.
+
+```ebnf
 FormalParams     = '(' FormalParam { ';' FormalParam } ')' .
 FormalParam      = [ 'var' | 'const' ] IdentList ':' Type .
 

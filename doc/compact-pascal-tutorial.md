@@ -1306,6 +1306,8 @@ Exit code: 120 (5! = 120).
 
 *[Introduces procedure and function declarations, parameter passing (value, var, const), separate stack frames for each call, the `call` instruction, forward declarations, function return values via the function-name assignment, `exit` intrinsic, and external declarations for WASI imports. Test: recursive Fibonacci.]*
 
+*[Forward declarations: when two procedures need to call each other (mutual recursion), the first one can be declared `forward`. The body appears later with the full header repeated — parameter list, types, and return type must all be restated. This differs from Turbo Pascal, where the forward body omits the parameter list. Compact Pascal follows the IP Pascal convention because it keeps the signature visible at the definition site, which is friendlier to readers who encounter the body without having seen the forward declaration. From the compiler's perspective, the repeated header is simply parsed and checked against the existing symbol table entry.]*
+
 \newpage
 
 ## Chapter 7: Nested Scopes

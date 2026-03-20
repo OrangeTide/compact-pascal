@@ -39,6 +39,10 @@ Compact Pascal draws inspiration from several sources in the Pascal family:
 - **ISO 10206 (Extended Pascal)** [2] informs the dynamic memory model (`New`/`Dispose`) and serves as a reference for language extensions.
 - **Component Pascal / Oberon** [3] (Wirth's later Pascal-lineage languages) inspire the minimalist philosophy: a small, coherent language rather than a feature-laden one.
 - **Go** [4] provides the model for structural interfaces — polymorphism without inheritance.
+- **Pascaline / IP Pascal** [20] demonstrates that Pascal can be extended with modules, dynamic arrays, and concurrency while preserving full ISO 7185 compatibility and type safety. Compact Pascal's `const` parameters, `forward` declaration style, and eventual dynamic array design draw on Pascaline's precedent.
+- **SuperPascal** [21] and the broader Brinch Hansen tradition (Concurrent Pascal [22], Joyce [23]) show that safe concurrency can be expressed in Pascal-family syntax. SuperPascal's single-pass disjointness checking — verifying at compile time that parallel processes do not interfere — is a technique Compact Pascal could adapt if concurrency is added in a future phase.
+- **ParaSail** [24] takes the radical approach of eliminating pointers, global variables, and aliasing entirely, making every expression safe for parallel evaluation. Its region-based memory management (no global GC heap) and Hoare-style assertions built into the syntax are relevant models for future Compact Pascal extensions.
+- **Vector Pascal** [25] extends Pascal with APL-derived array operations (maps, reductions, slicing) that map to SIMD hardware. Its dimensional type system (compile-time unit checking for scientific quantities) is an independently interesting extension model.
 
 Compact Pascal is not a conforming implementation of any existing Pascal standard. It is a new language that inherits Pascal's syntax and values while making deliberate departures where they serve the goals of embeddability, simplicity, and WASM compatibility.
 
@@ -319,6 +323,24 @@ Several other projects occupy related niches -- small compilers, embeddable lang
 
 **AssemblyScript** [19] is a TypeScript-like language that compiles to WASM. It occupies a similar "language designed for WASM" niche but targets developers already familiar with TypeScript/JavaScript rather than the Pascal community. Its compiler is itself written in AssemblyScript and runs as WASM, paralleling Compact Pascal's self-hosting-via-WASM approach.
 
+### Pascal-Family Connections
+
+The Pascal family is richer than is commonly appreciated. Beyond the well-known line from Standard Pascal through Turbo Pascal to Delphi, the family includes significant work in concurrency, parallelism, array programming, and verified computing. Compact Pascal sits within this broader tradition, and several family members inform its design or represent directions it may explore in the future.
+
+**Pascaline / IP Pascal** [20] (Scott A. Moore) is a highly extended superset of ISO 7185 Pascal that adds modules with namespace control (`uses` for merged namespaces, `joins` for qualified access), monitor-based concurrency, dynamic arrays that are fully interchangeable with static arrays, `view` (read-only reference) parameters, `fixed` structured constant initializers, constant expressions, underscores in numeric literals, and boolean bit operations on integers. Pascaline's design principle — extend Pascal to modern functionality without ever reducing type safety — is one Compact Pascal shares. IP Pascal's forward declaration style (repeating the full header at the definition) influenced Compact Pascal's forward syntax. **Pascal-P6** [20] is the open-source implementation of Pascaline, continuing the Pascal-P compiler lineage that seeded UCSD Pascal and indirectly Turbo Pascal. It is self-compiling and includes a native AMD64 code generator alongside the traditional P-code interpreter.
+
+**Concurrent Pascal** [22] (Per Brinch Hansen, 1974) introduced the monitor concept to Pascal: shared data encapsulated with the procedures that access it, with automatic mutual exclusion. It removed pointers, variant records, `goto`, and procedures-as-parameters to guarantee memory safety — a security-through-restriction philosophy that Compact Pascal echoes in its own omissions. **Joyce** [23] (Brinch Hansen, 1987) replaced monitors with CSP-style agents communicating through typed channels, demonstrating that safe concurrency in Pascal need not require shared memory. **SuperPascal** [21] (Brinch Hansen, 1993) synthesized these ideas into a *publication language* for parallel scientific computing, with `parallel` and `forall` statements, typed channels, and a single-pass compiler that checks parallel processes for disjointness at compile time — detecting race conditions without runtime overhead. SuperPascal's proof that a single-pass Pascal compiler can enforce concurrency safety is directly relevant to Compact Pascal's architecture.
+
+**ParaSail** [24] (S. Tucker Taft / AdaCore, 2009) takes the most radical approach in the Pascal family: it eliminates pointers, global variables, parameter aliasing, explicit threads, and runtime exceptions entirely. Every expression has parallel evaluation semantics; the compiler automatically identifies parallelism and detects race conditions at compile time. Region-based memory management replaces garbage collection. Hoare-style preconditions, postconditions, and class invariants are part of the standard syntax. ParaSail's parameterized modules with bounded generics (type parameters that must implement an interface) represent a form of generics that is more tractable for single-pass compilation than monomorphization.
+
+**Vector Pascal** [25] (Paul Cockshott, University of Glasgow, ~2002) extends Pascal with APL-derived array programming: all operators automatically extend to work element-wise on arrays, with reductions, slicing, conditional masking, and index generation. The compiler maps these operations to SIMD instructions (MMX, SSE, AltiVec), achieving 12x speedups on parallel data. Vector Pascal also introduces a dimensional type system for scientific computing (compile-time unit checking) and a pixel type with saturating fixed-point arithmetic. These ideas — type-level guarantees for scientific quantities and automatic vectorization through language design — are relevant to any Pascal targeting modern hardware.
+
+**Pascal-FC** [26] (Alan Burns and Geoff Davies, University of York) is a teaching language that uniquely offers *five* concurrency models in a single Pascal dialect: semaphores, monitors, CSP channels, Ada-style rendezvous, and Ada 95 protected types. Its runtime uses random process switching to expose timing-dependent bugs. While not a production language, Pascal-FC's multi-paradigm approach is a useful reference for understanding the design space of concurrency in Pascal.
+
+**Zonnon** [27] (Jürg Gutknecht et al., ETH Zürich) represents the most recent evolution of the Wirth school, adding active objects (objects with encapsulated threads), compositional inheritance via definitions/implementations, operator overloading, and exception handling to the Oberon lineage. Its syntax-controlled dialogs for inter-object communication protocols are a novel contribution.
+
+**Pascal-XSC** [28] (University of Karlsruhe) extended Pascal with interval arithmetic and verified numerical computing — operators that deliver results guaranteed accurate to within one rounding unit. While Compact Pascal does not target scientific computing, Pascal-XSC demonstrates that Pascal's type system can be extended with domain-specific guarantees that are checked at compile time.
+
 ---
 
 ## Appendix A: Grammar Summary
@@ -419,7 +441,9 @@ FuncDecl         = 'function'  Identifier
                  (* 'for' Receiver marks a standalone method — see Extensions.
                     'external' is used with {$IMPORT} for WASM host-provided procedures.
                     Return type is any Type, including arrays and records —
-                    see Structured Return Types under Extensions. *)
+                    see Structured Return Types under Extensions.
+                    Forward bodies repeat the full header (IP Pascal convention),
+                    unlike Turbo Pascal where the body omits the parameter list. *)
 
 FormalParams     = '(' FormalParam { ';' FormalParam } ')' .
 FormalParam      = [ 'var' | 'const' ] IdentList ':' Type .
@@ -639,6 +663,24 @@ This document and the Compact Pascal language design were developed with the ass
 [18] O. Falvai et al., "Grain: A strongly-typed functional programming language for WebAssembly." https://grain-lang.org/
 
 [19] AssemblyScript Contributors, "AssemblyScript." A TypeScript-like language targeting WebAssembly. https://www.assemblyscript.org/
+
+[20] S. A. Moore, "The Language Pascaline." A highly extended superset of ISO 7185 Pascal. https://standardpascal.org/pascaline.htm — See also: Pascal-P6 (open-source Pascaline implementation), https://github.com/samiam95124/Pascal-P6
+
+[21] P. Brinch Hansen, "The Programming Language SuperPascal," *Software: Practice and Experience*, vol. 24, no. 5, pp. 399–406, 1994. See also: "SuperPascal — A Publication Language for Parallel Scientific Computing," *Concurrency: Practice and Experience*, vol. 6, no. 5, pp. 461–483, 1994.
+
+[22] P. Brinch Hansen, "The Programming Language Concurrent Pascal," *IEEE Transactions on Software Engineering*, vol. 1, no. 2, pp. 199–207, 1975.
+
+[23] P. Brinch Hansen, "Joyce — A Programming Language for Distributed Systems," *Software: Practice and Experience*, vol. 17, no. 1, pp. 29–50, 1987.
+
+[24] S. Tucker Taft, "ParaSail: A Pointer-Free Pervasively-Parallel Language for Irregular Computations," *Programming Journal*, vol. 3, no. 7, 2019. https://parasail-lang.org/
+
+[25] P. Cockshott, "Vector Pascal, an Array Language," *ACM SIGPLAN Notices*, vol. 37, no. 6, pp. 59–69, 2002. https://dl.acm.org/doi/10.1145/571727.571737
+
+[26] A. Burns and G. L. Davies, "Pascal-FC: A Language for Teaching Concurrent Programming," *ACM SIGPLAN Notices*, vol. 23, no. 9, 1988.
+
+[27] J. Gutknecht et al., "Project Zonnon: A Compositional Language for Distributed Computing," IEEE, 2008. https://zonnon.org/
+
+[28] R. Klatte et al., *PASCAL-XSC: Language Reference with Examples*, Springer, 1992. https://www2.math.uni-wuppertal.de/wrswt/xsc/pxsc.html
 
 ---
 
