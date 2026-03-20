@@ -381,7 +381,10 @@ TypeDeclPart     = 'type' TypeDef { TypeDef } .
 TypeDef          = Identifier '=' Type ';' .
 
 VarDeclPart      = 'var' VarDecl { VarDecl } .
-VarDecl          = IdentList ':' Type ';' .
+VarDecl          = IdentList ':' Type [ '=' ConstExpr ] ';' .
+                 (* Initialized variables (Delphi/FPC extension).
+                    Single identifier only when initializer is present.
+                    Locals reinitialize on each scope entry. *)
 IdentList        = Identifier { ',' Identifier } .
 ```
 

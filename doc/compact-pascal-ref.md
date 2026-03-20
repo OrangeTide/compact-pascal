@@ -78,7 +78,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - `const` — named constants with compile-time constant expressions (`const a = 1; b = a + 10;`).
 - Typed constants — `const x: integer = 5` (initialized variables, as in Turbo Pascal).
 - `type` — type definitions.
-- `var` — variable declarations.
+- `var` — variable declarations, with optional initializers (`var x: integer = 5`).
 - `procedure` and `function` — with value and `var` parameters, plus `const` parameters (pass by reference, immutable).
 - `forward` — forward declarations for mutual recursion.
 - `external` — marks a procedure or function as provided by the WASM host (used with `{$IMPORT}`). No Pascal body.
@@ -871,7 +871,13 @@ TypeDeclPart     = 'type' TypeDef { TypeDef } .
 TypeDef          = Identifier '=' Type ';' .
 
 VarDeclPart      = 'var' VarDecl { VarDecl } .
-VarDecl          = IdentList ':' Type ';' .
+VarDecl          = IdentList ':' Type [ '=' ConstExpr ] ';' .
+                 (* Initialized variables: var x: integer = 5.
+                    Only valid when IdentList has a single identifier.
+                    Global initialized variables are placed in the data
+                    segment. Local initialized variables reinitialize on
+                    each scope entry. This is a Delphi/FPC extension not
+                    present in Turbo Pascal. *)
 IdentList        = Identifier { ',' Identifier } .
 ```
 
