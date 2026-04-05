@@ -332,6 +332,8 @@ var
   addrNwritten: longint;   { 4-byte fd_write result }
   addrIntBuf: longint;     { 66-byte integer conversion buffer }
   addrNewline: longint;    { 1-byte newline character }
+  addrReadBuf: longint;    { 1-byte fd_read buffer }
+  addrNread: longint;      { 4-byte fd_read result }
 
   { Start function code - accumulated separately, then wrapped }
   startCode: TCodeBuf;
@@ -344,6 +346,7 @@ var
   needsFdRead: boolean;
   needsProcExit: boolean;
   needsWriteInt: boolean;
+  needsReadInt: boolean;
 
   { Pending compiler directives }
   hasPendingImport: boolean;
@@ -1172,6 +1175,15 @@ begin
   TypeI32Void := AddWasmType(1, p, 0, r);
 end;
 
+function TypeVoidI32: longint;
+var p: array[0..0] of byte;
+    r: array[0..0] of byte;
+begin
+  p[0] := 0;
+  r[0] := WasmI32;
+  TypeVoidI32 := AddWasmType(0, p, 1, r);
+end;
+
 function TypeI32x4I32: longint;
 var p: array[0..3] of byte;
     r: array[0..0] of byte;
@@ -1469,9 +1481,8 @@ end;
 function EnsureWriteInt: longint;
 {** Ensure the __write_int helper function is registered.
   Returns its WASM function index.
-  __write_int is pre-allocated at slot 1 (right after _start)
-  so its index is stable: numImports + 1. User-defined functions
-  go into slots 2+. }
+  __write_int is pre-allocated at slot 1 (right after _start).
+  User-defined functions go into slots 3+. }
 begin
   if not needsWriteInt then begin
     EnsureIntToStr;
@@ -1479,6 +1490,34 @@ begin
     needsWriteInt := true;
   end;
   EnsureWriteInt := numImports + 1; { slot 1 = __write_int }
+end;
+
+procedure EnsureReadBuffers;
+{** Allocate the 1-byte read buffer and nread result in data segment. }
+begin
+  EnsureIOBuffers;
+  if addrReadBuf < 0 then begin
+    addrReadBuf := AllocDataAligned(1, 4);
+    DataBufEmit(secData, 0);
+  end;
+  if addrNread < 0 then begin
+    addrNread := AllocDataAligned(4, 4);
+    DataBufEmit(secData, 0); DataBufEmit(secData, 0);
+    DataBufEmit(secData, 0); DataBufEmit(secData, 0);
+  end;
+end;
+
+function EnsureReadInt: longint;
+{** Ensure the __read_int helper function is registered.
+  Returns its WASM function index.
+  __read_int is pre-allocated at slot 2 (after __write_int).
+  Reads decimal integer from stdin, returns i32. }
+begin
+  if not needsReadInt then begin
+    EnsureReadBuffers;
+    needsReadInt := true;
+  end;
+  EnsureReadInt := numImports + 2; { slot 2 = __read_int }
 end;
 
 procedure EmitWriteInt;
@@ -1703,6 +1742,122 @@ begin
     EmitWriteNewline;
 end;
 
+procedure EmitSkipLine;
+{** Emit inline code to consume bytes from stdin until LF or EOF.
+  ;; WAT: block $done
+  ;;        loop $again
+  ;;          ;; set up iovec for 1-byte read
+  ;;          ;; fd_read(0, iovec, 1, nread)
+  ;;          ;; if nread == 0: br $done (EOF)
+  ;;          ;; if readbuf[0] == 10: br $done (LF)
+  ;;          ;; br $again (continue)
+  ;;        end
+  ;;      end
+}
+begin
+  EnsureReadBuffers;
+
+  EmitOp(OpBlock); EmitOp(WasmVoid);   { $done = label 1 from inside loop }
+  EmitOp(OpLoop); EmitOp(WasmVoid);    { $again = label 0 }
+    { Set up iovec: buf = addrReadBuf, len = 1 }
+    EmitI32Const(addrIovec);
+    EmitI32Const(addrReadBuf);
+    EmitI32Store(2, 0);
+    EmitI32Const(addrIovec + 4);
+    EmitI32Const(1);
+    EmitI32Store(2, 0);
+
+    { fd_read(0, iovec, 1, nread) }
+    EmitI32Const(0);
+    EmitI32Const(addrIovec);
+    EmitI32Const(1);
+    EmitI32Const(addrNread);
+    EmitCall(idxFdRead);
+    EmitOp(OpDrop);
+
+    { if nread == 0: br 1 (exit block = EOF) }
+    EmitI32Const(addrNread);
+    EmitI32Load(2, 0);
+    EmitOp(OpI32Eqz);
+    EmitOp(OpBrIf); EmitULEB128(startCode, 1);
+
+    { if readbuf[0] == 10 (LF): br 1 (exit block) }
+    EmitI32Const(addrReadBuf);
+    CodeBufEmit(startCode, OpI32Load8u);
+    EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+    EmitI32Const(10);
+    EmitOp(OpI32Eq);
+    EmitOp(OpBrIf); EmitULEB128(startCode, 1);
+
+    { br 0 (continue loop) }
+    EmitOp(OpBr); EmitULEB128(startCode, 0);
+  EmitOp(OpEnd);  { end loop }
+  EmitOp(OpEnd);  { end block }
+end;
+
+procedure ParseReadArgs(withNewline: boolean);
+{** Parse arguments to read/readln and emit fd_read calls.
+  Each argument must be an integer variable. Calls __read_int
+  to parse a decimal integer from stdin and stores the result. }
+var
+  sym: longint;
+  name: string;
+  ridx: longint;
+begin
+  ridx := EnsureReadInt;
+  if tokKind = tkLParen then begin
+    NextToken;
+    while tokKind <> tkRParen do begin
+      if tokKind <> tkIdent then
+        Error('variable expected in read');
+      name := tokStr;
+      sym := LookupSym(name);
+      if sym < 0 then
+        Error('undeclared identifier: ' + name);
+      if syms[sym].kind <> skVar then
+        Error('variable expected in read');
+      if syms[sym].isConstParam then
+        Error('cannot read into const parameter ''' + name + '''');
+
+      if syms[sym].isVarParam then begin
+        { var param: push pointer, call __read_int, i32.store }
+        { ;; WAT: local.get <param>   ;; pointer to target }
+        { ;;      call $__read_int    ;; parsed value }
+        { ;;      i32.store           ;; store through pointer }
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, -(syms[sym].offset + 1));
+        EmitCall(ridx);
+        EmitI32Store(2, 0);
+      end
+      else if syms[sym].offset < 0 then begin
+        { WASM local (value parameter): call, then local.set }
+        { ;; WAT: call $__read_int    ;; parsed value }
+        { ;;      local.set <idx>     ;; store in local }
+        EmitCall(ridx);
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, -(syms[sym].offset + 1));
+      end else begin
+        { Stack frame variable: push address, call, i32.store }
+        { ;; WAT: <frame_ptr + offset> ;; target address }
+        { ;;      call $__read_int     ;; parsed value }
+        { ;;      i32.store            ;; store to frame }
+        EmitFramePtr(syms[sym].level);
+        EmitI32Const(syms[sym].offset);
+        EmitOp(OpI32Add);
+        EmitCall(ridx);
+        EmitI32Store(2, 0);
+      end;
+
+      NextToken;
+      if tokKind = tkComma then
+        NextToken;
+    end;
+    Expect(tkRParen);
+  end;
+  if withNewline then
+    EmitSkipLine;
+end;
+
 procedure ParseVarDecl;
 {** Parse variable declarations in a var section. }
 var
@@ -1896,6 +2051,16 @@ begin
     tkWriteln: begin
       NextToken;
       ParseWriteArgs(true);
+    end;
+
+    tkRead: begin
+      NextToken;
+      ParseReadArgs(false);
+    end;
+
+    tkReadln: begin
+      NextToken;
+      ParseReadArgs(true);
     end;
 
     tkIf: begin
@@ -2646,7 +2811,9 @@ begin
   SmallEmitULEB128(secFunc, TypeVoidVoid);
   { Slot 1: __write_int uses type i32 -> void (always present) }
   SmallEmitULEB128(secFunc, TypeI32Void);
-  { Slots 2+: User-defined functions (skip imports) }
+  { Slot 2: __read_int uses type void -> i32 (always present) }
+  SmallEmitULEB128(secFunc, TypeVoidI32);
+  { Slots 3+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
     if funcs[i].bodyStart <> -2 then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
@@ -2870,6 +3037,211 @@ begin
   EmitHelper(OpDrop);
 end;
 
+procedure BuildReadIntHelper;
+(** Build the __read_int() -> i32 function body into helperCode.
+  Reads decimal integer from stdin (fd 0) via fd_read, one byte at a time.
+  Skips leading whitespace, handles optional sign, parses digits.
+
+  Uses 3 WASM locals:
+    local 0 = result (i32) - accumulated value
+    local 1 = negative (i32) - 1 if negative, 0 if positive
+    local 2 = byte_val (i32) - last byte read from readbuf
+
+  Uses addrReadBuf (1 byte) for fd_read iovec buffer.
+  Uses addrIovec for the iovec struct.
+  Uses addrNread (4 bytes) for fd_read nread result.
+
+  Algorithm:
+    1. Skip whitespace (space, tab, CR, LF)
+    2. Check for sign (+ or -)
+    3. Read digits: result = result * 10 + (byte - '0')
+    4. If negative, negate result
+    5. Return result
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* result = 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(0);
+
+  (* negative = 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(1);
+
+  (* --- Read one byte helper pattern:
+     Set iovec to point to readbuf (1 byte), call fd_read(0, iovec, 1, nread).
+     After the call, readbuf[0] has the byte and nread has bytes read.
+     We inline this pattern each time we need to read. --- *)
+
+  (* --- Phase 1: Skip leading whitespace --- *)
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);
+    (* Set up iovec: buf = addrReadBuf, len = 1 *)
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(addrReadBuf);
+    EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelperI32Const(addrIovec + 4);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* fd_read(0, iovec, 1, nread) *)
+    EmitHelperI32Const(0);              { fd = stdin }
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(1);              { iovs_len = 1 }
+    EmitHelperI32Const(addrNread);
+    EmitHelperCall(idxFdRead);
+    EmitHelper(OpDrop);                 { discard errno }
+
+    (* if nread == 0, return 0 (EOF) *)
+    EmitHelperI32Const(addrNread);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelper(OpI32Eqz);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+
+    (* byte_val = readbuf[0] *)
+    EmitHelperI32Const(addrReadBuf);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+    (* if byte_val == ' ' or byte_val == 9 or byte_val == 10 or byte_val == 13: continue *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(32);   { space }
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(9);    { tab }
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpI32Or);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(10);   { LF }
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpI32Or);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(13);   { CR }
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpI32Or);
+    EmitHelper(OpBrIf); EmitHelperULEB128(0);  { continue loop }
+  EmitHelper(OpEnd); (* end whitespace loop *)
+
+  (* --- Phase 2: Check for sign --- *)
+  (* if byte_val == '-' *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelperI32Const(ord('-'));
+  EmitHelper(OpI32Eq);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelperI32Const(1);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(1);  { negative = 1 }
+    (* Read next byte *)
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(addrReadBuf);
+    EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelperI32Const(addrIovec + 4);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelperI32Const(0);
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(1);
+    EmitHelperI32Const(addrNread);
+    EmitHelperCall(idxFdRead);
+    EmitHelper(OpDrop);
+    EmitHelperI32Const(addrReadBuf);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+  EmitHelper(OpElse);
+    (* if byte_val == '+', skip it and read next byte *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(ord('+'));
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperI32Const(addrIovec);
+      EmitHelperI32Const(addrReadBuf);
+      EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+      EmitHelperI32Const(addrIovec + 4);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+      EmitHelperI32Const(0);
+      EmitHelperI32Const(addrIovec);
+      EmitHelperI32Const(1);
+      EmitHelperI32Const(addrNread);
+      EmitHelperCall(idxFdRead);
+      EmitHelper(OpDrop);
+      EmitHelperI32Const(addrReadBuf);
+      EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+      EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+    EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* --- Phase 3: Parse digits --- *)
+  (* byte_val is now the first digit (or non-digit if malformed input).
+     Loop: while byte_val >= '0' and byte_val <= '9' *)
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);
+    (* Check: byte_val >= '0' *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(ord('0'));
+    EmitHelper(OpI32GeS);
+    (* Check: byte_val <= '9' *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(ord('9'));
+    EmitHelper(OpI32LeS);
+    (* Both conditions *)
+    EmitHelper(OpI32And);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      (* result = result * 10 + (byte_val - '0') *)
+      EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+      EmitHelperI32Const(10);
+      EmitHelper(OpI32Mul);
+      EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+      EmitHelperI32Const(ord('0'));
+      EmitHelper(OpI32Sub);
+      EmitHelper(OpI32Add);
+      EmitHelper(OpLocalSet); EmitHelperULEB128(0);
+
+      (* Read next byte *)
+      EmitHelperI32Const(addrIovec);
+      EmitHelperI32Const(addrReadBuf);
+      EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+      EmitHelperI32Const(addrIovec + 4);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+      EmitHelperI32Const(0);
+      EmitHelperI32Const(addrIovec);
+      EmitHelperI32Const(1);
+      EmitHelperI32Const(addrNread);
+      EmitHelperCall(idxFdRead);
+      EmitHelper(OpDrop);
+
+      (* If nread == 0, break (EOF) *)
+      EmitHelperI32Const(addrNread);
+      EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+      EmitHelper(OpI32Eqz);
+      EmitHelper(OpIf); EmitHelper(WasmVoid);
+        (* Set byte_val to 0 to stop loop *)
+        EmitHelperI32Const(0);
+        EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+      EmitHelper(OpElse);
+        EmitHelperI32Const(addrReadBuf);
+        EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+        EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+      EmitHelper(OpEnd);
+
+      EmitHelper(OpBr); EmitHelperULEB128(1);  { continue outer loop }
+    EmitHelper(OpEnd); (* end if digit *)
+  EmitHelper(OpEnd); (* end digit loop *)
+
+  (* --- Phase 4: Apply sign and return --- *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);  { negative flag }
+  EmitHelper(OpIf); EmitHelper(WasmI32);
+    EmitHelperI32Const(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpI32Sub);
+  EmitHelper(OpElse);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpEnd);
+  (* value is on stack, function returns it *)
+end;
+
 procedure CopyBufToCode(var src: TCodeBuf);
 var i: longint;
 begin
@@ -2879,7 +3251,7 @@ end;
 
 procedure AssembleCodeSectionFixed;
 {** Assemble the code section.
-  Function order: slot 0 = _start, slot 1 = __write_int, slots 2+ = user funcs. }
+  Function order: slot 0 = _start, slot 1 = __write_int, slot 2 = __read_int, slots 3+ = user funcs. }
 var
   bodyLen: longint;
   i, j: longint;
@@ -2915,7 +3287,26 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 2+: User-defined function bodies (skip imports) }
+  { Slot 2: __read_int body — always present (empty stub if unused) }
+  if needsReadInt then begin
+    BuildReadIntHelper;
+    (* locals: 1 declaration block = 3 locals of type i32 *)
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 3);      { 3 locals: result, negative, byte_read }
+    CodeBufEmit(secCode, WasmI32); { of type i32 }
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);     { body size: 1 (locals) + 1 (unreachable) + 1 (end) }
+    CodeBufEmit(secCode, 0);     { 0 local declarations }
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 3+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
@@ -2969,6 +3360,7 @@ begin
   { Pre-register all WASM types before assembling sections }
   TypeVoidVoid;
   TypeI32Void;  { always needed for __write_int stub and proc_exit }
+  TypeVoidI32;  { always needed for __read_int stub }
 
   { Assemble all sections }
   AssembleTypeSection;
@@ -3033,7 +3425,7 @@ begin
 
   numWasmTypes := 0;
   numImports := 0;
-  numDefinedFuncs := 2; { slot 0 = _start, slot 1 = __write_int (reserved) }
+  numDefinedFuncs := 3; { slot 0 = _start, slot 1 = __write_int, slot 2 = __read_int }
   numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
@@ -3048,11 +3440,14 @@ begin
   addrNwritten := -1;
   addrIntBuf := -1;
   addrNewline := -1;
+  addrReadBuf := -1;
+  addrNread := -1;
 
   needsFdWrite := false;
   needsFdRead := false;
   needsProcExit := false;
   needsWriteInt := false;
+  needsReadInt := false;
 
   hasPendingImport := false;
   hasPendingExport := false;
@@ -3061,7 +3456,7 @@ begin
   { Pre-register all WASI imports so numImports is stable before
     any code emission. WASI hosts always provide these functions. }
   idxFdWrite := AddImport('wasi_snapshot_preview1', 'fd_write', TypeI32x4I32);
-  idxFdRead := -1;  { TODO: register when read/readln is implemented }
+  idxFdRead := AddImport('wasi_snapshot_preview1', 'fd_read', TypeI32x4I32);
   idxProcExit := AddImport('wasi_snapshot_preview1', 'proc_exit', TypeI32Void);
 
   InitSymTable;

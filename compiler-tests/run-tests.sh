@@ -63,9 +63,14 @@ for src in "$SCRIPT_DIR"/positive/*.pas; do
         expected_exit="$(cat "$exitcode_file" | tr -d '[:space:]')"
     fi
 
-    # Run
+    # Run (pipe .input file to stdin if present)
+    input_file="$SCRIPT_DIR/positive/$name.input"
     actual_exit=0
-    wasmtime run "$wasm" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
+    if [ -f "$input_file" ]; then
+        wasmtime run "$wasm" < "$input_file" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
+    else
+        wasmtime run "$wasm" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
+    fi
 
     # Check exit code
     if [ "$actual_exit" != "$expected_exit" ]; then
