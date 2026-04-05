@@ -323,6 +323,8 @@ Several other projects occupy related niches -- small compilers, embeddable lang
 
 **AssemblyScript** [19] is a TypeScript-like language that compiles to WASM. It occupies a similar "language designed for WASM" niche but targets developers already familiar with TypeScript/JavaScript rather than the Pascal community. Its compiler is itself written in AssemblyScript and runs as WASM, paralleling Compact Pascal's self-hosting-via-WASM approach.
 
+**TinyLisp** [29] is a minimal Lisp interpreter written in Zig that compiles to WASM for browser-based execution. It supports atoms, lists, arithmetic, conditionals, and closures, with an interactive REPL backed by a JavaScript terminal emulator. TinyLisp uses NaN boxing for value representation and a simple garbage collection strategy. Like Compact Pascal, it demonstrates the pattern of writing a language implementation in a systems language, compiling to WASM, and embedding it in a web page — though TinyLisp is an interpreter rather than a compiler, and targets Lisp rather than Pascal.
+
 ### Pascal-Family Connections
 
 The Pascal family is richer than is commonly appreciated. Beyond the well-known line from Standard Pascal through Turbo Pascal to Delphi, the family includes significant work in concurrency, parallelism, array programming, and verified computing. Compact Pascal sits within this broader tradition, and several family members inform its design or represent directions it may explore in the future.
@@ -690,6 +692,8 @@ This document and the Compact Pascal language design were developed with the ass
 [27] J. Gutknecht et al., "Project Zonnon: A Compositional Language for Distributed Computing," IEEE, 2008. https://zonnon.org/
 
 [28] R. Klatte et al., *PASCAL-XSC: Language Reference with Examples*, Springer, 1992. https://www2.math.uni-wuppertal.de/wrswt/xsc/pxsc.html
+
+[29] D. Sanchez, "TinyLisp: A minimal Lisp interpreter in Zig targeting WebAssembly," 2025. https://daneelsan.github.io/2025/03/20/tinylisp.html
 
 ---
 
