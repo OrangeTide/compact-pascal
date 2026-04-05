@@ -229,6 +229,7 @@ type
     level: longint;  { nesting level }
     offset: longint; { stack offset for vars, value for consts, func index for procs }
     size: longint;   { byte size of var }
+    strMax: longint; { max string length for string types (0 for non-string) }
     isVarParam: boolean;   { true if this is a var parameter (passed by reference) }
     isConstParam: boolean; { true if this is a const parameter (read-only) }
   end;
@@ -347,6 +348,20 @@ var
   needsProcExit: boolean;
   needsWriteInt: boolean;
   needsReadInt: boolean;
+  needsStrAssign: boolean;
+  needsWriteStr: boolean;
+  needsStrCompare: boolean;
+  needsReadStr: boolean;
+  needsStrAppend: boolean;
+  concatPieces: longint;         { compile-time count of saved concat pieces }
+  addrConcatScratch: longint;    { data segment addr of 16-slot scratch array }
+  needsConcatScratch: boolean;   { whether scratch was allocated }
+  startNlocals: longint;         { extra locals for _start (0 or 1) }
+  curStringTempIdx: longint;     { WASM local index for string temp in current func }
+  curFuncNeedsStringTemp: boolean; { whether current func needs the string temp local }
+
+  { Expression type tracking }
+  exprType: longint;  { type of last parsed expression (tyInteger, tyString, etc.) }
 
   { Pending compiler directives }
   hasPendingImport: boolean;
@@ -1184,6 +1199,33 @@ begin
   TypeVoidI32 := AddWasmType(0, p, 1, r);
 end;
 
+function TypeI32x2Void: longint;
+var p: array[0..1] of byte;
+    r: array[0..0] of byte;
+begin
+  p[0] := WasmI32; p[1] := WasmI32;
+  r[0] := 0;
+  TypeI32x2Void := AddWasmType(2, p, 0, r);
+end;
+
+function TypeI32x2I32: longint;
+var p: array[0..1] of byte;
+    r: array[0..0] of byte;
+begin
+  p[0] := WasmI32; p[1] := WasmI32;
+  r[0] := WasmI32;
+  TypeI32x2I32 := AddWasmType(2, p, 1, r);
+end;
+
+function TypeI32x3Void: longint;
+var p: array[0..2] of byte;
+    r: array[0..0] of byte;
+begin
+  p[0] := WasmI32; p[1] := WasmI32; p[2] := WasmI32;
+  r[0] := 0;
+  TypeI32x3Void := AddWasmType(3, p, 0, r);
+end;
+
 function TypeI32x4I32: longint;
 var p: array[0..3] of byte;
     r: array[0..0] of byte;
@@ -1258,6 +1300,19 @@ begin
   EmitDataString := addr;
 end;
 
+function EmitDataPascalString(const s: string): longint;
+{** Emit a Pascal short string to the data segment (length byte + data). }
+var
+  addr: longint;
+  i: longint;
+begin
+  addr := AllocData(length(s) + 1);
+  DataBufEmit(secData, byte(length(s)));
+  for i := 1 to length(s) do
+    DataBufEmit(secData, byte(ord(s[i])));
+  EmitDataPascalString := addr;
+end;
+
 procedure EnsureIOBuffers;
 begin
   if addrIovec < 0 then begin
@@ -1314,6 +1369,13 @@ begin
   EmitULEB128(startCode, offset);
 end;
 
+procedure EmitI32Load8u(align, offset: longint);
+begin
+  CodeBufEmit(startCode, OpI32Load8u);
+  EmitULEB128(startCode, align);
+  EmitULEB128(startCode, offset);
+end;
+
 { ---- Symbol table ---- }
 
 procedure InitSymTable;
@@ -1359,6 +1421,7 @@ begin
   syms[numSyms].level := curNestLevel;
   syms[numSyms].offset := 0;
   syms[numSyms].size := 0;
+  syms[numSyms].strMax := 0;
   syms[numSyms].isVarParam := false;
   syms[numSyms].isConstParam := false;
   AddSym := numSyms;
@@ -1520,6 +1583,70 @@ begin
   EnsureReadInt := numImports + 2; { slot 2 = __read_int }
 end;
 
+function EnsureStrAssign: longint;
+{** Ensure the __str_assign helper is registered.
+  Returns its WASM function index.
+  __str_assign(dst, max_len, src) is at slot 3. }
+begin
+  if not needsStrAssign then
+    needsStrAssign := true;
+  EnsureStrAssign := numImports + 3; { slot 3 = __str_assign }
+end;
+
+function EnsureWriteStr: longint;
+{** Ensure the __write_str helper is registered.
+  Returns its WASM function index.
+  __write_str(addr) is at slot 4. }
+begin
+  if not needsWriteStr then begin
+    EnsureIOBuffers;
+    needsWriteStr := true;
+  end;
+  EnsureWriteStr := numImports + 4; { slot 4 = __write_str }
+end;
+
+function EnsureStrCompare: longint;
+{** Ensure the __str_compare helper is registered.
+  Returns its WASM function index.
+  __str_compare(a, b) -> i32 (-1/0/1) is at slot 5. }
+begin
+  if not needsStrCompare then
+    needsStrCompare := true;
+  EnsureStrCompare := numImports + 5; { slot 5 = __str_compare }
+end;
+
+function EnsureReadStr: longint;
+{** Ensure the __read_str helper is registered.
+  Returns its WASM function index.
+  __read_str(addr, max_len) is at slot 6. }
+begin
+  if not needsReadStr then begin
+    EnsureIOBuffers;
+    needsReadStr := true;
+  end;
+  EnsureReadStr := numImports + 6; { slot 6 = __read_str }
+end;
+
+procedure EnsureConcatScratch;
+{** Allocate the 16-slot scratch array in the data segment if not yet allocated. }
+var j: longint;
+begin
+  if not needsConcatScratch then begin
+    needsConcatScratch := true;
+    addrConcatScratch := AllocDataAligned(64, 4); { 16 slots x 4 bytes }
+    for j := 1 to 64 do DataBufEmit(secData, 0);
+  end;
+end;
+
+function EnsureStrAppend: longint;
+{** Ensure the __str_append helper is registered.
+  Returns its WASM function index.
+  __str_append(dst, maxlen, src) is at slot 7. }
+begin
+  needsStrAppend := true;
+  EnsureStrAppend := numImports + 7; { slot 7 = __str_append }
+end;
+
 procedure EmitWriteInt;
 {** Emit a call to the __write_int helper function.
   The integer value is already on the WASM operand stack. }
@@ -1540,40 +1667,77 @@ var
   sym: longint;
   argIdx: longint;
   argSym: longint;
+  leftType: longint;
 begin
   { Prefix }
   case tokKind of
     tkInteger: begin
       EmitI32Const(tokInt);
+      exprType := tyInteger;
       NextToken;
     end;
 
     tkString: begin
-      { String literal in expression context - for write() args }
-      { Store the address and length as a marker }
-      Error('string expression not supported in this context');
+      { String literal in expression — push address of Pascal-format
+        string in data segment (length byte + data) }
+      EmitI32Const(EmitDataPascalString(tokStr));
+      exprType := tyString;
+      NextToken;
     end;
 
     tkTrue: begin
       EmitI32Const(1);
+      exprType := tyBoolean;
       NextToken;
     end;
 
     tkFalse: begin
       EmitI32Const(0);
+      exprType := tyBoolean;
       NextToken;
     end;
 
     tkIdent: begin
+      { Built-in functions handled before symbol lookup }
+      if tokStr = 'LENGTH' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyString then
+          Error('length() requires a string argument');
+        Expect(tkRParen);
+        { String address is on stack — read length byte }
+        EmitI32Load8u(0, 0);
+        exprType := tyInteger;
+      end else begin
       sym := LookupSym(tokStr);
       if sym < 0 then
         Error('undeclared identifier: ' + tokStr);
       case syms[sym].kind of
         skConst: begin
           EmitI32Const(syms[sym].offset);
+          exprType := syms[sym].typ;
           NextToken;
         end;
         skVar: begin
+          if syms[sym].typ = tyString then begin
+            { String variable: push address, not value }
+            if syms[sym].isVarParam then begin
+              { var/const param: local holds pointer to string }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else if syms[sym].offset < 0 then begin
+              { Value param: local holds pointer to string copy }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else begin
+              { Stack frame variable: compute address }
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            exprType := tyString;
+          end else begin
           if syms[sym].offset < 0 then begin
             { WASM local (parameter or function return value) }
             EmitOp(OpLocalGet);
@@ -1588,6 +1752,8 @@ begin
             EmitI32Const(syms[sym].offset);
             EmitOp(OpI32Add);
             EmitI32Load(2, 0);
+          end;
+          exprType := syms[sym].typ;
           end;
           NextToken;
         end;
@@ -1630,11 +1796,13 @@ begin
             Expect(tkRParen);
           end;
           EmitCall(syms[sym].offset);
+          exprType := syms[sym].typ;
           { Return value is left on WASM stack }
         end;
       else
         Error('cannot use ' + tokStr + ' in expression');
       end;
+      end; { end of else (not LENGTH) }
     end;
 
     tkLParen: begin
@@ -1692,24 +1860,61 @@ begin
     if prec <= minPrec then
       break;
 
+    leftType := exprType;
+
+    { For string +: save left operand to scratch BEFORE parsing right }
+    if (leftType = tyString) and (op = tkPlus) then begin
+      EnsureConcatScratch;
+      if concatPieces >= 16 then
+        Error('too many string concatenation pieces (max 16)');
+      { Save left addr from WASM stack to scratch[concatPieces] }
+      curFuncNeedsStringTemp := true;
+      EmitOp(OpLocalSet);
+      EmitULEB128(startCode, curStringTempIdx);
+      EmitI32Const(addrConcatScratch + concatPieces * 4);
+      EmitOp(OpLocalGet);
+      EmitULEB128(startCode, curStringTempIdx);
+      EmitI32Store(2, 0);
+      concatPieces := concatPieces + 1;
+    end;
+
     NextToken;
     ParseExpression(prec);
 
     { Emit operator }
-    case op of
-      tkPlus:      EmitOp(OpI32Add);
-      tkMinus:     EmitOp(OpI32Sub);
-      tkStar:      EmitOp(OpI32Mul);
-      tkDiv:       EmitOp(OpI32DivS);
-      tkMod:       EmitOp(OpI32RemS);
-      tkAnd:       EmitOp(OpI32And);
-      tkOr:        EmitOp(OpI32Or);
-      tkEqual:     EmitOp(OpI32Eq);
-      tkNotEqual:  EmitOp(OpI32Ne);
-      tkLess:      EmitOp(OpI32LtS);
-      tkGreater:   EmitOp(OpI32GtS);
-      tkLessEq:    EmitOp(OpI32LeS);
-      tkGreaterEq: EmitOp(OpI32GeS);
+    if (leftType = tyString) and (op = tkPlus) then begin
+      { No runtime code — pieces tracked at compile time, last piece on stack }
+      exprType := tyString;
+    end
+    else if (leftType = tyString) and (op in [tkEqual, tkNotEqual, tkLess,
+        tkGreater, tkLessEq, tkGreaterEq]) then begin
+      { String comparison: call __str_compare, then compare result to 0 }
+      EmitCall(EnsureStrCompare);
+      case op of
+        tkEqual:     begin EmitI32Const(0); EmitOp(OpI32Eq); end;
+        tkNotEqual:  begin EmitI32Const(0); EmitOp(OpI32Ne); end;
+        tkLess:      begin EmitI32Const(0); EmitOp(OpI32LtS); end;
+        tkGreater:   begin EmitI32Const(0); EmitOp(OpI32GtS); end;
+        tkLessEq:    begin EmitI32Const(0); EmitOp(OpI32LeS); end;
+        tkGreaterEq: begin EmitI32Const(0); EmitOp(OpI32GeS); end;
+      end;
+      exprType := tyBoolean;
+    end else begin
+      case op of
+        tkPlus:      EmitOp(OpI32Add);
+        tkMinus:     EmitOp(OpI32Sub);
+        tkStar:      EmitOp(OpI32Mul);
+        tkDiv:       EmitOp(OpI32DivS);
+        tkMod:       EmitOp(OpI32RemS);
+        tkAnd:       EmitOp(OpI32And);
+        tkOr:        EmitOp(OpI32Or);
+        tkEqual:     EmitOp(OpI32Eq);
+        tkNotEqual:  EmitOp(OpI32Ne);
+        tkLess:      EmitOp(OpI32LtS);
+        tkGreater:   EmitOp(OpI32GtS);
+        tkLessEq:    EmitOp(OpI32LeS);
+        tkGreaterEq: EmitOp(OpI32GeS);
+      end;
     end;
   end;
 end;
@@ -1717,21 +1922,43 @@ end;
 procedure ParseWriteArgs(withNewline: boolean);
 {** Parse arguments to write/writeln and emit fd_write calls. }
 var
-  addr, slen: longint;
+  addr, slen, i: longint;
 begin
   if tokKind = tkLParen then begin
     NextToken;
     while tokKind <> tkRParen do begin
       if tokKind = tkString then begin
-        { String literal - emit directly }
+        { String literal - emit directly via raw data (no length byte) }
         slen := length(tokStr);
         addr := EmitDataString(tokStr);
         EmitWriteString(addr, slen);
         NextToken;
+        exprType := tyString; { for consistency }
       end else begin
-        { Integer expression }
         ParseExpression(PrecNone);
-        EmitWriteInt;
+        if exprType = tyString then begin
+          if concatPieces > 0 then begin
+            { Concat expression: save last piece, emit __write_str for each }
+            curFuncNeedsStringTemp := true;
+            EmitOp(OpLocalSet);
+            EmitULEB128(startCode, curStringTempIdx);
+            for i := 0 to concatPieces - 1 do begin
+              EmitI32Const(addrConcatScratch + i * 4);
+              EmitI32Load(2, 0);
+              EmitCall(EnsureWriteStr);
+            end;
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curStringTempIdx);
+            EmitCall(EnsureWriteStr);
+            concatPieces := 0;
+          end else begin
+            { Simple string expression — addr is on stack }
+            EmitCall(EnsureWriteStr);
+          end;
+        end else begin
+          { Integer/boolean/char expression }
+          EmitWriteInt;
+        end;
       end;
       if tokKind = tkComma then
         NextToken;
@@ -1803,8 +2030,10 @@ var
   sym: longint;
   name: string;
   ridx: longint;
+  lastWasString: boolean;
 begin
   ridx := EnsureReadInt;
+  lastWasString := false;
   if tokKind = tkLParen then begin
     NextToken;
     while tokKind <> tkRParen do begin
@@ -1819,7 +2048,21 @@ begin
       if syms[sym].isConstParam then
         Error('cannot read into const parameter ''' + name + '''');
 
-      if syms[sym].isVarParam then begin
+      lastWasString := (syms[sym].typ = tyString);
+      if syms[sym].typ = tyString then begin
+        { String variable: call __read_str(addr, max_len) }
+        if syms[sym].isVarParam then begin
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+        end else begin
+          EmitFramePtr(syms[sym].level);
+          EmitI32Const(syms[sym].offset);
+          EmitOp(OpI32Add);
+        end;
+        EmitI32Const(syms[sym].strMax);
+        EmitCall(EnsureReadStr);
+      end
+      else if syms[sym].isVarParam then begin
         { var param: push pointer, call __read_int, i32.store }
         { ;; WAT: local.get <param>   ;; pointer to target }
         { ;;      call $__read_int    ;; parsed value }
@@ -1854,7 +2097,7 @@ begin
     end;
     Expect(tkRParen);
   end;
-  if withNewline then
+  if withNewline and (not lastWasString) then
     EmitSkipLine;
 end;
 
@@ -1866,7 +2109,10 @@ var
   i, sym: longint;
   typeName: string;
   typId: longint;
+  varTyp: longint;
   varSize: longint;
+  varStrMax: longint;
+  pad: longint;
 begin
   while tokKind = tkIdent do begin
     { Collect identifier list }
@@ -1886,6 +2132,7 @@ begin
     Expect(tkColon);
 
     { Parse type }
+    varStrMax := 0;
     if tokKind = tkIdent then begin
       typeName := tokStr;
       typId := LookupSym(typeName);
@@ -1893,31 +2140,45 @@ begin
         Error('unknown type: ' + typeName);
       if syms[typId].kind <> skType then
         Error(typeName + ' is not a type');
+      varTyp := syms[typId].typ;
       NextToken;
     end else if tokKind = tkString_kw then begin
-      { string type }
-      typId := -1; { TODO: proper string type }
+      varTyp := tyString;
       NextToken;
+      if tokKind = tkLBrack then begin
+        { string[n] }
+        NextToken;
+        if tokKind <> tkInteger then
+          Error('integer constant expected for string length');
+        if (tokInt < 1) or (tokInt > 255) then
+          Error('string length must be 1..255');
+        varStrMax := tokInt;
+        NextToken;
+        Expect(tkRBrack);
+      end else
+        varStrMax := 255;
     end else
       Error('type name expected');
 
     { Determine size }
-    if typId >= 0 then begin
-      case syms[typId].typ of
-        tyInteger: varSize := 4;
-        tyBoolean: varSize := 4;
-        tyChar:    varSize := 4;  { stored as i32 }
-      else
-        varSize := 4;
-      end;
-    end else
+    case varTyp of
+      tyInteger: varSize := 4;
+      tyBoolean: varSize := 4;
+      tyChar:    varSize := 4;  { stored as i32 }
+      tyString:  varSize := varStrMax + 1;
+    else
       varSize := 4;
+    end;
 
     { Add symbols and allocate stack space }
     for i := 0 to nnames - 1 do begin
-      sym := AddSym(names[i], skVar, syms[typId].typ);
+      { Align to 4-byte boundary for i32 access }
+      pad := (4 - (curFrameSize mod 4)) mod 4;
+      curFrameSize := curFrameSize + pad;
+      sym := AddSym(names[i], skVar, varTyp);
       syms[sym].offset := curFrameSize;
       syms[sym].size := varSize;
+      syms[sym].strMax := varStrMax;
       curFrameSize := curFrameSize + varSize;
     end;
 
@@ -1932,6 +2193,7 @@ var
   name: string;
   argIdx: longint;
   argSym: longint;
+  i: longint;
 begin
   case tokKind of
     tkBegin: begin
@@ -1956,7 +2218,77 @@ begin
         if syms[sym].isConstParam then
           Error('cannot assign to const parameter ''' + name + '''');
         NextToken;
-        if syms[sym].isVarParam then begin
+        if syms[sym].typ = tyString then begin
+          { Parse source expression first to discover concatPieces }
+          ParseExpression(PrecNone);
+          if exprType <> tyString then
+            Error('string expression expected');
+          if concatPieces > 0 then begin
+            { Concat assignment: save last piece, zero dst, append each piece }
+            curFuncNeedsStringTemp := true;
+            EmitOp(OpLocalSet);
+            EmitULEB128(startCode, curStringTempIdx);
+            { Zero dst[0] (length byte) }
+            if syms[sym].isVarParam then begin
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            EmitI32Const(0);
+            EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+            { Append each saved piece }
+            for i := 0 to concatPieces - 1 do begin
+              if syms[sym].isVarParam then begin
+                EmitOp(OpLocalGet);
+                EmitULEB128(startCode, -(syms[sym].offset + 1));
+              end else begin
+                EmitFramePtr(syms[sym].level);
+                EmitI32Const(syms[sym].offset);
+                EmitOp(OpI32Add);
+              end;
+              EmitI32Const(syms[sym].strMax);
+              EmitI32Const(addrConcatScratch + i * 4);
+              EmitI32Load(2, 0);
+              EmitCall(EnsureStrAppend);
+            end;
+            { Append last piece from local }
+            if syms[sym].isVarParam then begin
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            EmitI32Const(syms[sym].strMax);
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curStringTempIdx);
+            EmitCall(EnsureStrAppend);
+            concatPieces := 0;
+          end else begin
+            { Simple string assignment: __str_assign(dst, max_len, src) }
+            { src addr is on stack, need to reorder: dst, max_len, src }
+            curFuncNeedsStringTemp := true;
+            EmitOp(OpLocalSet);
+            EmitULEB128(startCode, curStringTempIdx);
+            if syms[sym].isVarParam then begin
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            EmitI32Const(syms[sym].strMax);
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curStringTempIdx);
+            EmitCall(EnsureStrAssign);
+          end;
+        end
+        else if syms[sym].isVarParam then begin
           { ;; WAT: local.get <param>  — get pointer }
           { ;;      <expr>              — value to store }
           { ;;      i32.store           — store through pointer }
@@ -2315,6 +2647,8 @@ var
   savedNestLevel: longint;
   savedDisplayLocal: longint;
   myDisplayLocal: longint;
+  savedStringTempIdx: longint;
+  savedFuncNeedsStringTemp: boolean;
 begin
   isFunc := tokKind = tkFunction;
   NextToken; { consume 'procedure' or 'function' }
@@ -2362,19 +2696,33 @@ begin
       Expect(tkColon);
 
       { Parse parameter type }
-      if tokKind <> tkIdent then
-        Expected('type name');
-      pTypeName := tokStr;
-      pTypSym := LookupSym(pTypeName);
-      if pTypSym < 0 then
-        Error('unknown type: ' + pTypeName);
-      if syms[pTypSym].kind <> skType then
-        Error(pTypeName + ' is not a type');
-      NextToken;
+      if tokKind = tkString_kw then begin
+        { String parameter type — always passed as pointer (i32) }
+        for i := groupStart to groupEnd - 1 do begin
+          paramTypes[i] := tyString;
+          { String params are always passed by reference.
+            If not explicitly 'var', treat as const (read-only). }
+          if not paramIsVar[i] then
+            paramIsConst[i] := true;
+          paramIsVar[i] := true; { force by-reference passing at call site }
+        end;
+        NextToken;
+        { TODO: support string[n] parameter types }
+      end else begin
+        if tokKind <> tkIdent then
+          Expected('type name');
+        pTypeName := tokStr;
+        pTypSym := LookupSym(pTypeName);
+        if pTypSym < 0 then
+          Error('unknown type: ' + pTypeName);
+        if syms[pTypSym].kind <> skType then
+          Error(pTypeName + ' is not a type');
+        NextToken;
 
-      { Apply type to all names in this group }
-      for i := groupStart to groupEnd - 1 do
-        paramTypes[i] := syms[pTypSym].typ;
+        { Apply type to all names in this group }
+        for i := groupStart to groupEnd - 1 do
+          paramTypes[i] := syms[pTypSym].typ;
+      end;
 
       if tokKind = tkSemicolon then
         NextToken;
@@ -2539,6 +2887,9 @@ begin
   CodeBufInit(startCode);
   savedFrameSize := curFrameSize;
   curFrameSize := 0;
+  savedStringTempIdx := curStringTempIdx;
+  savedFuncNeedsStringTemp := curFuncNeedsStringTemp;
+  curFuncNeedsStringTemp := false;
 
   { Save and increment nesting level }
   savedNestLevel := curNestLevel;
@@ -2553,6 +2904,13 @@ begin
     myDisplayLocal := myDisplayLocal + 1; { after return value local }
   displayLocalIdx := myDisplayLocal;
 
+  { String temp local index: after params + saved display (+ return value if func) }
+  { For proc: np + 1 (saved display). For func: np + 2 (return value + saved display). }
+  if isFunc then
+    curStringTempIdx := np + 2
+  else
+    curStringTempIdx := np + 1;
+
   { Enter scope for procedure body }
   EnterScope;
 
@@ -2566,6 +2924,8 @@ begin
     syms[sym].size := 4;
     syms[sym].isVarParam := paramIsVar[i];
     syms[sym].isConstParam := paramIsConst[i];
+    if paramTypes[i] = tyString then
+      syms[sym].strMax := 255; { default max length for string params }
   end;
 
   { For functions, the return value is a hidden WASM local at index np.
@@ -2601,10 +2961,17 @@ begin
 
   { Count extra locals beyond params:
     - function return value: 1 local
-    - saved display value: 1 local (always present for all procs) }
+    - saved display value: 1 local (always present for all procs)
+    - string temp: 1 local (if string concat was used) }
   nlocals := 1; { saved display }
   if isFunc then
     nlocals := 2; { return value + saved display }
+  if curFuncNeedsStringTemp then
+    nlocals := nlocals + 1;
+
+  { Restore string temp state }
+  curStringTempIdx := savedStringTempIdx;
+  curFuncNeedsStringTemp := savedFuncNeedsStringTemp;
 
   { Copy compiled body to funcBodies }
   bodyStart := funcBodies.len;
@@ -2813,7 +3180,17 @@ begin
   SmallEmitULEB128(secFunc, TypeI32Void);
   { Slot 2: __read_int uses type void -> i32 (always present) }
   SmallEmitULEB128(secFunc, TypeVoidI32);
-  { Slots 3+: User-defined functions (skip imports) }
+  { Slot 3: __str_assign uses type i32,i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x3Void);
+  { Slot 4: __write_str uses type i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32Void);
+  { Slot 5: __str_compare uses type i32,i32 -> i32 (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x2I32);
+  { Slot 6: __read_str uses type i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x2Void);
+  { Slot 7: __str_append uses type i32,i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x3Void);
+  { Slots 8+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
     if funcs[i].bodyStart <> -2 then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
@@ -3242,6 +3619,396 @@ begin
   (* value is on stack, function returns it *)
 end;
 
+procedure BuildStrAssignHelper;
+(** Build __str_assign(dst, max_len, src) function body into helperCode.
+  Copies a Pascal short string from src to dst, truncating to max_len.
+  Parameters:
+    local 0 = dst (i32, address of destination string)
+    local 1 = max_len (i32, maximum string length for destination)
+    local 2 = src (i32, address of source string)
+  Extra locals:
+    local 3 = len (i32, actual copy length)
+    local 4 = i (i32, loop counter)
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* len = src[0] (source length byte) *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+
+  (* if len > max_len then len := max_len *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+  EmitHelper(OpI32GtU);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+  EmitHelper(OpEnd);
+
+  (* dst[0] := len *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+  EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+  (* i := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(4);
+
+  (* while i < len do begin *)
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelper(OpI32GeU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);  { break if i >= len }
+
+    (* dst[i+1] := src[i+1] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);       { dst + i + 1 }
+
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);       { src + i + 1 }
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+    EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+    (* i := i + 1 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(4);
+
+    EmitHelper(OpBr); EmitHelperULEB128(0);  { continue loop }
+  EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+end;
+
+procedure BuildWriteStrHelper;
+(** Build __write_str(addr) function body into helperCode.
+  Writes a Pascal short string to stdout via fd_write.
+  Parameters:
+    local 0 = addr (i32, address of Pascal string: length byte + data)
+  Uses the shared iovec/nwritten scratch area.
+*)
+var fdw: longint;
+begin
+  CodeBufInit(helperCode);
+  fdw := idxFdWrite;
+
+  (* iovec.buf = addr + 1  (skip length byte, point to character data) *)
+  EmitHelperI32Const(addrIovec);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelperI32Const(1);
+  EmitHelper(OpI32Add);
+  EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+  (* iovec.len = addr[0]  (length byte) *)
+  EmitHelperI32Const(addrIovec + 4);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+  (* fd_write(1, iovec, 1, nwritten) *)
+  EmitHelperI32Const(1);         { fd = stdout }
+  EmitHelperI32Const(addrIovec);
+  EmitHelperI32Const(1);
+  EmitHelperI32Const(addrNwritten);
+  EmitHelperCall(fdw);
+  EmitHelper(OpDrop);            { discard errno }
+end;
+
+procedure BuildStrCompareHelper;
+(** Build __str_compare(a, b) -> i32 function body into helperCode.
+  Lexicographic comparison of two Pascal short strings.
+  Returns -1 if a<b, 0 if a=b, +1 if a>b.
+  Parameters:
+    local 0 = a (i32, address of first string)
+    local 1 = b (i32, address of second string)
+  Extra locals:
+    local 2 = minLen (i32, min of both lengths)
+    local 3 = i (i32, loop counter)
+    local 4 = ca (i32, char from a)
+    local 5 = cb (i32, char from b)
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* minLen = a[0]; if b[0] < minLen then minLen = b[0] *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelper(OpI32LtU);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+  EmitHelper(OpEnd);
+
+  (* i := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+
+  (* compare characters loop *)
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);   { block $break }
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);    { loop $continue }
+    (* if i >= minLen then break *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelper(OpI32GeU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* ca = a[i+1] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(4);
+
+    (* cb = b[i+1] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(5);
+
+    (* if ca < cb then return -1 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(5);
+    EmitHelper(OpI32LtU);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperI32Const(-1);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+
+    (* if ca > cb then return 1 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(5);
+    EmitHelper(OpI32GtU);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperI32Const(1);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+
+    (* i := i + 1 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+
+    EmitHelper(OpBr); EmitHelperULEB128(0);  { continue loop }
+  EmitHelper(OpEnd);  { end loop }
+  EmitHelper(OpEnd);  { end block }
+
+  (* All common chars equal — compare lengths: a[0] - b[0], clamped to -1/0/1 *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpI32Sub);
+  (* clamp: if result > 0 then 1, if < 0 then -1, else 0 *)
+  EmitHelper(OpLocalSet); EmitHelperULEB128(4);  { reuse ca as temp }
+  EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+  EmitHelperI32Const(0);
+  EmitHelper(OpI32GtS);
+  EmitHelper(OpIf); EmitHelper($7F);  { i32 result }
+    EmitHelperI32Const(1);
+  EmitHelper(OpElse);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelperI32Const(0);
+    EmitHelper(OpI32LtS);
+    EmitHelper(OpIf); EmitHelper($7F);  { i32 result }
+      EmitHelperI32Const(-1);
+    EmitHelper(OpElse);
+      EmitHelperI32Const(0);
+    EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+end;
+
+procedure BuildReadStrHelper;
+(** Build __read_str(addr, max_len) function body into helperCode.
+  Reads a line from stdin into a Pascal short string.
+  Stops at LF (consumed but not stored) or EOF.
+  Parameters:
+    local 0 = addr (i32, address of destination string)
+    local 1 = max_len (i32, maximum string length)
+  Extra locals:
+    local 2 = i (i32, current count of bytes stored)
+*)
+var fdr: longint;
+begin
+  CodeBufInit(helperCode);
+  fdr := idxFdRead;
+
+  (* i := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+  (* Set up iovec: buf = addrReadBuf, len = 1 *)
+  EmitHelperI32Const(addrIovec);
+  EmitHelperI32Const(addrReadBuf);
+  EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+  EmitHelperI32Const(addrIovec + 4);
+  EmitHelperI32Const(1);
+  EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+  (* loop *)
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);   { block $break }
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);    { loop $continue }
+
+    (* fd_read(0, iovec, 1, nread) *)
+    EmitHelperI32Const(0);           { fd = stdin }
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(1);
+    EmitHelperI32Const(addrNread);
+    EmitHelperCall(fdr);
+    EmitHelper(OpDrop);              { discard errno }
+
+    (* if nread == 0 then break (EOF) *)
+    EmitHelperI32Const(addrNread);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelper(OpI32Eqz);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* if readbuf[0] == 10 (LF) then break *)
+    EmitHelperI32Const(addrReadBuf);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelperI32Const(10);
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* if i < max_len then store byte *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpI32LtU);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      (* addr[i+1] := readbuf[0] *)
+      EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+      EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+      EmitHelper(OpI32Add);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Add);       { addr + i + 1 }
+      EmitHelperI32Const(addrReadBuf);
+      EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+      EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+      (* i := i + 1 *)
+      EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Add);
+      EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+    EmitHelper(OpEnd);
+
+    EmitHelper(OpBr); EmitHelperULEB128(0);  { continue loop }
+  EmitHelper(OpEnd);  { end loop }
+  EmitHelper(OpEnd);  { end block }
+
+  (* addr[0] := i (set length byte) *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+end;
+
+procedure BuildStrAppendHelper;
+(** Build __str_append(dst, maxlen, src) function body into helperCode.
+  Appends string src to dst, clamping total length to maxlen.
+  Parameters:
+    local 0 = dst (i32, address of destination string)
+    local 1 = maxlen (i32, max string length)
+    local 2 = src (i32, address of source string)
+  Extra locals:
+    local 3 = curLen (i32, current length of dst)
+    local 4 = srcLen (i32, length of src, clamped to available space)
+    local 5 = i (i32, loop counter)
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* curLen := dst[0] *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+
+  (* srcLen := src[0] *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(4);
+
+  (* avail := maxlen - curLen; if srcLen > avail then srcLen := avail *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+  EmitHelper(OpI32Sub);
+  EmitHelper(OpI32GtU);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelper(OpI32Sub);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(4);
+  EmitHelper(OpEnd);
+
+  (* dst[0] := curLen + srcLen *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+  EmitHelper(OpI32Add);
+  EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+  (* Copy src[1..srcLen] to dst[curLen+1..curLen+srcLen] *)
+  (* i := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(5);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);   { block $break }
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);    { loop $cont }
+    (* if i >= srcLen then break *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(5);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+    EmitHelper(OpI32GeU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* dst[curLen + i + 1] := src[i + 1] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(5);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(5);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+    (* i := i + 1 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(5);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(5);
+
+    EmitHelper(OpBr); EmitHelperULEB128(0);
+  EmitHelper(OpEnd);  { end loop }
+  EmitHelper(OpEnd);  { end block }
+end;
+
 procedure CopyBufToCode(var src: TCodeBuf);
 var i: longint;
 begin
@@ -3251,7 +4018,9 @@ end;
 
 procedure AssembleCodeSectionFixed;
 {** Assemble the code section.
-  Function order: slot 0 = _start, slot 1 = __write_int, slot 2 = __read_int, slots 3+ = user funcs. }
+  Function order: slot 0 = _start, slot 1 = __write_int, slot 2 = __read_int,
+  slot 3 = __str_assign, slot 4 = __write_str, slot 5 = __str_compare,
+  slot 6 = __read_str, slot 7 = __str_append, slots 8+ = user funcs. }
 var
   bodyLen: longint;
   i, j: longint;
@@ -3261,10 +4030,18 @@ begin
   { Function count }
   EmitULEB128(secCode, numDefinedFuncs);
 
-  { Slot 0: _start body — 0 locals + code + end }
-  bodyLen := 1 + startCode.len + 1;
-  EmitULEB128(secCode, bodyLen);
-  CodeBufEmit(secCode, 0);  { 0 local declarations }
+  { Slot 0: _start body — conditional locals + code + end }
+  if startNlocals > 0 then begin
+    bodyLen := 1 + 1 + 1 + startCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);          { 1 local declaration block }
+    CodeBufEmit(secCode, startNlocals); { N locals }
+    CodeBufEmit(secCode, WasmI32);    { of type i32 }
+  end else begin
+    bodyLen := 1 + startCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 0);  { 0 local declarations }
+  end;
   CopyBufToCode(startCode);
   CodeBufEmit(secCode, OpEnd);
 
@@ -3306,7 +4083,100 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 3+: User-defined function bodies (skip imports) }
+  { Slot 3: __str_assign body — always present (empty stub if unused) }
+  if needsStrAssign then begin
+    BuildStrAssignHelper;
+    (* locals: 1 declaration block = 2 locals of type i32 (len, i) *)
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 2);      { 2 locals: len, i }
+    CodeBufEmit(secCode, WasmI32); { of type i32 }
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 4: __write_str body — always present (empty stub if unused) }
+  if needsWriteStr then begin
+    BuildWriteStrHelper;
+    (* locals: 0 — uses only the parameter *)
+    bodyLen := 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 0);      { 0 local declarations }
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 5: __str_compare body — always present (empty stub if unused) }
+  if needsStrCompare then begin
+    BuildStrCompareHelper;
+    (* locals: 1 declaration block = 4 locals of type i32 (minLen, i, ca, cb) *)
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 4);      { 4 locals: minLen, i, ca, cb }
+    CodeBufEmit(secCode, WasmI32); { of type i32 }
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 6: __read_str body — always present (empty stub if unused) }
+  if needsReadStr then begin
+    BuildReadStrHelper;
+    (* locals: 1 declaration block = 1 local of type i32 (i) *)
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 1);      { 1 local: i }
+    CodeBufEmit(secCode, WasmI32); { of type i32 }
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 7: __str_append body — always present (empty stub if unused) }
+  if needsStrAppend then begin
+    BuildStrAppendHelper;
+    (* locals: 1 declaration block = 3 locals of type i32 (curLen, srcLen, i) *)
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 3);      { 3 locals: curLen, srcLen, i }
+    CodeBufEmit(secCode, WasmI32); { of type i32 }
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    { Empty stub: unreachable + end }
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 8+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
@@ -3359,8 +4229,12 @@ begin
 
   { Pre-register all WASM types before assembling sections }
   TypeVoidVoid;
-  TypeI32Void;  { always needed for __write_int stub and proc_exit }
+  TypeI32Void;  { always needed for __write_int stub, __write_str, and proc_exit }
   TypeVoidI32;  { always needed for __read_int stub }
+  TypeI32x3Void; { always needed for __str_assign stub }
+  TypeI32x2Void; { always needed for __read_str stub }
+  TypeI32x2I32;  { always needed for __str_compare stub }
+  { TypeI32x3Void already registered — reused for __str_append stub }
 
   { Assemble all sections }
   AssembleTypeSection;
@@ -3425,7 +4299,7 @@ begin
 
   numWasmTypes := 0;
   numImports := 0;
-  numDefinedFuncs := 3; { slot 0 = _start, slot 1 = __write_int, slot 2 = __read_int }
+  numDefinedFuncs := 8; { slots 0-7: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append }
   numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
@@ -3448,6 +4322,18 @@ begin
   needsProcExit := false;
   needsWriteInt := false;
   needsReadInt := false;
+  needsStrAssign := false;
+  needsWriteStr := false;
+  needsStrCompare := false;
+  needsReadStr := false;
+  needsStrAppend := false;
+  concatPieces := 0;
+  addrConcatScratch := -1;
+  needsConcatScratch := false;
+  startNlocals := 0;
+  curStringTempIdx := 0;    { for _start, local 0 is the string temp }
+  curFuncNeedsStringTemp := false;
+  exprType := tyInteger;
 
   hasPendingImport := false;
   hasPendingExport := false;
@@ -3494,6 +4380,10 @@ begin
   Expect(tkDot);
 
   LeaveScope;
+
+  { Set _start locals based on whether string temp was needed }
+  if curFuncNeedsStringTemp then
+    startNlocals := 1;
 
   { Assemble and write WASM module }
   WriteModule;
