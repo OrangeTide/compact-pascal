@@ -63,7 +63,7 @@ Each chapter adds one major capability to the compiler. After every chapter, you
 | 6 | Procedures and functions | Subroutines, parameters, local variables |
 | 7 | Nested scopes | Nested procedures with upvalue access |
 | 8 | Strings | Short strings, `readln`, string operations |
-| 9 | Structured types | Records, arrays, variant records, sets |
+| 9 | Structured types | Records, variant records, arrays, sets |
 | 10 | The full compiler | Remaining features, compiler directives, self-hosting |
 
 The book's source code *is* the compiler. Each chapter's code builds on the previous chapter, and the final chapter produces the complete Phase 1 compiler.
@@ -1324,7 +1324,7 @@ Exit code: 120 (5! = 120).
 
 ## Chapter 9: Structured Types
 
-*[Records: field offsets in linear memory, the `with` statement. Arrays: index calculation from base address and element size, bounds checking with `{$R+}`. Variant records: overlapping fields at the same offset, tag field. Set types: bitmap representation, `in`, `+`, `*`, `-` operators. Pointer types: address-of operator, dereference. `sizeof` intrinsic. Test: program with an array of records.]*
+*[Records first, then arrays — records introduce the type descriptor table and block copy with simpler codegen (constant field offsets), then arrays build on the same infrastructure adding index expressions and address computation. Records: type descriptor table for composite types, field offsets in linear memory, dot-selector in designators, whole-record assignment via block copy, the `with` statement. Variant records: overlapping fields at the same offset, tag field, record size is the largest variant — motivate with the compiler's own symbol table. Arrays: index calculation from base address and element size (`base + (i - lo) * elemSize`), bounds checking with `{$R+}`, multi-dimensional arrays as nested arrays, whole-array assignment. Set types: bitmap representation, `in`, `+`, `*`, `-` operators. Pointer types: address-of operator, dereference. `sizeof` intrinsic. Test: program with an array of records.]*
 
 \newpage
 
