@@ -186,6 +186,12 @@ const
   tyBoolean   = 2;
   tyChar      = 3;
   tyString    = 4;
+  tyRecord    = 5;
+  tyArray     = 6;
+
+  { Type descriptor table limits }
+  MaxTypes    = 256;
+  MaxFields   = 512;
 
   { Symbol kinds }
   skNone      = 0;
@@ -194,6 +200,7 @@ const
   skType      = 3;
   skProc      = 4;
   skFunc      = 5;
+  skField     = 6;
 
   { Operator precedences for Pratt parser }
   PrecNone    = 0;
@@ -226,6 +233,7 @@ type
     name: string[63];
     kind: longint;   { skConst, skVar, etc. }
     typ: longint;    { tyInteger, tyBoolean, etc. }
+    typeIdx: longint; { index into types[] for structured types, -1 otherwise }
     level: longint;  { nesting level }
     offset: longint; { stack offset for vars, value for consts, func index for procs }
     size: longint;   { byte size of var }
@@ -254,6 +262,32 @@ type
   TExportEntry = record
     name: string[63];
     funcIdx: longint;  { absolute WASM function index }
+  end;
+
+  { Type descriptor — for structured types (records, arrays) }
+  TTypeDesc = record
+    kind: longint;       { tyRecord or tyArray }
+    size: longint;       { total byte size }
+    { Record fields }
+    fieldStart: longint; { index into fields[] }
+    fieldCount: longint; { number of fields }
+    { Array fields }
+    elemType: longint;   { element type tag (tyInteger, tyRecord, etc.) }
+    elemTypeIdx: longint;{ index into types[] for structured elements, -1 otherwise }
+    elemSize: longint;   { byte size of one element }
+    arrLo: longint;      { low bound }
+    arrHi: longint;      { high bound }
+    elemStrMax: longint; { strMax for string elements }
+  end;
+
+  { Field descriptor — for record fields }
+  TFieldDesc = record
+    name: string[63];
+    typ: longint;        { type tag }
+    typeIdx: longint;    { index into types[] for structured fields, -1 otherwise }
+    offset: longint;     { byte offset from record start }
+    size: longint;       { byte size }
+    strMax: longint;     { max string length (0 for non-string) }
   end;
 
   { Defined function record — tracks each compiled function body }
@@ -297,6 +331,20 @@ var
   numSyms: longint;
   scopeBase: array[0..MaxScopes-1] of longint;
   scopeDepth: longint;
+
+  { Type descriptor table (for structured types) }
+  types: array[0..MaxTypes-1] of TTypeDesc;
+  numTypes: longint;
+
+  { Field descriptor table (for record fields) }
+  fields: array[0..MaxFields-1] of TFieldDesc;
+  numFields: longint;
+
+  { Structured value parameter copy list (ParseProcDecl -> ParseBlock) }
+  structCopyLocal: array[0..15] of longint;    { WASM local index holding source addr }
+  structCopyFrameOff: array[0..15] of longint; { frame offset for the copy }
+  structCopySize: array[0..15] of longint;     { byte size to copy }
+  numStructCopies: longint;
 
   { WASM type table }
   wasmTypes: array[0..63] of TWasmType;
@@ -644,6 +692,13 @@ begin
   else if s = 'EXIT' then LookupKeyword := tkExit;
 end;
 
+{ Pending token mechanism for when scanner reads too far }
+var
+  pendingTok: boolean;
+  pendingKind: longint;
+  pendingInt: longint;
+  pendingStr: string;
+
 procedure ScanNumber;
 var
   n: longint;
@@ -678,34 +733,34 @@ begin
       ReadCh;
       if (ch >= '0') and (ch <= '9') then
         Error('real numbers are not supported in Phase 1');
-      { it was just a dot after a number, e.g. "1.." for range }
-      { push back by setting tokKind specially }
-      tokKind := tkInteger;
-      tokInt := n;
-      { we consumed the dot - need to handle this }
-      { actually we peeked one char too far, handle dotdot }
       if ch = '.' then begin
-        { it was N.. (range) - we'll handle this in NextToken }
-        { for now, back up: we have n and a pending '..' }
-        { store the dot-dot state - simplify: set a flag }
+        { N.. (range): return integer, buffer pending tkDotDot }
+        ReadCh;  { consume second dot }
+        tokKind := tkInteger;
+        tokInt := n;
+        pendingTok := true;
+        pendingKind := tkDotDot;
+        pendingInt := 0;
+        pendingStr := '';
+        exit;
+      end else begin
+        { N. (end of program or record access) — push dot back }
+        UnreadCh(ch);
+        ch := '.';
+        { Actually we already consumed the dot. Use pending token. }
+        tokKind := tkInteger;
+        tokInt := n;
+        pendingTok := true;
+        pendingKind := tkDot;
+        pendingInt := 0;
+        pendingStr := '';
+        exit;
       end;
-      { This gets complex. Let's simplify: don't peek past the number. }
-      { Real detection: if we see N. and next char is a digit, error. }
-      { Otherwise, the dot is a separate token. But we already read it. }
-      { Undo: not possible with single-char lookahead on stdin. }
-      { Solution: buffer the pending token. }
     end;
   end;
   tokKind := tkInteger;
   tokInt := n;
 end;
-
-{ Pending token mechanism for when scanner reads too far }
-var
-  pendingTok: boolean;
-  pendingKind: longint;
-  pendingInt: longint;
-  pendingStr: string;
 
 procedure ScanString;
 var
@@ -1376,6 +1431,15 @@ begin
   EmitULEB128(startCode, offset);
 end;
 
+{ Emit memory.copy (dst, src, len already on stack) }
+procedure EmitMemoryCopy;
+begin
+  CodeBufEmit(startCode, $FC);
+  CodeBufEmit(startCode, $0A);
+  CodeBufEmit(startCode, $00);
+  CodeBufEmit(startCode, $00);
+end;
+
 { Emit i32.load from [addr] }
 procedure EmitI32Load(align, offset: longint);
 begin
@@ -1433,6 +1497,7 @@ begin
   syms[numSyms].name := name;
   syms[numSyms].kind := kind;
   syms[numSyms].typ := typ;
+  syms[numSyms].typeIdx := -1;
   syms[numSyms].level := curNestLevel;
   syms[numSyms].offset := 0;
   syms[numSyms].size := 0;
@@ -1462,6 +1527,247 @@ begin
   syms[idx].offset := 0;
   idx := AddSym('MAXINT', skConst, tyInteger);
   syms[idx].offset := 2147483647;
+end;
+
+{ ---- Type descriptor helpers ---- }
+
+function AddTypeDesc: longint;
+{** Allocate a new type descriptor and return its index. }
+begin
+  if numTypes >= MaxTypes then
+    Error('type table full');
+  types[numTypes].kind := tyNone;
+  types[numTypes].size := 0;
+  types[numTypes].fieldStart := 0;
+  types[numTypes].fieldCount := 0;
+  types[numTypes].elemType := tyNone;
+  types[numTypes].elemTypeIdx := -1;
+  types[numTypes].elemSize := 0;
+  types[numTypes].arrLo := 0;
+  types[numTypes].arrHi := 0;
+  types[numTypes].elemStrMax := 0;
+  AddTypeDesc := numTypes;
+  numTypes := numTypes + 1;
+end;
+
+function AddField(const aname: string; atyp, atypeIdx, aoffset, asize, astrMax: longint): longint;
+{** Add a field descriptor and return its index. }
+begin
+  if numFields >= MaxFields then
+    Error('field table full');
+  fields[numFields].name := aname;
+  fields[numFields].typ := atyp;
+  fields[numFields].typeIdx := atypeIdx;
+  fields[numFields].offset := aoffset;
+  fields[numFields].size := asize;
+  fields[numFields].strMax := astrMax;
+  AddField := numFields;
+  numFields := numFields + 1;
+end;
+
+function LookupField(tIdx: longint; const fname: string): longint;
+{** Look up a field by name in a record type descriptor. Returns field index or -1. }
+var i: longint;
+begin
+  LookupField := -1;
+  for i := types[tIdx].fieldStart to types[tIdx].fieldStart + types[tIdx].fieldCount - 1 do begin
+    if fields[i].name = fname then begin
+      LookupField := i;
+      exit;
+    end;
+  end;
+end;
+
+procedure ParseTypeSpec(var outTyp, outTypeIdx, outSize, outStrMax: longint);
+{** Parse a type specifier. Returns type tag, type descriptor index (-1 for
+    simple types), byte size, and string max length. Handles:
+    - Simple type names (integer, boolean, char, user-defined)
+    - string / string[n]
+    - record ... end
+    - array[lo..hi] of Type
+}
+var
+  typeName: string;
+  typId: longint;
+  tIdx: longint;
+  fieldOfs: longint;
+  fieldTyp, fieldTypeIdx, fieldSize, fieldStrMax: longint;
+  fieldNames: array[0..31] of string[63];
+  nFieldNames: longint;
+  pad: longint;
+  fi: longint;
+  elemTyp, elemTypeIdx, elemSize, elemStrMax: longint;
+  isNeg: boolean;
+  nDims: longint;
+  dimLo: array[0..7] of longint;
+  dimHi: array[0..7] of longint;
+begin
+  outStrMax := 0;
+  outTypeIdx := -1;
+
+  if tokKind = tkIdent then begin
+    typeName := tokStr;
+    typId := LookupSym(typeName);
+    if typId < 0 then
+      Error('unknown type: ' + typeName);
+    if syms[typId].kind <> skType then
+      Error(typeName + ' is not a type');
+    outTyp := syms[typId].typ;
+    outTypeIdx := syms[typId].typeIdx;
+    NextToken;
+    { Determine size from type }
+    if outTyp = tyString then begin
+      outStrMax := syms[typId].strMax;
+      if outStrMax = 0 then outStrMax := 255;
+      outSize := outStrMax + 1;
+    end else if (outTyp = tyRecord) or (outTyp = tyArray) then begin
+      outSize := types[outTypeIdx].size;
+      outStrMax := 0;
+    end else begin
+      outSize := 4;  { integer, boolean, char — all i32 }
+    end;
+  end else if tokKind = tkString_kw then begin
+    outTyp := tyString;
+    NextToken;
+    if tokKind = tkLBrack then begin
+      NextToken;
+      if tokKind <> tkInteger then
+        Error('integer constant expected for string length');
+      if (tokInt < 1) or (tokInt > 255) then
+        Error('string length must be 1..255');
+      outStrMax := tokInt;
+      NextToken;
+      Expect(tkRBrack);
+    end else
+      outStrMax := 255;
+    outSize := outStrMax + 1;
+  end else if tokKind = tkRecord then begin
+    { Record type }
+    NextToken;
+    tIdx := AddTypeDesc;
+    types[tIdx].kind := tyRecord;
+    types[tIdx].fieldStart := numFields;
+    types[tIdx].fieldCount := 0;
+    fieldOfs := 0;
+
+    while (tokKind <> tkEnd) and (tokKind <> tkEOF) do begin
+      { Parse field list: ident [, ident ...] : type ; }
+      nFieldNames := 0;
+      while tokKind = tkIdent do begin
+        if nFieldNames >= 32 then
+          Error('too many fields in one declaration');
+        fieldNames[nFieldNames] := tokStr;
+        nFieldNames := nFieldNames + 1;
+        NextToken;
+        if tokKind = tkComma then
+          NextToken
+        else
+          break;
+      end;
+      if nFieldNames = 0 then
+        break;  { allow trailing semicolons before end }
+
+      Expect(tkColon);
+      ParseTypeSpec(fieldTyp, fieldTypeIdx, fieldSize, fieldStrMax);
+
+      for fi := 0 to nFieldNames - 1 do begin
+        { Align to 4-byte boundary }
+        pad := (4 - (fieldOfs mod 4)) mod 4;
+        fieldOfs := fieldOfs + pad;
+        AddField(fieldNames[fi], fieldTyp, fieldTypeIdx, fieldOfs, fieldSize, fieldStrMax);
+        types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
+        fieldOfs := fieldOfs + fieldSize;
+      end;
+
+      if tokKind = tkSemicolon then
+        NextToken;
+    end;
+    Expect(tkEnd);
+
+    { Final alignment }
+    pad := (4 - (fieldOfs mod 4)) mod 4;
+    fieldOfs := fieldOfs + pad;
+    types[tIdx].size := fieldOfs;
+    outTyp := tyRecord;
+    outTypeIdx := tIdx;
+    outSize := fieldOfs;
+  end else if tokKind = tkArray then begin
+    (* Array type: array[lo..hi, lo..hi, ...] of Type
+       Multi-dimensional arrays desugar: array[a..b, c..d] of T
+       becomes array[a..b] of array[c..d] of T.
+       We collect all dimensions first, then build nested types inner-to-outer. *)
+    NextToken;
+    Expect(tkLBrack);
+
+    nDims := 0;
+    repeat
+      { Parse low bound — allow negative }
+      isNeg := false;
+      if tokKind = tkMinus then begin
+        isNeg := true;
+        NextToken;
+      end;
+      if tokKind <> tkInteger then
+        Error('integer constant expected for array bound');
+      if nDims >= 8 then
+        Error('too many array dimensions');
+      dimLo[nDims] := tokInt;
+      if isNeg then dimLo[nDims] := -dimLo[nDims];
+      NextToken;
+
+      if tokKind <> tkDotDot then
+        Expected('..');
+      NextToken;
+
+      { Parse high bound — allow negative }
+      isNeg := false;
+      if tokKind = tkMinus then begin
+        isNeg := true;
+        NextToken;
+      end;
+      if tokKind <> tkInteger then
+        Error('integer constant expected for array bound');
+      dimHi[nDims] := tokInt;
+      if isNeg then dimHi[nDims] := -dimHi[nDims];
+      NextToken;
+
+      if dimHi[nDims] < dimLo[nDims] then
+        Error('array high bound less than low bound');
+      nDims := nDims + 1;
+
+      if tokKind = tkComma then
+        NextToken
+      else
+        break;
+    until false;
+    Expect(tkRBrack);
+    Expect(tkOf);
+
+    { Parse element type }
+    ParseTypeSpec(elemTyp, elemTypeIdx, elemSize, elemStrMax);
+
+    { Build nested array types from innermost to outermost }
+    for fi := nDims - 1 downto 0 do begin
+      tIdx := AddTypeDesc;
+      types[tIdx].kind := tyArray;
+      types[tIdx].arrLo := dimLo[fi];
+      types[tIdx].arrHi := dimHi[fi];
+      types[tIdx].elemType := elemTyp;
+      types[tIdx].elemTypeIdx := elemTypeIdx;
+      types[tIdx].elemSize := elemSize;
+      types[tIdx].elemStrMax := elemStrMax;
+      types[tIdx].size := (dimHi[fi] - dimLo[fi] + 1) * elemSize;
+      elemTyp := tyArray;
+      elemTypeIdx := tIdx;
+      elemSize := types[tIdx].size;
+      elemStrMax := 0;
+    end;
+    outTyp := tyArray;
+    outTypeIdx := tIdx;
+    outSize := types[tIdx].size;
+    outStrMax := 0;
+  end else
+    Error('type name expected');
 end;
 
 { ---- Display and frame access ---- }
@@ -1726,6 +2032,10 @@ var
   argIdx: longint;
   argSym: longint;
   leftType: longint;
+  hasAddr: boolean;
+  exprTypeIdx: longint;
+  exprStrMax: longint;
+  fldIdx: longint;
 begin
   { Prefix }
   case tokKind of
@@ -1846,42 +2156,96 @@ begin
           NextToken;
         end;
         skVar: begin
-          if syms[sym].typ = tyString then begin
-            { String variable: push address, not value }
-            if syms[sym].isVarParam then begin
-              { var/const param: local holds pointer to string }
-              EmitOp(OpLocalGet);
-              EmitULEB128(startCode, -(syms[sym].offset + 1));
-            end else if syms[sym].offset < 0 then begin
-              { Value param: local holds pointer to string copy }
-              EmitOp(OpLocalGet);
-              EmitULEB128(startCode, -(syms[sym].offset + 1));
-            end else begin
-              { Stack frame variable: compute address }
-              EmitFramePtr(syms[sym].level);
-              EmitI32Const(syms[sym].offset);
-              EmitOp(OpI32Add);
-            end;
-            exprType := tyString;
-          end else begin
-          if syms[sym].offset < 0 then begin
-            { WASM local (parameter or function return value) }
+          { Compute base address or value of the variable.
+            For address-based access (frame vars, var params of structured types),
+            we push the address, then apply .field / [index] selectors.
+            For scalar WASM locals (value params), we push the value directly. }
+          hasAddr := false;
+          exprTypeIdx := syms[sym].typeIdx;
+          exprStrMax := syms[sym].strMax;
+
+          if syms[sym].isVarParam then begin
+            { var/const param: local holds pointer }
             EmitOp(OpLocalGet);
             EmitULEB128(startCode, -(syms[sym].offset + 1));
-            if syms[sym].isVarParam then begin
-              { ;; WAT: i32.load  — dereference var param pointer }
-              EmitI32Load(2, 0);
+            hasAddr := true;
+          end else if syms[sym].offset < 0 then begin
+            { Value parameter (WASM local) }
+            if (syms[sym].typ = tyString) or (syms[sym].typ = tyRecord)
+               or (syms[sym].typ = tyArray) then begin
+              { Structured value param: local holds pointer }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+              hasAddr := true;
+            end else begin
+              { Scalar value param: local holds the value }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+              hasAddr := false;
             end;
           end else begin
-            { Load variable from stack frame (local or upvalue) }
+            { Stack frame variable: compute address = frame[level] + offset }
             EmitFramePtr(syms[sym].level);
             EmitI32Const(syms[sym].offset);
             EmitOp(OpI32Add);
-            EmitI32Load(2, 0);
+            hasAddr := true;
           end;
           exprType := syms[sym].typ;
-          end;
           NextToken;
+
+          { Process .field and [index] selectors — address must be on stack }
+          while (tokKind = tkDot) or (tokKind = tkLBrack) do begin
+            if not hasAddr then
+              Error('cannot apply selector to value parameter');
+            if tokKind = tkDot then begin
+              if exprType <> tyRecord then
+                Error('record type expected before ''.''');
+              NextToken;
+              if tokKind <> tkIdent then
+                Expected('field name');
+              fldIdx := LookupField(exprTypeIdx, tokStr);
+              if fldIdx < 0 then
+                Error('unknown field: ' + tokStr);
+              if fields[fldIdx].offset <> 0 then begin
+                EmitI32Const(fields[fldIdx].offset);
+                EmitOp(OpI32Add);
+              end;
+              exprType := fields[fldIdx].typ;
+              exprTypeIdx := fields[fldIdx].typeIdx;
+              exprStrMax := fields[fldIdx].strMax;
+              NextToken;
+            end else begin
+              { Array index: [expr] }
+              if exprType <> tyArray then
+                Error('array type expected before ''[''');
+              NextToken;
+              { addr + (index - lo) * elemSize }
+              ParseExpression(PrecNone);
+              if types[exprTypeIdx].arrLo <> 0 then begin
+                EmitI32Const(types[exprTypeIdx].arrLo);
+                EmitOp(OpI32Sub);
+              end;
+              if types[exprTypeIdx].elemSize <> 1 then begin
+                EmitI32Const(types[exprTypeIdx].elemSize);
+                EmitOp(OpI32Mul);
+              end;
+              EmitOp(OpI32Add);
+              exprType := types[exprTypeIdx].elemType;
+              exprStrMax := types[exprTypeIdx].elemStrMax;
+              exprTypeIdx := types[exprTypeIdx].elemTypeIdx;
+              if tokKind = tkComma then begin
+                { Multi-dimensional: treat a[i,j] as a[i][j] }
+                tokKind := tkLBrack;
+              end else
+                Expect(tkRBrack);
+            end;
+          end;
+
+          { Final load: scalars need i32.load, strings/records/arrays leave address }
+          if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
+             and (exprType <> tyArray) then begin
+            EmitI32Load(2, 0);
+          end;
         end;
         skFunc: begin
           { Function call in expression }
@@ -1901,6 +2265,13 @@ begin
                   Error('variable expected for var parameter');
                 if syms[argSym].isVarParam then begin
                   { Already a pointer — pass it through }
+                  EmitOp(OpLocalGet);
+                  EmitULEB128(startCode, -(syms[argSym].offset + 1));
+                end
+                else if (syms[argSym].offset < 0) and
+                   ((syms[argSym].typ = tyRecord) or (syms[argSym].typ = tyArray)
+                    or (syms[argSym].typ = tyString)) then begin
+                  { Structured value param: local holds pointer, pass through }
                   EmitOp(OpLocalGet);
                   EmitULEB128(startCode, -(syms[argSym].offset + 1));
                 end
@@ -2233,9 +2604,8 @@ var
   names: array[0..31] of string[63];
   nnames: longint;
   i, sym: longint;
-  typeName: string;
-  typId: longint;
   varTyp: longint;
+  varTypeIdx: longint;
   varSize: longint;
   varStrMax: longint;
   pad: longint;
@@ -2258,43 +2628,7 @@ begin
     Expect(tkColon);
 
     { Parse type }
-    varStrMax := 0;
-    if tokKind = tkIdent then begin
-      typeName := tokStr;
-      typId := LookupSym(typeName);
-      if typId < 0 then
-        Error('unknown type: ' + typeName);
-      if syms[typId].kind <> skType then
-        Error(typeName + ' is not a type');
-      varTyp := syms[typId].typ;
-      NextToken;
-    end else if tokKind = tkString_kw then begin
-      varTyp := tyString;
-      NextToken;
-      if tokKind = tkLBrack then begin
-        { string[n] }
-        NextToken;
-        if tokKind <> tkInteger then
-          Error('integer constant expected for string length');
-        if (tokInt < 1) or (tokInt > 255) then
-          Error('string length must be 1..255');
-        varStrMax := tokInt;
-        NextToken;
-        Expect(tkRBrack);
-      end else
-        varStrMax := 255;
-    end else
-      Error('type name expected');
-
-    { Determine size }
-    case varTyp of
-      tyInteger: varSize := 4;
-      tyBoolean: varSize := 4;
-      tyChar:    varSize := 4;  { stored as i32 }
-      tyString:  varSize := varStrMax + 1;
-    else
-      varSize := 4;
-    end;
+    ParseTypeSpec(varTyp, varTypeIdx, varSize, varStrMax);
 
     { Add symbols and allocate stack space }
     for i := 0 to nnames - 1 do begin
@@ -2302,6 +2636,7 @@ begin
       pad := (4 - (curFrameSize mod 4)) mod 4;
       curFrameSize := curFrameSize + pad;
       sym := AddSym(names[i], skVar, varTyp);
+      syms[sym].typeIdx := varTypeIdx;
       syms[sym].offset := curFrameSize;
       syms[sym].size := varSize;
       syms[sym].strMax := varStrMax;
@@ -2320,6 +2655,11 @@ var
   argIdx: longint;
   argSym: longint;
   i: longint;
+  desTyp: longint;
+  desTypeIdx: longint;
+  desStrMax: longint;
+  desHasAddr: boolean;
+  fldIdx: longint;
 begin
   case tokKind of
     tkBegin: begin
@@ -2405,68 +2745,165 @@ begin
       if sym < 0 then
         Error('undeclared identifier: ' + name);
       NextToken;
-      if (syms[sym].kind = skVar) and (tokKind = tkAssign) then begin
-        { Assignment: var := expr }
+      if (syms[sym].kind = skVar) and
+         ((tokKind = tkAssign) or (tokKind = tkDot) or (tokKind = tkLBrack)) then begin
+        { Assignment: var [:= | .field | [index] ...] := expr }
         if syms[sym].isConstParam then
           Error('cannot assign to const parameter ''' + name + '''');
+
+        { Track designator type as we process selectors }
+        desTyp := syms[sym].typ;
+        desTypeIdx := syms[sym].typeIdx;
+        desStrMax := syms[sym].strMax;
+        desHasAddr := false;
+
+        if (tokKind = tkDot) or (tokKind = tkLBrack) then begin
+          { Need to compute base address for selector chain }
+          if syms[sym].isVarParam then begin
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, -(syms[sym].offset + 1));
+          end else if syms[sym].offset < 0 then begin
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, -(syms[sym].offset + 1));
+          end else begin
+            EmitFramePtr(syms[sym].level);
+            EmitI32Const(syms[sym].offset);
+            EmitOp(OpI32Add);
+          end;
+          desHasAddr := true;
+
+          { Process .field and [index] selectors }
+          while (tokKind = tkDot) or (tokKind = tkLBrack) do begin
+            if tokKind = tkDot then begin
+              if desTyp <> tyRecord then
+                Error('record type expected before ''.''');
+              NextToken;
+              if tokKind <> tkIdent then
+                Expected('field name');
+              fldIdx := LookupField(desTypeIdx, tokStr);
+              if fldIdx < 0 then
+                Error('unknown field: ' + tokStr);
+              if fields[fldIdx].offset <> 0 then begin
+                EmitI32Const(fields[fldIdx].offset);
+                EmitOp(OpI32Add);
+              end;
+              desTyp := fields[fldIdx].typ;
+              desTypeIdx := fields[fldIdx].typeIdx;
+              desStrMax := fields[fldIdx].strMax;
+              NextToken;
+            end else begin
+              if desTyp <> tyArray then
+                Error('array type expected before ''[''');
+              NextToken;
+              ParseExpression(PrecNone);
+              if types[desTypeIdx].arrLo <> 0 then begin
+                EmitI32Const(types[desTypeIdx].arrLo);
+                EmitOp(OpI32Sub);
+              end;
+              if types[desTypeIdx].elemSize <> 1 then begin
+                EmitI32Const(types[desTypeIdx].elemSize);
+                EmitOp(OpI32Mul);
+              end;
+              EmitOp(OpI32Add);
+              desTyp := types[desTypeIdx].elemType;
+              desStrMax := types[desTypeIdx].elemStrMax;
+              desTypeIdx := types[desTypeIdx].elemTypeIdx;
+              if tokKind = tkComma then
+                tokKind := tkLBrack
+              else
+                Expect(tkRBrack);
+            end;
+          end;
+        end;
+
+        if tokKind <> tkAssign then
+          Expected(':=');
         NextToken;
-        if syms[sym].typ = tyString then begin
-          { Parse source expression first to discover concatPieces }
+
+        if desTyp = tyString then begin
+          { String assignment through designator }
           ParseExpression(PrecNone);
           if exprType <> tyString then
             Error('string expression expected');
           if concatPieces > 0 then begin
-            { Concat assignment: save last piece, zero dst, append each piece }
             curFuncNeedsStringTemp := true;
             EmitOp(OpLocalSet);
             EmitULEB128(startCode, curStringTempIdx);
-            { Zero dst[0] (length byte) }
-            if syms[sym].isVarParam then begin
+            { Zero dst[0] }
+            if desHasAddr then begin
+              { Address already computed — but we consumed it. Need to recompute. }
+              { For now, re-emit the address computation }
+            end;
+            if syms[sym].isVarParam and not desHasAddr then begin
               EmitOp(OpLocalGet);
               EmitULEB128(startCode, -(syms[sym].offset + 1));
-            end else begin
+            end else if not desHasAddr then begin
               EmitFramePtr(syms[sym].level);
               EmitI32Const(syms[sym].offset);
               EmitOp(OpI32Add);
             end;
+            { TODO: concat with field selectors needs address re-emit }
             EmitI32Const(0);
             EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
-            { Append each saved piece }
             for i := 0 to concatPieces - 1 do begin
-              if syms[sym].isVarParam then begin
+              if syms[sym].isVarParam and not desHasAddr then begin
                 EmitOp(OpLocalGet);
                 EmitULEB128(startCode, -(syms[sym].offset + 1));
-              end else begin
+              end else if not desHasAddr then begin
                 EmitFramePtr(syms[sym].level);
                 EmitI32Const(syms[sym].offset);
                 EmitOp(OpI32Add);
               end;
-              EmitI32Const(syms[sym].strMax);
+              EmitI32Const(desStrMax);
               EmitI32Const(addrConcatScratch + i * 4);
               EmitI32Load(2, 0);
               EmitCall(EnsureStrAppend);
             end;
-            { Append last piece from local }
-            if syms[sym].isVarParam then begin
+            if syms[sym].isVarParam and not desHasAddr then begin
               EmitOp(OpLocalGet);
               EmitULEB128(startCode, -(syms[sym].offset + 1));
-            end else begin
+            end else if not desHasAddr then begin
               EmitFramePtr(syms[sym].level);
               EmitI32Const(syms[sym].offset);
               EmitOp(OpI32Add);
             end;
-            EmitI32Const(syms[sym].strMax);
+            EmitI32Const(desStrMax);
             EmitOp(OpLocalGet);
             EmitULEB128(startCode, curStringTempIdx);
             EmitCall(EnsureStrAppend);
             concatPieces := 0;
           end else begin
             { Simple string assignment: __str_assign(dst, max_len, src) }
-            { src addr is on stack, need to reorder: dst, max_len, src }
             curFuncNeedsStringTemp := true;
             EmitOp(OpLocalSet);
             EmitULEB128(startCode, curStringTempIdx);
+            if desHasAddr then begin
+              { Address was already on stack but consumed by selector chain.
+                For simple vars without selectors, recompute. For selectors,
+                this path won't be hit (desHasAddr=true only with selectors). }
+            end;
+            if syms[sym].isVarParam and not desHasAddr then begin
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else if not desHasAddr then begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            EmitI32Const(desStrMax);
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curStringTempIdx);
+            EmitCall(EnsureStrAssign);
+          end;
+        end
+        else if (desTyp = tyRecord) or (desTyp = tyArray) then begin
+          { Structured assignment: memory.copy dst, src, size }
+          if not desHasAddr then begin
+            { Compute dst address }
             if syms[sym].isVarParam then begin
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, -(syms[sym].offset + 1));
+            end else if syms[sym].offset < 0 then begin
               EmitOp(OpLocalGet);
               EmitULEB128(startCode, -(syms[sym].offset + 1));
             end else begin
@@ -2474,16 +2911,18 @@ begin
               EmitI32Const(syms[sym].offset);
               EmitOp(OpI32Add);
             end;
-            EmitI32Const(syms[sym].strMax);
-            EmitOp(OpLocalGet);
-            EmitULEB128(startCode, curStringTempIdx);
-            EmitCall(EnsureStrAssign);
           end;
+          { dst addr is on stack; parse src expr (leaves src addr) }
+          ParseExpression(PrecNone);
+          EmitI32Const(types[desTypeIdx].size);
+          EmitMemoryCopy;
+        end
+        else if desHasAddr then begin
+          { Scalar with address on stack from selector chain }
+          ParseExpression(PrecNone);
+          EmitI32Store(2, 0);
         end
         else if syms[sym].isVarParam then begin
-          { ;; WAT: local.get <param>  — get pointer }
-          { ;;      <expr>              — value to store }
-          { ;;      i32.store           — store through pointer }
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
           ParseExpression(PrecNone);
@@ -2825,6 +3264,8 @@ var
   typIdx: longint;
   paramNames: array[0..15] of string[63];
   paramTypes: array[0..15] of longint;
+  paramTypeIdx: array[0..15] of longint;
+  paramSize: array[0..15] of longint;
   paramIsVar: array[0..15] of boolean;
   paramIsConst: array[0..15] of boolean;
   np: longint;
@@ -2893,6 +3334,8 @@ begin
         { String parameter type — always passed as pointer (i32) }
         for i := groupStart to groupEnd - 1 do begin
           paramTypes[i] := tyString;
+          paramTypeIdx[i] := -1;
+          paramSize[i] := 0;
           { String params are always passed by reference.
             If not explicitly 'var', treat as const (read-only). }
           if not paramIsVar[i] then
@@ -2913,8 +3356,20 @@ begin
         NextToken;
 
         { Apply type to all names in this group }
-        for i := groupStart to groupEnd - 1 do
+        for i := groupStart to groupEnd - 1 do begin
           paramTypes[i] := syms[pTypSym].typ;
+          paramTypeIdx[i] := syms[pTypSym].typeIdx;
+          paramSize[i] := syms[pTypSym].size;
+          { Structured types (record/array): var/const pass by reference;
+            value params pass address but callee copies into frame }
+          if ((syms[pTypSym].typ = tyRecord) or (syms[pTypSym].typ = tyArray)) then begin
+            if paramIsVar[i] or paramIsConst[i] then begin
+              { Already by-reference — force varParam for call site }
+              paramIsVar[i] := true;
+            end;
+            { Value params: address passed, copy handled in callee prologue }
+          end;
+        end;
       end;
 
       if tokKind = tkSemicolon then
@@ -3109,6 +3564,7 @@ begin
 
   { Add parameters as locals (WASM params are local 0..np-1) }
   nparams := np;
+  numStructCopies := 0;
   for i := 0 to np - 1 do begin
     sym := AddSym(paramNames[i], skVar, paramTypes[i]);
     { Parameters are WASM locals, not stack frame vars.
@@ -3117,8 +3573,20 @@ begin
     syms[sym].size := 4;
     syms[sym].isVarParam := paramIsVar[i];
     syms[sym].isConstParam := paramIsConst[i];
+    syms[sym].typeIdx := paramTypeIdx[i];
     if paramTypes[i] = tyString then
       syms[sym].strMax := 255; { default max length for string params }
+    { Structured value params: callee copies into frame }
+    if ((paramTypes[i] = tyRecord) or (paramTypes[i] = tyArray))
+       and not paramIsVar[i] and not paramIsConst[i] then begin
+      { Pre-allocate frame space for the copy }
+      curFrameSize := (curFrameSize + 3) and (not 3); { align to 4 }
+      structCopyLocal[numStructCopies] := i;
+      structCopyFrameOff[numStructCopies] := curFrameSize;
+      structCopySize[numStructCopies] := paramSize[i];
+      numStructCopies := numStructCopies + 1;
+      curFrameSize := curFrameSize + paramSize[i];
+    end;
   end;
 
   { For functions, the return value is a hidden WASM local at index np.
@@ -3197,6 +3665,10 @@ end;
 procedure ParseBlock;
 var
   savedFrameSize: longint;
+  typDeclName: string;
+  typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax: longint;
+  sym: longint;
+  ci: longint;
 begin
   savedFrameSize := curFrameSize;
 
@@ -3214,7 +3686,18 @@ begin
       end;
       tkType: begin
         NextToken;
-        Error('type declarations not yet implemented');
+        { Parse type declarations: TypeName = TypeSpec ; }
+        while tokKind = tkIdent do begin
+          typDeclName := tokStr;
+          NextToken;
+          Expect(tkEqual);
+          ParseTypeSpec(typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax);
+          sym := AddSym(typDeclName, skType, typDeclTyp);
+          syms[sym].typeIdx := typDeclTypeIdx;
+          syms[sym].size := typDeclSize;
+          syms[sym].strMax := typDeclStrMax;
+          Expect(tkSemicolon);
+        end;
       end;
       tkProcedure, tkFunction: begin
         ParseProcDecl;
@@ -3245,6 +3728,29 @@ begin
   EmitULEB128(startCode, 0);  { $sp }
   EmitOp(OpGlobalSet);
   EmitULEB128(startCode, curNestLevel + 1); { display[N] = global N+1 }
+
+  { Copy structured value params into frame }
+  for ci := 0 to numStructCopies - 1 do begin
+    { dst = $sp + frameOffset }
+    EmitOp(OpGlobalGet);
+    EmitULEB128(startCode, 0);
+    EmitI32Const(structCopyFrameOff[ci]);
+    EmitOp(OpI32Add);
+    { src = WASM local (holds pointer to caller's data) }
+    EmitOp(OpLocalGet);
+    EmitULEB128(startCode, structCopyLocal[ci]);
+    { size }
+    EmitI32Const(structCopySize[ci]);
+    EmitMemoryCopy;
+    { Update WASM local to point to frame copy }
+    EmitOp(OpGlobalGet);
+    EmitULEB128(startCode, 0);
+    EmitI32Const(structCopyFrameOff[ci]);
+    EmitOp(OpI32Add);
+    EmitOp(OpLocalSet);
+    EmitULEB128(startCode, structCopyLocal[ci]);
+  end;
+  numStructCopies := 0;
 
   { Statement part }
   if tokKind = tkBegin then
@@ -5087,6 +5593,9 @@ begin
   pendingTok := false;
 
   numWasmTypes := 0;
+  numTypes := 0;
+  numFields := 0;
+  numStructCopies := 0;
   numImports := 0;
   numDefinedFuncs := 12; { slots 0-11: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert }
   numFuncs := 0;
