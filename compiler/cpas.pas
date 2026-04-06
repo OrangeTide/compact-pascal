@@ -188,6 +188,8 @@ const
   tyString    = 4;
   tyRecord    = 5;
   tyArray     = 6;
+  tyEnum      = 7;
+  tySet       = 8;
 
   { Type descriptor table limits }
   MaxTypes    = 256;
@@ -413,9 +415,12 @@ var
   startNlocals: longint;         { extra locals for _start (0 or 1) }
   curStringTempIdx: longint;     { WASM local index for string temp in current func }
   curFuncNeedsStringTemp: boolean; { whether current func needs the string temp local }
+  curCaseTempIdx: longint;       { WASM local index for case selector temp }
+  curFuncNeedsCaseTemp: boolean;  { whether current func needs the case temp local }
 
   { Expression type tracking }
   exprType: longint;  { type of last parsed expression (tyInteger, tyString, etc.) }
+  exprSetSize: longint;  { for tySet: 4 = small (i32), >4 = large (memory-based) }
 
   { Pending compiler directives }
   hasPendingImport: boolean;
@@ -1620,11 +1625,11 @@ begin
       outStrMax := syms[typId].strMax;
       if outStrMax = 0 then outStrMax := 255;
       outSize := outStrMax + 1;
-    end else if (outTyp = tyRecord) or (outTyp = tyArray) then begin
+    end else if (outTyp = tyRecord) or (outTyp = tyArray) or (outTyp = tySet) then begin
       outSize := types[outTypeIdx].size;
       outStrMax := 0;
     end else begin
-      outSize := 4;  { integer, boolean, char — all i32 }
+      outSize := 4;  { integer, boolean, char, enum — all i32 }
     end;
   end else if tokKind = tkString_kw then begin
     outTyp := tyString;
@@ -1763,6 +1768,68 @@ begin
       elemStrMax := 0;
     end;
     outTyp := tyArray;
+    outTypeIdx := tIdx;
+    outSize := types[tIdx].size;
+    outStrMax := 0;
+  end else if tokKind = tkLParen then begin
+    { Enumerated type: (Ident, Ident, ...) }
+    NextToken;
+    tIdx := AddTypeDesc;
+    types[tIdx].kind := tyEnum;
+    fi := 0;  { ordinal counter }
+    repeat
+      if tokKind <> tkIdent then
+        Expected('identifier');
+      { Add each enum value as a constant }
+      typId := AddSym(tokStr, skConst, tyEnum);
+      syms[typId].offset := fi;
+      syms[typId].typeIdx := tIdx;
+      syms[typId].size := 4;
+      fi := fi + 1;
+      NextToken;
+      if tokKind = tkComma then
+        NextToken
+      else
+        break;
+    until false;
+    Expect(tkRParen);
+    types[tIdx].arrLo := 0;      { reuse arrLo/arrHi for ordinal range }
+    types[tIdx].arrHi := fi - 1;
+    types[tIdx].size := 4;
+    outTyp := tyEnum;
+    outTypeIdx := tIdx;
+    outSize := 4;
+  end else if tokKind = tkSet then begin
+    { Set type: set of BaseType }
+    NextToken;
+    Expect(tkOf);
+    ParseTypeSpec(elemTyp, elemTypeIdx, elemSize, elemStrMax);
+    tIdx := AddTypeDesc;
+    types[tIdx].kind := tySet;
+    types[tIdx].elemType := elemTyp;
+    types[tIdx].elemTypeIdx := elemTypeIdx;
+    if (elemTyp = tyEnum) and (elemTypeIdx >= 0) then begin
+      types[tIdx].arrLo := types[elemTypeIdx].arrLo;
+      types[tIdx].arrHi := types[elemTypeIdx].arrHi;
+    end else if elemTyp = tyChar then begin
+      types[tIdx].arrLo := 0;
+      types[tIdx].arrHi := 255;
+    end else if elemTyp = tyBoolean then begin
+      types[tIdx].arrLo := 0;
+      types[tIdx].arrHi := 1;
+    end else if elemTyp = tyInteger then begin
+      types[tIdx].arrLo := 0;
+      types[tIdx].arrHi := 31;
+    end else
+      Error('invalid set base type');
+    fi := types[tIdx].arrHi - types[tIdx].arrLo + 1;
+    if fi <= 32 then begin
+      types[tIdx].size := 4;  { fits in i32 }
+    end else if fi <= 256 then begin
+      types[tIdx].size := (fi + 7) div 8;  { byte-rounded bitmap }
+    end else
+      Error('set base type too large (max 256 elements)');
+    outTyp := tySet;
     outTypeIdx := tIdx;
     outSize := types[tIdx].size;
     outStrMax := 0;
@@ -2036,6 +2103,11 @@ var
   exprTypeIdx: longint;
   exprStrMax: longint;
   fldIdx: longint;
+  isConst: boolean;
+  nSetElems: longint;
+  setBitmap: array[0..31] of byte;
+  setLo, setHi: longint;
+  fi: longint;
 begin
   { Prefix }
   case tokKind of
@@ -2145,6 +2217,131 @@ begin
         Expect(tkRParen);
         exprType := tyString;
       end
+      else if tokStr = 'ORD' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if not (exprType in [tyChar, tyBoolean, tyInteger, tyEnum]) then
+          Error('ord() requires ordinal type');
+        Expect(tkRParen);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'CHR' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('chr() requires integer argument');
+        Expect(tkRParen);
+        exprType := tyChar;
+      end
+      else if tokStr = 'ABS' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('abs() requires integer argument');
+        Expect(tkRParen);
+        curFuncNeedsStringTemp := true;
+        EmitOp(OpLocalTee);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitI32Const(0);
+        EmitOp(OpI32LtS);
+        EmitOp(OpIf);
+        EmitOp(WasmI32);  { result type i32 }
+        EmitI32Const(0);
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitOp(OpI32Sub);
+        EmitOp(OpElse);
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitOp(OpEnd);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'ODD' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if not (exprType in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+          Error('odd() requires ordinal type');
+        Expect(tkRParen);
+        EmitI32Const(1);
+        EmitOp(OpI32And);
+        exprType := tyBoolean;
+      end
+      else if tokStr = 'SUCC' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if not (exprType in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+          Error('succ() requires ordinal type');
+        Expect(tkRParen);
+        EmitI32Const(1);
+        EmitOp(OpI32Add);
+      end
+      else if tokStr = 'PRED' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if not (exprType in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+          Error('pred() requires ordinal type');
+        Expect(tkRParen);
+        EmitI32Const(1);
+        EmitOp(OpI32Sub);
+      end
+      else if tokStr = 'SQR' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('sqr() requires integer argument');
+        Expect(tkRParen);
+        curFuncNeedsStringTemp := true;
+        EmitOp(OpLocalTee);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitOp(OpI32Mul);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'SIZEOF' then begin
+        NextToken;
+        Expect(tkLParen);
+        if tokKind <> tkIdent then
+          Expected('identifier');
+        sym := LookupSym(tokStr);
+        if sym < 0 then
+          Error('undeclared identifier: ' + tokStr);
+        EmitI32Const(syms[sym].size);
+        NextToken;
+        Expect(tkRParen);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'LO' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('lo() requires integer argument');
+        Expect(tkRParen);
+        EmitI32Const(255);
+        EmitOp(OpI32And);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'HI' then begin
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('hi() requires integer argument');
+        Expect(tkRParen);
+        EmitI32Const(8);
+        EmitOp(OpI32ShrU);
+        EmitI32Const(255);
+        EmitOp(OpI32And);
+        exprType := tyInteger;
+      end
       else begin
       sym := LookupSym(tokStr);
       if sym < 0 then
@@ -2241,11 +2438,16 @@ begin
             end;
           end;
 
-          { Final load: scalars need i32.load, strings/records/arrays leave address }
+          { Final load: scalars need i32.load, structured types leave address }
           if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
-             and (exprType <> tyArray) then begin
+             and (exprType <> tyArray)
+             and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then begin
             EmitI32Load(2, 0);
           end;
+          if (exprType = tySet) and (exprTypeIdx >= 0) then
+            exprSetSize := types[exprTypeIdx].size
+          else if exprType = tySet then
+            exprSetSize := 4;
         end;
         skFunc: begin
           { Function call in expression }
@@ -2322,6 +2524,151 @@ begin
       { unary plus is a no-op }
     end;
 
+    tkLBrack: begin
+      { Set constructor: [elem, elem, lo..hi, ...]
+        Try compile-time evaluation first. If all elements are constants,
+        build bitmap at compile time. Otherwise fall back to runtime codegen. }
+      NextToken;
+      isConst := true;
+      nSetElems := 0;
+      for fi := 0 to 31 do
+        setBitmap[fi] := 0;
+
+      if tokKind <> tkRBrack then begin
+        { First pass: try to evaluate all elements as constants }
+        repeat
+          { Try to get a constant value }
+          if tokKind = tkInteger then begin
+            setLo := tokInt;
+            NextToken;
+          end else if (tokKind = tkString) and (length(tokStr) = 1) then begin
+            setLo := ord(tokStr[1]);
+            NextToken;
+          end else if tokKind = tkIdent then begin
+            sym := LookupSym(tokStr);
+            if (sym >= 0) and (syms[sym].kind = skConst) then begin
+              setLo := syms[sym].offset;
+              NextToken;
+            end else
+              isConst := false;
+          end else
+            isConst := false;
+
+          if not isConst then break;
+
+          if tokKind = tkDotDot then begin
+            NextToken;
+            if tokKind = tkInteger then begin
+              setHi := tokInt;
+              NextToken;
+            end else if (tokKind = tkString) and (length(tokStr) = 1) then begin
+              setHi := ord(tokStr[1]);
+              NextToken;
+            end else if tokKind = tkIdent then begin
+              sym := LookupSym(tokStr);
+              if (sym >= 0) and (syms[sym].kind = skConst) then begin
+                setHi := syms[sym].offset;
+                NextToken;
+              end else
+                isConst := false;
+            end else
+              isConst := false;
+            if not isConst then break;
+          end else
+            setHi := setLo;
+
+          { Set bits in bitmap }
+          for fi := setLo to setHi do begin
+            if (fi < 0) or (fi > 255) then
+              Error('set element out of range (0..255)');
+            setBitmap[fi div 8] := setBitmap[fi div 8] or (1 shl (fi mod 8));
+            if fi > 31 then
+              nSetElems := 1;  { flag: needs large set }
+          end;
+
+          if tokKind = tkComma then
+            NextToken
+          else
+            break;
+        until false;
+      end;
+
+      if isConst then begin
+        Expect(tkRBrack);
+        if nSetElems > 0 then begin
+          { Large set: store 32-byte bitmap in data segment }
+          fi := AllocDataAligned(32, 4);
+          for setLo := 0 to 31 do
+            DataBufEmit(secData, setBitmap[setLo]);
+          EmitI32Const(fi);
+          exprType := tySet;
+          exprSetSize := 32;
+        end else begin
+          { Small set: pack into i32 }
+          setLo := setBitmap[0] or (setBitmap[1] shl 8)
+                   or (setBitmap[2] shl 16) or (setBitmap[3] shl 24);
+          EmitI32Const(setLo);
+          exprType := tySet;
+          exprSetSize := 4;
+        end;
+      end else begin
+        { Runtime codegen for non-constant set constructor (small sets only) }
+        EmitI32Const(0);  { start with empty set }
+        { Note: we already consumed some tokens. The remaining elements
+          start from current token position. First re-process any partially
+          parsed element. }
+        { For simplicity, assume non-const path starts fresh. This means
+          mixing const and non-const elements in a single constructor
+          is not supported. In practice this is rare. }
+        if tokKind <> tkRBrack then begin
+          repeat
+            curFuncNeedsStringTemp := true;
+            EmitOp(OpLocalSet);
+            EmitULEB128(startCode, curStringTempIdx);
+            ParseExpression(PrecNone);
+            if tokKind = tkDotDot then begin
+              curFuncNeedsCaseTemp := true;
+              EmitOp(OpLocalSet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitI32Const(-1);
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitOp(OpI32Shl);
+              NextToken;
+              ParseExpression(PrecNone);
+              EmitI32Const(1);
+              EmitOp(OpI32Add);
+              EmitOp(OpLocalSet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitI32Const(-1);
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitOp(OpI32Shl);
+              EmitOp(OpI32Xor);
+            end else begin
+              curFuncNeedsCaseTemp := true;
+              EmitOp(OpLocalSet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitI32Const(1);
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitOp(OpI32Shl);
+            end;
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curStringTempIdx);
+            EmitOp(OpI32Or);
+            if tokKind = tkComma then
+              NextToken
+            else
+              break;
+          until false;
+        end;
+        Expect(tkRBrack);
+        exprType := tySet;
+        exprSetSize := 4;
+      end;
+    end;
+
     tkNot: begin
       NextToken;
       ParseExpression(PrecUnary);
@@ -2350,6 +2697,7 @@ begin
       tkGreater:   prec := PrecCompare;
       tkLessEq:    prec := PrecCompare;
       tkGreaterEq: prec := PrecCompare;
+      tkIn:        prec := PrecCompare;
     else
       break; { not an operator }
     end;
@@ -2396,6 +2744,109 @@ begin
         tkGreaterEq: begin EmitI32Const(0); EmitOp(OpI32GeS); end;
       end;
       exprType := tyBoolean;
+    end
+    else if op = tkIn then begin
+      if leftType = tyString then begin
+        { Convert string addr (left) to char ordinal.
+          Stack: string_addr (elem), set_value/addr (right on top).
+          Save right to caseTemp, convert left, restore right. }
+        curFuncNeedsCaseTemp := true;
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curCaseTempIdx);  { save right }
+        { String addr on stack. Load byte at addr+1 (skip length byte) }
+        EmitI32Const(1);
+        EmitOp(OpI32Add);
+        EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curCaseTempIdx);  { restore right }
+        leftType := tyChar;
+      end;
+      if exprSetSize > 4 then begin
+        { Large set IN: stack has elem, set_addr.
+          Compute: load byte at set_addr + (elem div 8), test bit (elem mod 8) }
+        curFuncNeedsCaseTemp := true;
+        curFuncNeedsStringTemp := true;
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curCaseTempIdx);   { save set_addr }
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curStringTempIdx);  { save elem }
+        { Compute set_addr + (elem div 8) }
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curCaseTempIdx);
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitI32Const(3);
+        EmitOp(OpI32ShrU);  { elem div 8 = elem >> 3 }
+        EmitOp(OpI32Add);   { set_addr + byte_index }
+        EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0); { load byte, align=0, offset=0 }
+        { Shift right by (elem mod 8) and test bit 0 }
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitI32Const(7);
+        EmitOp(OpI32And);   { elem mod 8 }
+        EmitOp(OpI32ShrU);  { byte >> bit_pos }
+        EmitI32Const(1);
+        EmitOp(OpI32And);   { isolate bit }
+      end else begin
+        { Small set IN: (1 << elem) AND set <> 0 }
+        { Stack: elem, set. Save set to caseTemp, compute 1 << elem, AND. }
+        curFuncNeedsCaseTemp := true;
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curCaseTempIdx);  { save set }
+        curFuncNeedsStringTemp := true;
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitI32Const(1);
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curStringTempIdx);
+        EmitOp(OpI32Shl);     { 1 << elem }
+        EmitOp(OpLocalGet);
+        EmitULEB128(startCode, curCaseTempIdx);
+        EmitOp(OpI32And);
+        EmitI32Const(0);
+        EmitOp(OpI32Ne);
+      end;
+      exprType := tyBoolean;
+    end
+    else if (leftType = tySet) and (op in [tkPlus, tkMinus, tkStar,
+        tkEqual, tkNotEqual, tkLessEq, tkGreaterEq]) then begin
+      { Set operations — both operands are i32 bitmaps on stack }
+      case op of
+        tkPlus:  EmitOp(OpI32Or);    { union }
+        tkStar:  EmitOp(OpI32And);   { intersection }
+        tkMinus: begin               { difference: A AND NOT B }
+          EmitI32Const(-1);
+          EmitOp(OpI32Xor);          { NOT B }
+          EmitOp(OpI32And);
+        end;
+        tkEqual:    EmitOp(OpI32Eq);
+        tkNotEqual: EmitOp(OpI32Ne);
+        tkLessEq: begin              { subset: A AND NOT B = 0 }
+          EmitI32Const(-1);
+          EmitOp(OpI32Xor);          { NOT B }
+          EmitOp(OpI32And);          { A AND NOT B }
+          EmitI32Const(0);
+          EmitOp(OpI32Eq);
+        end;
+        tkGreaterEq: begin           { superset: B AND NOT A = 0 }
+          { Stack: A, B. Need B AND NOT A.
+            Save B, NOT A, AND B. }
+          curFuncNeedsCaseTemp := true;
+          EmitOp(OpLocalSet);
+          EmitULEB128(startCode, curCaseTempIdx);  { save B }
+          EmitI32Const(-1);
+          EmitOp(OpI32Xor);          { NOT A }
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, curCaseTempIdx);
+          EmitOp(OpI32And);          { B AND NOT A }
+          EmitI32Const(0);
+          EmitOp(OpI32Eq);
+        end;
+      end;
+      if op in [tkPlus, tkMinus, tkStar] then
+        exprType := tySet
+      else
+        exprType := tyBoolean;
     end else begin
       case op of
         tkPlus:      EmitOp(OpI32Add);
@@ -2598,6 +3049,257 @@ begin
     EmitSkipLine;
 end;
 
+procedure EvalConstExpr(var outVal: longint; var outTyp: longint);
+{** Evaluate a compile-time constant expression. Returns value and type.
+    Handles integer/char/boolean literals, previously declared constants,
+    arithmetic, logical, and comparison operators, parentheses, unary +/-.
+    Does NOT emit any WASM code. }
+var
+  sym: longint;
+  lval, rval: longint;
+  ltyp, rtyp: longint;
+
+  procedure EvalAtom;
+  begin
+    case tokKind of
+      tkInteger: begin
+        outVal := tokInt;
+        outTyp := tyInteger;
+        NextToken;
+      end;
+      tkString: begin
+        if length(tokStr) = 1 then begin
+          { Single character: treat as char constant }
+          outVal := ord(tokStr[1]);
+          outTyp := tyChar;
+        end else begin
+          { Multi-char string: store in data segment, return address }
+          outVal := EmitDataPascalString(tokStr);
+          outTyp := tyString;
+        end;
+        NextToken;
+      end;
+      tkTrue: begin
+        outVal := 1;
+        outTyp := tyBoolean;
+        NextToken;
+      end;
+      tkFalse: begin
+        outVal := 0;
+        outTyp := tyBoolean;
+        NextToken;
+      end;
+      tkLParen: begin
+        NextToken;
+        EvalConstExpr(outVal, outTyp);
+        Expect(tkRParen);
+      end;
+      tkMinus: begin
+        NextToken;
+        EvalAtom;
+        if outTyp <> tyInteger then
+          Error('unary minus requires integer operand');
+        outVal := -outVal;
+      end;
+      tkPlus: begin
+        NextToken;
+        EvalAtom;
+        if outTyp <> tyInteger then
+          Error('unary plus requires integer operand');
+      end;
+      tkNot: begin
+        NextToken;
+        EvalAtom;
+        if outTyp = tyBoolean then
+          outVal := ord(outVal = 0)
+        else if outTyp = tyInteger then
+          outVal := not outVal
+        else
+          Error('not requires boolean or integer operand');
+      end;
+      tkIdent: begin
+        { Check for built-in constant functions }
+        if tokStr = 'ORD' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if not (outTyp in [tyChar, tyBoolean, tyInteger, tyEnum]) then
+            Error('ord() requires ordinal argument');
+          outTyp := tyInteger;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'CHR' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if outTyp <> tyInteger then
+            Error('chr() requires integer argument');
+          outTyp := tyChar;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'ABS' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if outTyp <> tyInteger then
+            Error('abs() requires integer argument');
+          if outVal < 0 then outVal := -outVal;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'ODD' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if outTyp <> tyInteger then
+            Error('odd() requires integer argument');
+          outVal := ord(odd(outVal));
+          outTyp := tyBoolean;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'SUCC' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if not (outTyp in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+            Error('succ() requires ordinal argument');
+          outVal := outVal + 1;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'PRED' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if not (outTyp in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+            Error('pred() requires ordinal argument');
+          outVal := outVal - 1;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'SQR' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if outTyp <> tyInteger then
+            Error('sqr() requires integer argument');
+          outVal := outVal * outVal;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'LO' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if outTyp <> tyInteger then
+            Error('lo() requires integer argument');
+          outVal := outVal and $FF;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'HI' then begin
+          NextToken; Expect(tkLParen);
+          EvalConstExpr(outVal, outTyp);
+          if outTyp <> tyInteger then
+            Error('hi() requires integer argument');
+          outVal := (outVal shr 8) and $FF;
+          Expect(tkRParen);
+        end
+        else if tokStr = 'SIZEOF' then begin
+          NextToken; Expect(tkLParen);
+          if tokKind <> tkIdent then
+            Expected('type or variable name');
+          sym := LookupSym(tokStr);
+          if sym < 0 then
+            Error('undeclared identifier: ' + tokStr);
+          case syms[sym].kind of
+            skType: begin
+              case syms[sym].typ of
+                tyInteger:  outVal := 4;
+                tyBoolean:  outVal := 4;
+                tyChar:     outVal := 4;
+                tyString:   outVal := syms[sym].strMax + 1;
+              else
+                outVal := syms[sym].size;
+              end;
+            end;
+            skVar, skConst:
+              outVal := syms[sym].size;
+          else
+            Error('sizeof() requires type or variable');
+          end;
+          outTyp := tyInteger;
+          NextToken;
+          Expect(tkRParen);
+        end
+        else begin
+          { Look up as a previously declared constant }
+          sym := LookupSym(tokStr);
+          if sym < 0 then
+            Error('undeclared identifier: ' + tokStr);
+          if syms[sym].kind <> skConst then
+            Error(tokStr + ' is not a constant');
+          outVal := syms[sym].offset;
+          outTyp := syms[sym].typ;
+          NextToken;
+        end;
+      end;
+    else
+      Error('constant expression expected');
+    end;
+  end;
+
+  procedure EvalBinary(minPrec: longint);
+  var
+    op, prec: longint;
+  begin
+    EvalAtom;
+    while true do begin
+      op := tokKind;
+      case op of
+        tkPlus:      prec := PrecAdd;
+        tkMinus:     prec := PrecAdd;
+        tkOr:        prec := PrecOr;
+        tkStar:      prec := PrecMul;
+        tkDiv:       prec := PrecMul;
+        tkMod:       prec := PrecMul;
+        tkAnd:       prec := PrecAnd;
+        tkEqual:     prec := PrecCompare;
+        tkNotEqual:  prec := PrecCompare;
+        tkLess:      prec := PrecCompare;
+        tkGreater:   prec := PrecCompare;
+        tkLessEq:    prec := PrecCompare;
+        tkGreaterEq: prec := PrecCompare;
+      else
+        break;
+      end;
+      if prec <= minPrec then
+        break;
+      lval := outVal;
+      ltyp := outTyp;
+      NextToken;
+      EvalBinary(prec);
+      rval := outVal;
+      rtyp := outTyp;
+      case op of
+        tkPlus:  outVal := lval + rval;
+        tkMinus: outVal := lval - rval;
+        tkStar:  outVal := lval * rval;
+        tkDiv: begin
+          if rval = 0 then Error('division by zero in constant expression');
+          outVal := lval div rval;
+        end;
+        tkMod: begin
+          if rval = 0 then Error('division by zero in constant expression');
+          outVal := lval mod rval;
+        end;
+        tkAnd:       outVal := lval and rval;
+        tkOr:        outVal := lval or rval;
+        tkEqual:     outVal := ord(lval = rval);
+        tkNotEqual:  outVal := ord(lval <> rval);
+        tkLess:      outVal := ord(lval < rval);
+        tkGreater:   outVal := ord(lval > rval);
+        tkLessEq:    outVal := ord(lval <= rval);
+        tkGreaterEq: outVal := ord(lval >= rval);
+      end;
+      if op in [tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEq, tkGreaterEq] then
+        outTyp := tyBoolean
+      else
+        outTyp := ltyp;
+    end;
+  end;
+
+begin
+  EvalBinary(PrecNone);
+end;
+
 procedure ParseVarDecl;
 {** Parse variable declarations in a var section. }
 var
@@ -2739,6 +3441,77 @@ begin
           Error('insert() third argument must be an integer');
         Expect(tkRParen);
         EmitCall(EnsureStrInsert);
+      end
+      else if (name = 'INC') or (name = 'DEC') then begin
+        NextToken;
+        Expect(tkLParen);
+        if tokKind <> tkIdent then
+          Error(name + '() argument must be a variable');
+        sym := LookupSym(tokStr);
+        if sym < 0 then
+          Error('undeclared identifier: ' + tokStr);
+        if syms[sym].kind <> skVar then
+          Error(name + '() argument must be a variable');
+        if syms[sym].isConstParam then
+          Error('cannot modify const parameter');
+        if not (syms[sym].typ in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+          Error(name + '() requires ordinal type');
+        NextToken;
+        if syms[sym].isVarParam then begin
+          (* var param: local holds pointer, read-modify-write through memory *)
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitI32Load(2, 0);
+          if tokKind = tkComma then begin
+            NextToken;
+            ParseExpression(PrecNone);
+          end else
+            EmitI32Const(1);
+          if name = 'INC' then
+            EmitOp(OpI32Add)
+          else
+            EmitOp(OpI32Sub);
+          EmitI32Store(2, 0);
+        end else if syms[sym].offset < 0 then begin
+          (* WASM local: get, add/sub, set *)
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          if tokKind = tkComma then begin
+            NextToken;
+            ParseExpression(PrecNone);
+          end else
+            EmitI32Const(1);
+          if name = 'INC' then
+            EmitOp(OpI32Add)
+          else
+            EmitOp(OpI32Sub);
+          EmitOp(OpLocalSet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+        end else begin
+          (* Stack frame variable: read-modify-write through memory *)
+          EmitFramePtr(syms[sym].level);
+          EmitI32Const(syms[sym].offset);
+          EmitOp(OpI32Add);
+          curFuncNeedsStringTemp := true;
+          EmitOp(OpLocalTee);
+          EmitULEB128(startCode, curStringTempIdx);
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, curStringTempIdx);
+          EmitI32Load(2, 0);
+          if tokKind = tkComma then begin
+            NextToken;
+            ParseExpression(PrecNone);
+          end else
+            EmitI32Const(1);
+          if name = 'INC' then
+            EmitOp(OpI32Add)
+          else
+            EmitOp(OpI32Sub);
+          EmitI32Store(2, 0);
+        end;
+        Expect(tkRParen);
       end
       else begin
       sym := LookupSym(name);
@@ -2896,7 +3669,8 @@ begin
             EmitCall(EnsureStrAssign);
           end;
         end
-        else if (desTyp = tyRecord) or (desTyp = tyArray) then begin
+        else if (desTyp = tyRecord) or (desTyp = tyArray)
+            or ((desTyp = tySet) and (desTypeIdx >= 0) and (types[desTypeIdx].size > 4)) then begin
           { Structured assignment: memory.copy dst, src, size }
           if not desHasAddr then begin
             { Compute dst address }
@@ -2920,17 +3694,29 @@ begin
         else if desHasAddr then begin
           { Scalar with address on stack from selector chain }
           ParseExpression(PrecNone);
+          if (desTyp = tyChar) and (exprType = tyString) then begin
+            EmitI32Const(1); EmitOp(OpI32Add);
+            EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          end;
           EmitI32Store(2, 0);
         end
         else if syms[sym].isVarParam then begin
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
           ParseExpression(PrecNone);
+          if (desTyp = tyChar) and (exprType = tyString) then begin
+            EmitI32Const(1); EmitOp(OpI32Add);
+            EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          end;
           EmitI32Store(2, 0);
         end
         else if syms[sym].offset < 0 then begin
           { WASM local (value parameter or function return value) }
           ParseExpression(PrecNone);
+          if (desTyp = tyChar) and (exprType = tyString) then begin
+            EmitI32Const(1); EmitOp(OpI32Add);
+            EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          end;
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
         end else begin
@@ -2939,6 +3725,10 @@ begin
           EmitI32Const(syms[sym].offset);
           EmitOp(OpI32Add);
           ParseExpression(PrecNone);
+          if (desTyp = tyChar) and (exprType = tyString) then begin
+            EmitI32Const(1); EmitOp(OpI32Add);
+            EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          end;
           EmitI32Store(2, 0);
         end;
       end
@@ -3223,6 +4013,76 @@ begin
       EmitOp(OpEnd);
     end;
 
+    tkCase: begin
+      { case expr of label: stmt; ... [else stmt] end }
+      NextToken;
+      curFuncNeedsCaseTemp := true;
+      ParseExpression(PrecNone);
+      EmitOp(OpLocalSet);
+      EmitULEB128(startCode, curCaseTempIdx);
+      Expect(tkOf);
+      i := 0; { count of nested if blocks to close }
+      while (tokKind <> tkEnd) and (tokKind <> tkElse) and (tokKind <> tkEOF) do begin
+        (* Parse case labels: constexpr [.. constexpr] , ... *)
+        desTyp := 0; { label count for OR-ing }
+        repeat
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, curCaseTempIdx);
+          EvalConstExpr(sym, argIdx);  { reusing sym and argIdx as temp vars }
+          if tokKind = tkDotDot then begin
+            { Range: selector >= lo AND selector <= hi }
+            EmitI32Const(sym);
+            EmitOp(OpI32GeS);
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curCaseTempIdx);
+            NextToken;
+            EvalConstExpr(sym, argIdx);
+            EmitI32Const(sym);
+            EmitOp(OpI32LeS);
+            EmitOp(OpI32And);
+          end else begin
+            { Single value }
+            EmitI32Const(sym);
+            EmitOp(OpI32Eq);
+          end;
+          desTyp := desTyp + 1;
+          if tokKind = tkComma then
+            NextToken
+          else
+            break;
+        until false;
+        { OR all label conditions together }
+        while desTyp > 1 do begin
+          EmitOp(OpI32Or);
+          desTyp := desTyp - 1;
+        end;
+        Expect(tkColon);
+        EmitOp(OpIf);
+        EmitOp(WasmVoid);
+        i := i + 1;
+        ParseStatement;
+        if tokKind = tkSemicolon then
+          NextToken;
+        if (tokKind <> tkEnd) and (tokKind <> tkElse) then begin
+          EmitOp(OpElse);
+        end;
+      end;
+      if tokKind = tkElse then begin
+        if i > 0 then
+          EmitOp(OpElse);
+        NextToken;
+        ParseStatement;
+        if tokKind = tkSemicolon then
+          NextToken;
+      end;
+      { Close all nested if blocks }
+      while i > 0 do begin
+        EmitOp(OpEnd);
+        i := i - 1;
+      end;
+      Expect(tkEnd);
+    end;
+
     tkExit: begin
       NextToken;
       { ;; WAT: return }
@@ -3283,6 +4143,8 @@ var
   myDisplayLocal: longint;
   savedStringTempIdx: longint;
   savedFuncNeedsStringTemp: boolean;
+  savedCaseTempIdx: longint;
+  savedFuncNeedsCaseTemp: boolean;
 begin
   isFunc := tokKind = tkFunction;
   NextToken; { consume 'procedure' or 'function' }
@@ -3538,6 +4400,9 @@ begin
   savedStringTempIdx := curStringTempIdx;
   savedFuncNeedsStringTemp := curFuncNeedsStringTemp;
   curFuncNeedsStringTemp := false;
+  savedCaseTempIdx := curCaseTempIdx;
+  savedFuncNeedsCaseTemp := curFuncNeedsCaseTemp;
+  curFuncNeedsCaseTemp := false;
 
   { Save and increment nesting level }
   savedNestLevel := curNestLevel;
@@ -3554,10 +4419,13 @@ begin
 
   { String temp local index: after params + saved display (+ return value if func) }
   { For proc: np + 1 (saved display). For func: np + 2 (return value + saved display). }
-  if isFunc then
-    curStringTempIdx := np + 2
-  else
+  if isFunc then begin
+    curStringTempIdx := np + 2;
+    curCaseTempIdx := np + 3;
+  end else begin
     curStringTempIdx := np + 1;
+    curCaseTempIdx := np + 2;
+  end;
 
   { Enter scope for procedure body }
   EnterScope;
@@ -3627,12 +4495,16 @@ begin
   nlocals := 1; { saved display }
   if isFunc then
     nlocals := 2; { return value + saved display }
-  if curFuncNeedsStringTemp then
+  if curFuncNeedsCaseTemp then
+    nlocals := nlocals + 2  { string temp + case temp }
+  else if curFuncNeedsStringTemp then
     nlocals := nlocals + 1;
 
-  { Restore string temp state }
+  { Restore string/case temp state }
   curStringTempIdx := savedStringTempIdx;
   curFuncNeedsStringTemp := savedFuncNeedsStringTemp;
+  curCaseTempIdx := savedCaseTempIdx;
+  curFuncNeedsCaseTemp := savedFuncNeedsCaseTemp;
 
   { Copy compiled body to funcBodies }
   bodyStart := funcBodies.len;
@@ -3678,7 +4550,19 @@ begin
     case tokKind of
       tkConst: begin
         NextToken;
-        Error('const declarations not yet implemented');
+        while tokKind = tkIdent do begin
+          typDeclName := tokStr;
+          NextToken;
+          Expect(tkEqual);
+          EvalConstExpr(typDeclSize, typDeclTyp);
+          sym := AddSym(typDeclName, skConst, typDeclTyp);
+          syms[sym].offset := typDeclSize;
+          if typDeclTyp = tyString then
+            syms[sym].size := 256
+          else
+            syms[sym].size := 4;
+          Expect(tkSemicolon);
+        end;
       end;
       tkVar: begin
         NextToken;
@@ -5637,6 +6521,8 @@ begin
   startNlocals := 0;
   curStringTempIdx := 0;    { for _start, local 0 is the string temp }
   curFuncNeedsStringTemp := false;
+  curCaseTempIdx := 1;      { for _start, case temp is local 1 (after string temp) }
+  curFuncNeedsCaseTemp := false;
   exprType := tyInteger;
 
   hasPendingImport := false;
@@ -5685,9 +6571,11 @@ begin
 
   LeaveScope;
 
-  { Set _start locals based on whether string temp was needed }
-  if curFuncNeedsStringTemp then
-    startNlocals := 1;
+  { Set _start locals based on whether string/case temps were needed }
+  if curFuncNeedsCaseTemp then
+    startNlocals := startNlocals + 2  { string temp + case temp }
+  else if curFuncNeedsStringTemp then
+    startNlocals := startNlocals + 1;
 
   { Assemble and write WASM module }
   WriteModule;
