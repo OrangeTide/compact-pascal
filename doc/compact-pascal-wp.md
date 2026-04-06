@@ -13,7 +13,7 @@ header-includes:
 
 ## Abstract
 
-This document proposes **Compact Pascal**, a new programming language in the Pascal family, and a portable toolchain for embedding it in Rust and Zig applications. The compiler is written in Pascal itself, compiles to WebAssembly (WASM), and ships as a self-contained WASM binary that host applications execute via an interpreter. The result is a lightweight, embeddable Pascal environment that runs anywhere WASM runs — native applications, browsers, and edge runtimes — with no external dependencies beyond the host language's standard toolchain.
+This document proposes **Compact Pascal**, a new programming language in the Pascal family, and a portable toolchain for embedding it in Rust, Zig, and C applications. The compiler is written in Pascal itself, compiles to WebAssembly (WASM), and ships as a self-contained WASM binary that host applications execute via an interpreter. The result is a lightweight, embeddable Pascal environment that runs anywhere WASM runs — native applications, browsers, and edge runtimes — with no external dependencies beyond the host language's standard toolchain.
 
 ## Introduction
 
@@ -98,7 +98,7 @@ The system has three layers:
 ```
 
 1. **The compiler** is a Pascal program compiled to WASM. It reads Compact Pascal source from fd 0, writes a WASM binary to fd 1, and writes errors to fd 2. It ships as a snapshot blob embedded in the library.
-2. **The embedding library** (one for Rust, one for Zig) bundles the compiler blob and a WASM interpreter. It provides a high-level API: compile source, instantiate modules, register host functions, call exported procedures.
+2. **The embedding library** (one each for Rust, Zig, and C) bundles the compiler blob and a WASM interpreter. It provides a high-level API: compile source, instantiate modules, register host functions, call exported procedures. The C library uses a bring-your-own-WASM-runtime approach via a vtable interface, so any C-compatible WASM interpreter can be plugged in.
 3. **The host application** uses the embedding library to compile and run Pascal code, providing whatever host functions the Pascal program needs through WASM imports.
 
 ### Core Language
@@ -113,7 +113,7 @@ The familiar I/O procedures `write`, `writeln`, `read`, `readln` are supported a
 
 Phase 1 uses Turbo Pascal-style short strings: a length byte followed by up to 255 bytes. This representation is identical to Free Pascal in `-Mtp` mode, which is critical for self-hosting — the compiler source must compile under both fpc and Compact Pascal. Short strings require no heap allocator and live on the stack or in records. Strings are byte strings — UTF-8 content is stored verbatim, and `length` returns the byte count. A richer dynamically-allocated string type (pointer + length, no 255-byte limit) is planned for a later phase.
 
-The embedding libraries provide helper functions to convert between host strings (Rust `&str`/`String`, Zig `[]const u8`) and the Pascal representation in WASM memory.
+The embedding libraries provide helper functions to convert between host strings (Rust `&str`/`String`, Zig `[]const u8`, C `const char *`) and the Pascal representation in WASM memory.
 
 ### Standard Functions and Procedures
 
@@ -160,6 +160,28 @@ var runtime = cp.Runtime.init();
 try runtime.registerImport("print_int", printInt);
 var instance = try runtime.instantiate(wasm_bytes);
 try instance.call("main", &.{});
+```
+
+**C (conceptual — bring-your-own-WASM-runtime):**
+
+```c
+#include "compact_pascal.h"
+
+/* User provides WASM engine callbacks via vtable */
+cp_wasm_engine_t engine = {
+    .instantiate     = my_wasm_instantiate,
+    .call            = my_wasm_call,
+    .get_memory      = my_wasm_get_memory,
+    .register_import = my_wasm_register_import,
+    .destroy         = my_wasm_destroy,
+};
+
+cp_compiler_t *compiler = cp_compiler_new(&engine);
+cp_load_compiler_from_file(compiler, "compiler.wasm");
+cp_result_t result = cp_compile(compiler, source, source_len);
+
+cp_instance_t *inst = cp_instantiate(&engine, result.wasm, result.wasm_len);
+cp_call(inst, "_start");
 ```
 
 ### Compiler I/O Interface
@@ -245,11 +267,12 @@ The compiler halts on the first error with a diagnostic written to stderr (fd 2)
 |---|---|---|
 | **Rust** | wasmi [11] | Pure Rust, no native dependencies, small binary, works for WASM-in-WASM |
 | **Zig** | wasm3 [12] (C) | Fast interpreter, small footprint, trivial C interop via `@cImport` |
+| **C** | User's choice (vtable) | Bring-your-own-runtime: wasm3, WAMR, vmir, or any C-compatible WASM interpreter |
 | **Browser** | Native `WebAssembly` API | Full-speed execution via wasm-bindgen |
 
 ## Bootstrapping
 
-The compiler is written in Pascal from the start — not in Rust or Zig. This creates a bootstrapping problem: the compiler cannot compile itself until it exists as an executable.
+The compiler is written in Pascal from the start — not in Rust, Zig, or C. This creates a bootstrapping problem: the compiler cannot compile itself until it exists as an executable.
 
 ### Bootstrap Strategy
 
@@ -262,7 +285,7 @@ Bootstrap using the **Free Pascal Compiler (fpc)** [7] in Turbo Pascal [8] / BP 
 
 ### Developer Experience
 
-The fpc dependency is only needed for the initial bootstrap or if the snapshot becomes invalid. Once a snapshot WASM binary exists, developers only need Rust (or Zig) to build the embedding library — no Pascal toolchain required.
+The fpc dependency is only needed for the initial bootstrap or if the snapshot becomes invalid. Once a snapshot WASM binary exists, developers only need Rust, Zig, or C (with a WASM runtime) to build the embedding library — no Pascal toolchain required.
 
 ### Compiler Tutorial
 
@@ -273,17 +296,20 @@ The Phase 1 compiler serves as the subject of a step-by-step compiler constructi
 ```
 compiler/       — Pascal source for the compiler (built with fpc)
 compiler-tests/ — test suite modeled on BSI Pascal Validation Suite
-src/            — Rust crate source
-src-zig/        — Zig library source
-snapshot/       — the compiler WASM blob (shared by Rust and Zig)
+src/
+  rust/         — Rust crate source
+  zig/          — Zig library source
+  c/            — C embedding library (bring-your-own-WASM-runtime)
+snapshot/       — the compiler WASM blob (shared by Rust, Zig, and C)
 examples/
   rust/         — Rust example programs (hello, ffi, pode-server)
   zig/          — Zig example programs
+  c/            — C example programs (wasm3)
   html/         — client-side browser playground (static HTML, no server)
 pages/          — GitHub Pages site (includes deployed playground)
 doc/            — language specification, white paper, and compiler tutorial
-Cargo.toml      — Rust build
-build.zig       — Zig build
+Cargo.toml      — Rust build (lib path: src/rust/lib.rs)
+build.zig       — Zig build (root source: src/zig/)
 build.zig.zon   — Zig package manifest
 ```
 

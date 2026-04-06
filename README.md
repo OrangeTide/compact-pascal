@@ -9,7 +9,7 @@
 ![WASM Target: 1.0 MVP](https://img.shields.io/badge/WASM-1.0%20MVP-purple)
 [![Human–AI Co-Created](https://dotnetdave.github.io/ai-usage-badges/badges/svg/human-ai-co-created.svg)](https://dotnetdave.github.io/ai-usage-badges/)
 
-An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. Embedding libraries for Rust and Zig let you compile and run Compact Pascal programs from your application — no external Pascal toolchain required.
+An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. Embedding libraries for Rust, Zig, and C let you compile and run Compact Pascal programs from your application — no external Pascal toolchain required.
 
 ## Overview
 
@@ -76,7 +76,7 @@ try instance.call("main", &.{});
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Compiler (Pascal, bootstrapped with fpc) | Not started |
-| 2 | Embedding libraries (Rust + Zig) | Not started |
+| 2 | Embedding libraries (Rust + Zig + C) | Not started |
 | 3 | Self-hosting | Not started |
 | 4 | Browser / WASM target | Not started |
 | 5 | Dynamic allocation (`New`/`Dispose`) | Not started |
@@ -156,13 +156,16 @@ try instance.call("main", &.{});
 ```
 compiler/       — Pascal source for the compiler (built with fpc)
 compiler-tests/ — test suite (positive and negative tests)
-src/            — Rust crate source
-src-zig/        — Zig library source
-snapshot/       — compiler WASM blob (shared by Rust and Zig)
+src/
+  rust/         — Rust crate source
+  zig/          — Zig library source
+  c/            — C embedding library (bring-your-own-WASM-runtime)
+snapshot/       — compiler WASM blob (shared by Rust, Zig, and C)
 examples/
   pascal/       — Compact Pascal example programs
   rust/         — Rust embedding examples
   zig/          — Zig embedding examples
+  c/            — C embedding examples
 doc/            — white paper and language reference
 pages/          — GitHub Pages site
 ```

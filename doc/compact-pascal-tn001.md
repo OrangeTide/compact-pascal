@@ -20,7 +20,7 @@ Both projects sit in a surprisingly similar niche despite targeting opposite end
 
 - **Nested subroutines with lexical scoping.** Both support nested procedures that access enclosing scope variables. Cowgol uses static variable placement to make this cheap. Compact Pascal uses a Dijkstra display — 8 WASM globals where `display[N]` holds the frame pointer for nesting level N.
 
-- **Tiny compilers.** Cowgol's 80386 binary is 70 KB. Compact Pascal's goal is a WASM blob small enough to embed in a Rust or Zig library. Both treat compiler size as a first-class design constraint.
+- **Tiny compilers.** Cowgol's 80386 binary is 70 KB. Compact Pascal's goal is a WASM blob small enough to embed in a Rust, Zig, or C library. Both treat compiler size as a first-class design constraint.
 
 - **No standard library.** Cowgol's system calls are platform-specific thin wrappers. Compact Pascal's I/O intrinsics lower directly to WASI `fd_write`/`fd_read`. Neither ships a runtime library.
 
@@ -54,7 +54,7 @@ Compact Pascal faces no such pressure. WASM provides a proper call stack with fr
 
 ### Who runs the compiler
 
-Cowgol's aspiration is running the compiler *on* the target machine — compiling on a BBC Micro. Compact Pascal's aspiration is running the compiler *inside* your application — the WASM snapshot embedded in a Rust or Zig library. Both are forms of "the compiler goes where you are," but pointing in opposite directions: backward to tiny vintage hardware, forward to sandboxed modern runtimes.
+Cowgol's aspiration is running the compiler *on* the target machine — compiling on a BBC Micro. Compact Pascal's aspiration is running the compiler *inside* your application — the WASM snapshot embedded in a Rust, Zig, or C library. Both are forms of "the compiler goes where you are," but pointing in opposite directions: backward to tiny vintage hardware, forward to sandboxed modern runtimes.
 
 ### Code generation philosophy
 
@@ -70,7 +70,7 @@ Compact Pascal uses conventional stack frames in WASM linear memory. Memory usag
 
 ### One target vs. many
 
-Cowgol's `newgen` system is designed to add backends cheaply — the 80386 backend is 1.2 KLOC. Its value proposition is one language across every retro platform. Compact Pascal inverts this: one target (WASM), every modern platform. The embedding libraries (Rust crate, Zig module) provide portability through WASM runtimes rather than through multiple native backends.
+Cowgol's `newgen` system is designed to add backends cheaply — the 80386 backend is 1.2 KLOC. Its value proposition is one language across every retro platform. Compact Pascal inverts this: one target (WASM), every modern platform. The embedding libraries (Rust crate, Zig module, C library) provide portability through WASM runtimes rather than through multiple native backends.
 
 ## Potential Improvements Suggested by the Comparison
 

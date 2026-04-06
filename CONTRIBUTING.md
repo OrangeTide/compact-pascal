@@ -51,8 +51,9 @@ zig build test
 
 - `compiler/` — Pascal compiler source. Changes here affect the core language.
 - `compiler-tests/` — Compiler test suite (positive and negative tests).
-- `src/` — Rust embedding library.
-- `src-zig/` — Zig embedding library.
+- `src/rust/` — Rust embedding library.
+- `src/zig/` — Zig embedding library.
+- `src/c/` — C embedding library (bring-your-own-WASM-runtime).
 - `doc/` — Language specification.
 - `snapshot/` — Compiler WASM blob. Do not edit directly; regenerated from compiler source.
 
