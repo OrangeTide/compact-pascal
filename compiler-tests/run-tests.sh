@@ -1,6 +1,12 @@
 #!/bin/bash
 # Compact Pascal compiler test runner
-# Requires: cpas (compiler binary), wasm-validate (wabt), wasmtime
+# Requires: cpas (compiler binary), wasm-validate (wabt)
+# Requires one of: wasmtime, wasmer
+#
+# Usage:
+#   ./run-tests.sh              # auto-detect runtime (wasmtime preferred)
+#   ./run-tests.sh wasmtime     # use wasmtime
+#   ./run-tests.sh wasmer       # use wasmer
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,6 +17,38 @@ TMPDIR="${TMPDIR:-/tmp}/cpas-tests-$$"
 export WASMTIME_HOME="${WASMTIME_HOME:-$HOME/.wasmtime}"
 export PATH="$WASMTIME_HOME/bin:$PATH"
 
+# --- Runtime selection ---
+
+pick_runtime() {
+    local arg="${1:-}"
+    if [ -n "$arg" ]; then
+        case "$arg" in
+            wasmtime|wasmer) echo "$arg" ;;
+            *) echo "Unknown runtime: $arg" >&2; echo "Usage: $0 [wasmtime|wasmer]" >&2; exit 1 ;;
+        esac
+    elif command -v wasmtime >/dev/null 2>&1; then
+        echo "wasmtime"
+    elif command -v wasmer >/dev/null 2>&1; then
+        echo "wasmer"
+    else
+        echo "No WASM runtime found. Install wasmtime or wasmer." >&2
+        exit 1
+    fi
+}
+
+RUNTIME="$(pick_runtime "${1:-}")"
+
+# WASM trap exit codes differ by runtime:
+#   wasmtime: 128 + SIGABRT (134 on Linux)
+#   wasmer:   45
+case "$RUNTIME" in
+    wasmtime) TRAP_EXIT=134 ;;
+    wasmer)   TRAP_EXIT=45 ;;
+esac
+
+echo "Runtime: $RUNTIME (trap exit code: $TRAP_EXIT)"
+echo ""
+
 pass=0
 fail=0
 skip=0
@@ -18,14 +56,21 @@ skip=0
 mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Build compiler if needed
-if [ ! -x "$COMPILER" ]; then
+# Build compiler if source is newer than binary, or binary doesn't exist
+if [ ! -x "$COMPILER" ] || [ "$COMPILER.pas" -nt "$COMPILER" ]; then
     echo "Building compiler..."
     (cd "$PROJECT_DIR/compiler" && fpc -Mtp cpas.pas) || {
         echo "FATAL: compiler build failed"
         exit 1
     }
+    echo ""
 fi
+
+run_wasm() {
+    # Usage: run_wasm <wasm_file> [< input]
+    # Stdin is passed through from caller
+    "$RUNTIME" run "$@"
+}
 
 # Positive tests
 for src in "$SCRIPT_DIR"/positive/*.pas; do
@@ -57,19 +102,24 @@ for src in "$SCRIPT_DIR"/positive/*.pas; do
         continue
     fi
 
-    # Determine expected exit code
+    # Determine expected exit code (translate "134" to runtime-specific trap code)
     expected_exit=0
     if [ -f "$exitcode_file" ]; then
-        expected_exit="$(cat "$exitcode_file" | tr -d '[:space:]')"
+        raw_exit="$(cat "$exitcode_file" | tr -d '[:space:]')"
+        if [ "$raw_exit" = "134" ]; then
+            expected_exit="$TRAP_EXIT"
+        else
+            expected_exit="$raw_exit"
+        fi
     fi
 
     # Run (pipe .input file to stdin if present)
     input_file="$SCRIPT_DIR/positive/$name.input"
     actual_exit=0
     if [ -f "$input_file" ]; then
-        wasmtime run "$wasm" < "$input_file" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
+        run_wasm "$wasm" < "$input_file" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
     else
-        wasmtime run "$wasm" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
+        run_wasm "$wasm" > "$actual" 2>"$TMPDIR/$name.runerr" || actual_exit=$?
     fi
 
     # Check exit code
