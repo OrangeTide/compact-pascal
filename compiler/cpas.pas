@@ -443,6 +443,7 @@ var
   optRangeChecks: boolean;    (* R+/-, default false *)
   optOverflowChecks: boolean; (* Q+/-, default false *)
   optExtLiterals: boolean;    (* EXTLITERALS ON/OFF, default false *)
+  optDump: boolean;           (* -dump command-line flag *)
 
   { Pending compiler directives }
   hasPendingImport: boolean;
@@ -7221,6 +7222,394 @@ begin
   WriteOutputBytes(secData.data, secData.len);
 end;
 
+{ ---- Dump: human-readable WASM instruction listing ---- }
+
+function ReadULEB128(var buf: TCodeBuf; var pos: longint): longint;
+var
+  b: byte;
+  shift: longint;
+  result_val: longint;
+begin
+  result_val := 0;
+  shift := 0;
+  repeat
+    if pos >= buf.len then begin
+      ReadULEB128 := result_val;
+      exit;
+    end;
+    b := buf.data[pos];
+    pos := pos + 1;
+    result_val := result_val or ((longint(b) and $7F) shl shift);
+    shift := shift + 7;
+  until (b and $80) = 0;
+  ReadULEB128 := result_val;
+end;
+
+function ReadSLEB128(var buf: TCodeBuf; var pos: longint): longint;
+var
+  b: byte;
+  shift: longint;
+  result_val: longint;
+begin
+  result_val := 0;
+  shift := 0;
+  repeat
+    if pos >= buf.len then begin
+      ReadSLEB128 := result_val;
+      exit;
+    end;
+    b := buf.data[pos];
+    pos := pos + 1;
+    result_val := result_val or ((longint(b) and $7F) shl shift);
+    shift := shift + 7;
+  until (b and $80) = 0;
+  { Sign extend }
+  if (shift < 32) and ((b and $40) <> 0) then
+    result_val := result_val or (longint($FFFFFFFF) shl shift);
+  ReadSLEB128 := result_val;
+end;
+
+procedure DumpBytes(var buf: TCodeBuf; startPos, endPos: longint);
+{** Disassemble WASM bytecodes from buf[startPos..endPos-1] to stderr. }
+var
+  pos: longint;
+  op: byte;
+  indent: longint;
+  i: longint;
+  val: longint;
+  align, ofs: longint;
+  blockType: longint;
+  labelCount: longint;
+begin
+  pos := startPos;
+  indent := 2;
+  while pos < endPos do begin
+    op := buf.data[pos];
+    pos := pos + 1;
+
+    { Dedent for end/else before printing }
+    if (op = OpEnd) or (op = OpElse) then
+      if indent > 2 then indent := indent - 2;
+
+    { Print indent }
+    for i := 1 to indent do write(stderr, ' ');
+
+    case op of
+      OpUnreachable: writeln(stderr, 'unreachable');
+      OpNop:         writeln(stderr, 'nop');
+      OpBlock: begin
+        blockType := ReadSLEB128(buf, pos);
+        if blockType = -64 then { $40 = void block type }
+          writeln(stderr, 'block')
+        else
+          writeln(stderr, 'block (result i32)');
+        indent := indent + 2;
+      end;
+      OpLoop: begin
+        blockType := ReadSLEB128(buf, pos);
+        if blockType = -64 then { $40 = void block type }
+          writeln(stderr, 'loop')
+        else
+          writeln(stderr, 'loop (result i32)');
+        indent := indent + 2;
+      end;
+      OpIf: begin
+        blockType := ReadSLEB128(buf, pos);
+        if blockType = -64 then { $40 = void block type }
+          writeln(stderr, 'if')
+        else
+          writeln(stderr, 'if (result i32)');
+        indent := indent + 2;
+      end;
+      OpElse: begin
+        writeln(stderr, 'else');
+        indent := indent + 2;
+      end;
+      OpEnd:   writeln(stderr, 'end');
+      OpBr: begin
+        val := ReadULEB128(buf, pos);
+        writeln(stderr, 'br ', val);
+      end;
+      OpBrIf: begin
+        val := ReadULEB128(buf, pos);
+        writeln(stderr, 'br_if ', val);
+      end;
+      $0E: begin { br_table }
+        labelCount := ReadULEB128(buf, pos);
+        write(stderr, 'br_table');
+        for i := 0 to labelCount do begin
+          val := ReadULEB128(buf, pos);
+          write(stderr, ' ', val);
+        end;
+        writeln(stderr);
+      end;
+      OpReturn:  writeln(stderr, 'return');
+      OpCall: begin
+        val := ReadULEB128(buf, pos);
+        write(stderr, 'call ', val);
+        { Annotate known functions }
+        if val = idxFdWrite then
+          writeln(stderr, '  ;; fd_write')
+        else if val = idxFdRead then
+          writeln(stderr, '  ;; fd_read')
+        else if val = idxProcExit then
+          writeln(stderr, '  ;; proc_exit')
+        else if val = numImports then
+          writeln(stderr, '  ;; _start')
+        else if val = numImports + 1 then
+          writeln(stderr, '  ;; __write_int')
+        else if val = numImports + 2 then
+          writeln(stderr, '  ;; __read_int')
+        else if val = numImports + 3 then
+          writeln(stderr, '  ;; __str_assign')
+        else if val = numImports + 4 then
+          writeln(stderr, '  ;; __write_str')
+        else if val = numImports + 5 then
+          writeln(stderr, '  ;; __str_compare')
+        else if val = numImports + 6 then
+          writeln(stderr, '  ;; __read_str')
+        else if val = numImports + 7 then
+          writeln(stderr, '  ;; __str_append')
+        else if val = numImports + 8 then
+          writeln(stderr, '  ;; __str_copy')
+        else if val = numImports + 9 then
+          writeln(stderr, '  ;; __str_pos')
+        else if val = numImports + 10 then
+          writeln(stderr, '  ;; __str_delete')
+        else if val = numImports + 11 then
+          writeln(stderr, '  ;; __str_insert')
+        else if val = numImports + 12 then
+          writeln(stderr, '  ;; __range_check')
+        else if val = numImports + 13 then
+          writeln(stderr, '  ;; __checked_add')
+        else if val = numImports + 14 then
+          writeln(stderr, '  ;; __checked_sub')
+        else if val = numImports + 15 then
+          writeln(stderr, '  ;; __checked_mul')
+        else begin
+          { User function }
+          i := val - numImports - 16;
+          if (i >= 0) and (i < numFuncs) then
+            writeln(stderr, '  ;; ', funcs[i].name)
+          else
+            writeln(stderr);
+        end;
+      end;
+      OpCallInd: begin
+        val := ReadULEB128(buf, pos);
+        writeln(stderr, 'call_indirect ', val);
+        { table index }
+        val := ReadULEB128(buf, pos);
+      end;
+      OpDrop:   writeln(stderr, 'drop');
+      OpSelect: writeln(stderr, 'select');
+      OpLocalGet: begin
+        val := ReadULEB128(buf, pos);
+        writeln(stderr, 'local.get ', val);
+      end;
+      OpLocalSet: begin
+        val := ReadULEB128(buf, pos);
+        writeln(stderr, 'local.set ', val);
+      end;
+      OpLocalTee: begin
+        val := ReadULEB128(buf, pos);
+        writeln(stderr, 'local.tee ', val);
+      end;
+      OpGlobalGet: begin
+        val := ReadULEB128(buf, pos);
+        write(stderr, 'global.get ', val);
+        if val = 0 then
+          writeln(stderr, '  ;; $sp')
+        else if val <= 8 then
+          writeln(stderr, '  ;; display[', val - 1, ']')
+        else
+          writeln(stderr);
+      end;
+      OpGlobalSet: begin
+        val := ReadULEB128(buf, pos);
+        write(stderr, 'global.set ', val);
+        if val = 0 then
+          writeln(stderr, '  ;; $sp')
+        else if val <= 8 then
+          writeln(stderr, '  ;; display[', val - 1, ']')
+        else
+          writeln(stderr);
+      end;
+      OpI32Load: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.load align=', align, ' offset=', ofs);
+      end;
+      OpI32Load8s: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.load8_s align=', align, ' offset=', ofs);
+      end;
+      OpI32Load8u: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.load8_u align=', align, ' offset=', ofs);
+      end;
+      OpI32Load16s: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.load16_s align=', align, ' offset=', ofs);
+      end;
+      OpI32Load16u: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.load16_u align=', align, ' offset=', ofs);
+      end;
+      OpI32Store: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.store align=', align, ' offset=', ofs);
+      end;
+      OpI32Store8: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.store8 align=', align, ' offset=', ofs);
+      end;
+      OpI32Store16: begin
+        align := ReadULEB128(buf, pos);
+        ofs := ReadULEB128(buf, pos);
+        writeln(stderr, 'i32.store16 align=', align, ' offset=', ofs);
+      end;
+      OpI32Const: begin
+        val := ReadSLEB128(buf, pos);
+        writeln(stderr, 'i32.const ', val);
+      end;
+      OpI32Eqz:  writeln(stderr, 'i32.eqz');
+      OpI32Eq:   writeln(stderr, 'i32.eq');
+      OpI32Ne:   writeln(stderr, 'i32.ne');
+      OpI32LtS:  writeln(stderr, 'i32.lt_s');
+      OpI32LtU:  writeln(stderr, 'i32.lt_u');
+      OpI32GtS:  writeln(stderr, 'i32.gt_s');
+      OpI32GtU:  writeln(stderr, 'i32.gt_u');
+      OpI32LeS:  writeln(stderr, 'i32.le_s');
+      OpI32LeU:  writeln(stderr, 'i32.le_u');
+      OpI32GeS:  writeln(stderr, 'i32.ge_s');
+      OpI32GeU:  writeln(stderr, 'i32.ge_u');
+      OpI32Add:  writeln(stderr, 'i32.add');
+      OpI32Sub:  writeln(stderr, 'i32.sub');
+      OpI32Mul:  writeln(stderr, 'i32.mul');
+      OpI32DivS: writeln(stderr, 'i32.div_s');
+      OpI32DivU: writeln(stderr, 'i32.div_u');
+      OpI32RemS: writeln(stderr, 'i32.rem_s');
+      OpI32RemU: writeln(stderr, 'i32.rem_u');
+      OpI32And:  writeln(stderr, 'i32.and');
+      OpI32Or:   writeln(stderr, 'i32.or');
+      OpI32Xor:  writeln(stderr, 'i32.xor');
+      OpI32Shl:  writeln(stderr, 'i32.shl');
+      OpI32ShrS: writeln(stderr, 'i32.shr_s');
+      OpI32ShrU: writeln(stderr, 'i32.shr_u');
+      $FC: begin { multi-byte prefix }
+        if pos < endPos then begin
+          val := ReadULEB128(buf, pos);
+          case val of
+            $0A: begin { memory.copy }
+              { skip two memory indices (0, 0) }
+              ReadULEB128(buf, pos);
+              ReadULEB128(buf, pos);
+              writeln(stderr, 'memory.copy');
+            end;
+            $0B: begin { memory.fill }
+              ReadULEB128(buf, pos); { memory index }
+              writeln(stderr, 'memory.fill');
+            end;
+          else
+            writeln(stderr, '0xFC ', val);
+          end;
+        end else
+          writeln(stderr, '0xFC (truncated)');
+      end;
+    else
+      write(stderr, '<unknown opcode $');
+      val := op shr 4;
+      if val < 10 then write(stderr, chr(ord('0') + val))
+      else write(stderr, chr(ord('A') + val - 10));
+      val := op and $F;
+      if val < 10 then write(stderr, chr(ord('0') + val))
+      else write(stderr, chr(ord('A') + val - 10));
+      writeln(stderr, '>');
+    end;
+  end;
+end;
+
+procedure DumpModule;
+{** Print human-readable WASM instruction listing to stderr. }
+var
+  i: longint;
+  slotName: string;
+begin
+  writeln(stderr);
+  writeln(stderr, '--- WASM dump ---');
+  writeln(stderr);
+
+  { Imports }
+  writeln(stderr, 'Imports: ', numImports);
+  for i := 0 to numImports - 1 do
+    writeln(stderr, '  func[', i, '] ', imports[i].modname, '.', imports[i].fieldname,
+            ' type=', imports[i].typeidx);
+  writeln(stderr);
+
+  { Globals }
+  writeln(stderr, 'Globals: $sp (0), display[0..7] (1..8)');
+  writeln(stderr);
+
+  { _start function }
+  writeln(stderr, 'func[', numImports, '] _start  locals=', startNlocals,
+          '  bytes=', startCode.len);
+  DumpBytes(startCode, 0, startCode.len);
+  writeln(stderr);
+
+  { Helper slots — list active ones }
+  for i := 1 to 15 do begin
+    case i of
+      1: if needsWriteInt then slotName := '__write_int' else continue;
+      2: if needsReadInt then slotName := '__read_int' else continue;
+      3: if needsStrAssign then slotName := '__str_assign' else continue;
+      4: if needsWriteStr then slotName := '__write_str' else continue;
+      5: if needsStrCompare then slotName := '__str_compare' else continue;
+      6: if needsReadStr then slotName := '__read_str' else continue;
+      7: if needsStrAppend then slotName := '__str_append' else continue;
+      8: if needsStrCopy then slotName := '__str_copy' else continue;
+      9: if needsStrPos then slotName := '__str_pos' else continue;
+      10: if needsStrDelete then slotName := '__str_delete' else continue;
+      11: if needsStrInsert then slotName := '__str_insert' else continue;
+      12: if needsRangeCheck then slotName := '__range_check' else continue;
+      13: if needsCheckedAdd then slotName := '__checked_add' else continue;
+      14: if needsCheckedSub then slotName := '__checked_sub' else continue;
+      15: if needsCheckedMul then slotName := '__checked_mul' else continue;
+    end;
+    writeln(stderr, 'func[', numImports + i, '] ', slotName, '  (helper, code in code section)');
+  end;
+  writeln(stderr);
+
+  { User-defined functions }
+  for i := 0 to numFuncs - 1 do begin
+    if funcs[i].bodyStart = -2 then begin
+      writeln(stderr, 'func[', numImports + 16 + i, '] ', funcs[i].name,
+              '  (import)');
+      continue;
+    end;
+    writeln(stderr, 'func[', numImports + 16 + i, '] ', funcs[i].name,
+            '  params=', funcs[i].nparams,
+            '  locals=', funcs[i].nlocals,
+            '  bytes=', funcs[i].bodyLen);
+    DumpBytes(funcBodies, funcs[i].bodyStart,
+              funcs[i].bodyStart + funcs[i].bodyLen);
+    writeln(stderr);
+  end;
+
+  { Data segment }
+  writeln(stderr, 'Data segment: ', secData.len, ' bytes at offset 4');
+  writeln(stderr, 'Memory: ', optMemPages, ' page(s) initial, ',
+          optMaxMemPages, ' max');
+  writeln(stderr, 'Stack size: ', optStackSize, ' bytes');
+  writeln(stderr);
+end;
+
 procedure WriteModule;
 begin
   CodeBufInit(outBuf);
@@ -7286,6 +7675,8 @@ end;
 { ---- Main ---- }
 
 procedure Init;
+var
+  i: longint;
 begin
   { Initialize all state }
   SmallBufInit(secType);
@@ -7375,6 +7766,17 @@ begin
   optRangeChecks := false;
   optOverflowChecks := false;
   optExtLiterals := false;
+  optDump := false;
+
+  { Parse command-line arguments (fpc native binary uses ParamCount/ParamStr) }
+  for i := 1 to ParamCount do begin
+    if ParamStr(i) = '-dump' then
+      optDump := true
+    else begin
+      writeln(stderr, 'Unknown option: ', ParamStr(i));
+      halt(1);
+    end;
+  end;
 
   { Pre-register all WASI imports so numImports is stable before
     any code emission. WASI hosts always provide these functions. }
@@ -7426,4 +7828,8 @@ begin
 
   { Assemble and write WASM module }
   WriteModule;
+
+  { Dump instructions if -dump flag was given }
+  if optDump then
+    DumpModule;
 end.
