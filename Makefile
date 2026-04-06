@@ -1,20 +1,49 @@
-.PHONY: pdf html clean
+.POSIX:
 
-PANDOC := pandoc
-TYPST := typst
+# ── Toolchain ────────────────────────────────────────────────────
 
-PDF_DIR := build
+CC       := cc
+AR       := ar
+PANDOC   := pandoc
+TYPST    := typst
+
+CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic
+LDFLAGS  :=
+
+# Relaxed warnings for vendored wasm3 sources
+WASM3_CFLAGS := -std=c11 -Wall \
+	-Wno-unused-parameter -Wno-unused-variable \
+	-Wno-missing-field-initializers -Wno-sign-compare
+
+# ── Directories ──────────────────────────────────────────────────
+
+BUILD_DIR := build
 PAGES_DIR := pages
 
-WP_PDF := $(PDF_DIR)/compact-pascal-wp.pdf
-REF_PDF := $(PDF_DIR)/compact-pascal-ref.pdf
-TUTORIAL_PDF := $(PDF_DIR)/compact-pascal-tutorial.pdf
-TN_SRC := $(wildcard doc/compact-pascal-tn*.md)
-TN_PDF := $(patsubst doc/%.md,$(PDF_DIR)/%.pdf,$(TN_SRC))
-TN_HTML := $(patsubst doc/%.md,$(PAGES_DIR)/%.html,$(TN_SRC))
+# ── C sources ────────────────────────────────────────────────────
 
-WP_HTML := $(PAGES_DIR)/compact-pascal-wp.html
-REF_HTML := $(PAGES_DIR)/compact-pascal-ref.html
+CP_SRC   := src/c/compact_pascal.c
+CP_OBJ   := $(BUILD_DIR)/compact_pascal.o
+CP_LIB   := $(BUILD_DIR)/libcompact_pascal.a
+
+WASM3_SRC := $(wildcard vendor/wasm3/*.c)
+WASM3_OBJ := $(patsubst vendor/wasm3/%.c,$(BUILD_DIR)/wasm3/%.o,$(WASM3_SRC))
+WASM3_LIB := $(BUILD_DIR)/libwasm3.a
+
+HELLO_SRC := examples/c/hello/main.c
+HELLO_BIN := examples/c/hello/hello
+
+# ── PDF / HTML sources ───────────────────────────────────────────
+
+WP_PDF       := $(BUILD_DIR)/compact-pascal-wp.pdf
+REF_PDF      := $(BUILD_DIR)/compact-pascal-ref.pdf
+TUTORIAL_PDF := $(BUILD_DIR)/compact-pascal-tutorial.pdf
+TN_SRC       := $(wildcard doc/compact-pascal-tn*.md)
+TN_PDF       := $(patsubst doc/%.md,$(BUILD_DIR)/%.pdf,$(TN_SRC))
+TN_HTML      := $(patsubst doc/%.md,$(PAGES_DIR)/%.html,$(TN_SRC))
+
+WP_HTML       := $(PAGES_DIR)/compact-pascal-wp.html
+REF_HTML      := $(PAGES_DIR)/compact-pascal-ref.html
 TUTORIAL_HTML := $(PAGES_DIR)/compact-pascal-tutorial.html
 
 TEMPLATE := doc/article-template.html
@@ -44,24 +73,89 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 	--resource-path=doc \
 	--shift-heading-level-by=0
 
+# ── Top-level targets ────────────────────────────────────────────
+
+.PHONY: help all all-c all-zig all-rust pdf html clean clean-c clean-zig clean-rust
+
+help:
+	@echo "Compact Pascal build targets:"
+	@echo ""
+	@echo "  all          Build everything (all-c all-zig all-rust)"
+	@echo "  all-c        Build C libraries, tools, tests, and examples"
+	@echo "  all-zig      Build Zig library (not yet implemented)"
+	@echo "  all-rust     Build Rust crate (not yet implemented)"
+	@echo "  pdf          Generate PDF documentation"
+	@echo "  html         Generate HTML documentation"
+	@echo "  clean        Remove build artifacts"
+
+all: all-c all-zig all-rust
+
+all-c: lib-c lib-wasm3 example-c-hello
+
+all-zig:
+	@echo "all-zig: not yet implemented"
+
+all-rust:
+	@echo "all-rust: not yet implemented"
+
+# ── C library ────────────────────────────────────────────────────
+
+.PHONY: lib-c lib-wasm3 example-c-hello
+
+lib-c: $(CP_LIB)
+
+$(CP_OBJ): $(CP_SRC) src/c/compact_pascal.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(CP_LIB): $(CP_OBJ)
+	$(AR) rcs $@ $^
+
+# ── Vendored wasm3 ───────────────────────────────────────────────
+
+lib-wasm3: $(WASM3_LIB)
+
+$(BUILD_DIR)/wasm3/%.o: vendor/wasm3/%.c | $(BUILD_DIR)/wasm3
+	$(CC) $(WASM3_CFLAGS) -c -o $@ $<
+
+$(WASM3_LIB): $(WASM3_OBJ)
+	$(AR) rcs $@ $^
+
+# ── Examples ─────────────────────────────────────────────────────
+
+example-c-hello: $(HELLO_BIN)
+
+$(HELLO_BIN): $(HELLO_SRC) $(CP_LIB) $(WASM3_LIB) src/c/compact_pascal.h
+	$(CC) $(CFLAGS) -Wno-pointer-arith -Wno-unused-parameter \
+		-Isrc/c -Ivendor/wasm3 -o $@ $< \
+		-L$(BUILD_DIR) -lcompact_pascal -lwasm3 -lm
+
+# ── Output directories ───────────────────────────────────────────
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/wasm3:
+	mkdir -p $(BUILD_DIR)/wasm3
+
+# ── PDF documentation ────────────────────────────────────────────
+
 pdf: $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF) $(TN_PDF)
 
-html: $(WP_HTML) $(REF_HTML) $(TUTORIAL_HTML) $(TN_HTML)
-
-$(PDF_DIR):
-	mkdir -p $(PDF_DIR)
-
-$(WP_PDF): doc/compact-pascal-wp.md | $(PDF_DIR)
+$(WP_PDF): doc/compact-pascal-wp.md | $(BUILD_DIR)
 	$(PANDOC) $< -o $@ $(PANDOC_FLAGS)
 
-$(REF_PDF): doc/compact-pascal-ref.md | $(PDF_DIR)
+$(REF_PDF): doc/compact-pascal-ref.md | $(BUILD_DIR)
 	$(PANDOC) $< -o $@ $(PANDOC_FLAGS)
 
-$(TUTORIAL_PDF): doc/compact-pascal-tutorial.md | $(PDF_DIR)
+$(TUTORIAL_PDF): doc/compact-pascal-tutorial.md | $(BUILD_DIR)
 	$(PANDOC) $< -o $@ $(BOOK_FLAGS)
 
-$(PDF_DIR)/compact-pascal-tn%.pdf: doc/compact-pascal-tn%.md | $(PDF_DIR)
+$(BUILD_DIR)/compact-pascal-tn%.pdf: doc/compact-pascal-tn%.md | $(BUILD_DIR)
 	$(PANDOC) $< -o $@ $(PANDOC_FLAGS)
+
+# ── HTML documentation ───────────────────────────────────────────
+
+html: $(WP_HTML) $(REF_HTML) $(TUTORIAL_HTML) $(TN_HTML)
 
 $(WP_HTML): doc/compact-pascal-wp.md $(TEMPLATE) | $(PAGES_DIR)
 	$(PANDOC) $< -o $@ $(HTML_FLAGS) \
@@ -88,5 +182,20 @@ $(PAGES_DIR)/compact-pascal-tn%.html: doc/compact-pascal-tn%.md $(TEMPLATE) | $(
 		-V pdf-file="$(notdir $(patsubst %.html,%.pdf,$@))" \
 		-V md-file="$(notdir $<)"
 
-clean:
-	rm -rf $(PDF_DIR)
+# ── Cleanup ──────────────────────────────────────────────────────
+
+clean: clean-c clean-zig clean-rust
+
+clean-c:
+	rm -f $(CP_OBJ) $(CP_LIB)
+	rm -f $(WASM3_OBJ) $(WASM3_LIB)
+	-rmdir $(BUILD_DIR)/wasm3
+	rm -f $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF) $(TN_PDF)
+	$(if $(wildcard $(BUILD_DIR)),rmdir $(BUILD_DIR),: skipped removing $(BUILD_DIR) directory)
+	rm -f $(HELLO_BIN)
+
+clean-zig:
+	@echo "clean-zig: not yet implemented"
+
+clean-rust:
+	@echo "clean-rust: not yet implemented"

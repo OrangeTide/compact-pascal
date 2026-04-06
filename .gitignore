@@ -6,6 +6,9 @@ zig-out/
 zig-cache/
 .zig-cache/
 
+# C example binaries
+examples/c/hello/hello
+
 # fpc compiler artifacts
 compiler/cpas
 compiler/*.o
