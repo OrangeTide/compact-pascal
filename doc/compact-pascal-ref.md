@@ -470,7 +470,7 @@ read(input, args...); { explicit file handle — same as default }
 
 As with `write`/`writeln`, the first argument may optionally be a predefined file handle. In practice, `read`/`readln` only make sense with `input` (fd 0), which is already the default.
 
-**Phase 1 subset:** `read`/`readln` support integer and character arguments. Real and string parsing are deferred.
+**Phase 1 subset:** `read`/`readln` support integer and string arguments. Character and real parsing are deferred.
 
 ### Predefined File Handles
 

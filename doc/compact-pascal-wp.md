@@ -307,7 +307,7 @@ compiler-tests/
 
 Since the compiler and compiled programs both use standard WASI for I/O, tests run directly under `wasmtime` with no custom host or test harness binary needed — just a shell script.
 
-Tests cover key compiler features: types, expressions, control flow, procedures/functions, pointers, strings, and scoping rules.
+Tests cover key compiler features: types, expressions, control flow, procedures/functions, strings, records, arrays, and scoping rules.
 
 ## Similar Projects
 
