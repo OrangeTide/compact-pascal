@@ -1,7 +1,5 @@
 ---
-title: |
-  | TN-001: Compact Pascal and Cowgol
-  | — A Comparative Study
+title: "TN-001: Compact Pascal and Cowgol — A Comparative Study"
 author: Jon Mayo
 date: March 2026
 ---
