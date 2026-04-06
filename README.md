@@ -24,21 +24,21 @@ Compact Pascal is a new language in the Pascal family. It inherits Pascal's synt
 ### How It Works
 
 ```
-+---------------------------------------------------+
-|  Your Application (Rust / Zig / Browser JS)       |
-+---------------------------------------------------+
-|  Embedding Library (compact-pascal crate/module)   |
-|  +----------------+   +-----------------------+   |
-|  | WASM Runtime   |   | Host-Guest FFI        |   |
-|  | (wasmi / wasm3)|   | (imports / exports)   |   |
-|  +----------------+   +-----------------------+   |
-+---------------------------------------------------+
-|  Compiler (WASM blob, written in Pascal)           |
-|  source -> [fd 0] -> compiler -> [fd 1] -> .wasm  |
-+---------------------------------------------------+
-|  Compiled Program (WASM module)                    |
-|  executed by the same WASM runtime                 |
-+---------------------------------------------------+
+┌───────────────────────────────────────────────────┐
+│  Your Application (Rust / Zig / Browser JS)       │
+├───────────────────────────────────────────────────┤
+│  Embedding Library (compact─pascal crate/module)  │
+│  ┌────────────────┐   ┌───────────────────────┐   │
+│  │ WASM Runtime   │   │ Host─Guest FFI        │   │
+│  │ (wasmi / wasm3)│   │ (imports / exports)   │   │
+│  └────────────────┘   └───────────────────────┘   │
+├───────────────────────────────────────────────────┤
+│  Compiler (WASM blob, written in Pascal)          │
+│  source → [fd 0] → compiler → [fd 1] → .wasm      │
+├───────────────────────────────────────────────────┤
+│  Compiled Program (WASM module)                   │
+│  executed by the same WASM runtime                │
+└───────────────────────────────────────────────────┘
 ```
 
 The compiler ships as a pre-compiled WASM binary embedded in the library. Your application feeds Pascal source in, gets a WASM module out, and runs it — all in-process.
