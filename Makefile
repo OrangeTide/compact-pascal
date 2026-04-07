@@ -76,6 +76,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 # ── Top-level targets ────────────────────────────────────────────
 
 .PHONY: help all all-c all-zig all-rust pdf html clean clean-c clean-zig clean-rust
+.PHONY: bootstrap test deploy-playground
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -87,6 +88,10 @@ help:
 	@echo "  pdf          Generate PDF documentation"
 	@echo "  html         Generate HTML documentation"
 	@echo "  clean        Remove build artifacts"
+	@echo ""
+	@echo "  bootstrap        Rebuild snapshot/compiler.wasm from source (requires fpc)"
+	@echo "  test             Run compiler test suite (requires fpc + WASM runtime)"
+	@echo "  deploy-playground  Copy compiler.wasm into pages/playground/"
 
 all: all-c all-zig all-rust
 
@@ -182,6 +187,36 @@ $(PAGES_DIR)/compact-pascal-tn%.html: doc/compact-pascal-tn%.md $(TEMPLATE) | $(
 		-V pdf-file="$(notdir $(patsubst %.html,%.pdf,$@))" \
 		-V md-file="$(notdir $<)"
 
+# ── Bootstrap ────────────────────────────────────────────────────
+#
+# Rebuilds the self-hosted compiler WASM snapshot from Pascal source.
+# Requires: fpc (Free Pascal, TP mode) and a WASM runtime (wasmtime or wasmer).
+# Not part of 'make all' — end users just embed the checked-in snapshot.
+
+CPAS_SRC  := compiler/cpas.pas
+CPAS_BIN  := compiler/cpas
+SNAPSHOT  := snapshot/compiler.wasm
+
+bootstrap: $(SNAPSHOT)
+
+$(CPAS_BIN): $(CPAS_SRC)
+	fpc -Mtp -o$@ $<
+
+$(SNAPSHOT): $(CPAS_BIN) $(CPAS_SRC)
+	$(CPAS_BIN) < $(CPAS_SRC) > $@
+	@wasm-validate $@ && echo "snapshot/compiler.wasm: valid"
+
+# ── Test ─────────────────────────────────────────────────────────
+
+test: $(CPAS_BIN)
+	bash compiler-tests/run-tests.sh
+
+# ── Deploy ───────────────────────────────────────────────────────
+
+deploy-playground: $(SNAPSHOT)
+	cp $(SNAPSHOT) pages/playground/compiler.wasm
+	@echo "pages/playground/compiler.wasm: updated"
+
 # ── Cleanup ──────────────────────────────────────────────────────
 
 clean: clean-c clean-zig clean-rust
@@ -193,6 +228,7 @@ clean-c:
 	rm -f $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF) $(TN_PDF)
 	$(if $(wildcard $(BUILD_DIR)),rmdir $(BUILD_DIR),: skipped removing $(BUILD_DIR) directory)
 	rm -f $(HELLO_BIN)
+	rm -f $(CPAS_BIN) compiler/cpas.o
 
 clean-zig:
 	@echo "clean-zig: not yet implemented"

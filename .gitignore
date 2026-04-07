@@ -13,3 +13,6 @@ examples/c/hello/hello
 compiler/cpas
 compiler/*.o
 compiler/*.ppu
+
+# Deploy artifacts
+pages/playground/compiler.wasm
