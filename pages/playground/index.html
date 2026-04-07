@@ -16,8 +16,8 @@
       --tab-bg: #ebe5da;
       --tab-active: #fff;
       --menu-bg: #ebe5da;
-      --modal-bg: #1e1e1e;
-      --modal-fg: #d4d4d4;
+      --output-bg: #1e1e1e;
+      --output-fg: #d4d4d4;
       --mono: 'IBM Plex Mono', 'Consolas', 'Monaco', monospace;
       --sans: 'IBM Plex Sans Condensed', -apple-system, BlinkMacSystemFont, sans-serif;
       --gutter-bg: #ebe5da;
@@ -42,8 +42,16 @@
       background: var(--menu-bg);
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
+      flex-wrap: wrap;
+      gap: 0.5rem;
     }
-    .top-bar-left { display: flex; align-items: center; gap: 1rem; }
+
+    .top-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
     .top-bar .title {
       font-family: var(--mono);
       font-size: 0.9rem;
@@ -51,19 +59,17 @@
       color: var(--accent);
       text-decoration: none;
     }
+
     .top-bar .title:hover { text-decoration: underline; }
 
-    /* --- Menu bar --- */
-    .menu-bar {
+    .top-bar-buttons {
       display: flex;
-      gap: 2px;
-      padding: 0.35rem 1rem;
-      background: var(--menu-bg);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
+      align-items: center;
+      gap: 0.3rem;
       flex-wrap: wrap;
     }
-    .menu-bar button, .menu-bar select {
+
+    .top-bar button {
       font-family: var(--sans);
       font-size: 0.8rem;
       padding: 0.3rem 0.7rem;
@@ -72,10 +78,26 @@
       background: var(--tab-active);
       color: var(--fg);
       cursor: pointer;
+      white-space: nowrap;
     }
-    .menu-bar button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .menu-bar select { cursor: pointer; }
-    .menu-sep { width: 1px; background: var(--border); margin: 0 0.4rem; }
+
+    .top-bar button:hover {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .top-bar button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .button-sep {
+      width: 1px;
+      height: 1.2rem;
+      background: var(--border);
+      margin: 0 0.2rem;
+    }
 
     /* --- Tab bar --- */
     .tab-bar {
@@ -85,6 +107,7 @@
       flex-shrink: 0;
       overflow-x: auto;
     }
+
     .tab {
       display: flex;
       align-items: center;
@@ -99,8 +122,10 @@
       cursor: pointer;
       white-space: nowrap;
     }
+
     .tab:hover { background: var(--tab-active); }
     .tab.active { background: var(--tab-active); font-weight: 600; }
+
     .tab .close {
       font-size: 0.7rem;
       width: 1.2em;
@@ -109,8 +134,11 @@
       text-align: center;
       border-radius: 2px;
       color: #999;
+      cursor: pointer;
     }
+
     .tab .close:hover { background: #ddd; color: #333; }
+
     .tab-new {
       padding: 0.4rem 0.7rem;
       font-size: 0.9rem;
@@ -120,15 +148,32 @@
       color: var(--accent);
       cursor: pointer;
     }
+
     .tab-new:hover { background: var(--tab-active); }
 
-    /* --- Editor area --- */
+    /* --- Content area: editor + output panes --- */
+    .content-area {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      gap: 0;
+    }
+
+    /* --- Editor pane --- */
+    .editor-pane {
+      flex: 0 0 60%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
     .editor-wrap {
       flex: 1;
       display: flex;
       overflow: hidden;
       position: relative;
     }
+
     .gutter {
       width: 3.5rem;
       background: var(--gutter-bg);
@@ -143,7 +188,9 @@
       user-select: none;
       flex-shrink: 0;
     }
+
     .gutter-inner { padding-right: 0.5rem; white-space: pre; }
+
     #editor {
       flex: 1;
       font-family: var(--mono);
@@ -160,26 +207,84 @@
       overflow: auto;
     }
 
-    /* --- Empty state background --- */
-    .empty-state {
-      display: none;
-      flex: 1;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 1rem;
-      background: var(--tab-active);
-      color: var(--gutter-fg);
-      font-family: var(--mono);
-      font-size: 0.9rem;
-      text-align: center;
+    /* --- Splitter --- */
+    .splitter {
+      width: 5px;
+      background: var(--border);
+      cursor: col-resize;
+      flex-shrink: 0;
       user-select: none;
     }
-    .empty-state img { opacity: 0.3; }
-    .empty-state p { max-width: 300px; line-height: 1.6; }
-    .editor-wrap.hidden, .editor-wrap.hidden + .empty-state { }
-    body.no-tabs .editor-wrap { display: none; }
-    body.no-tabs .empty-state { display: flex; }
+
+    .splitter:hover {
+      background: var(--accent);
+    }
+
+    /* --- Output pane --- */
+    .output-pane {
+      flex: 0 0 40%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--output-bg);
+      color: var(--output-fg);
+      border-left: 1px solid var(--border);
+    }
+
+    .output-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid #444;
+      flex-shrink: 0;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .output-header button {
+      font-family: var(--sans);
+      font-size: 0.75rem;
+      padding: 0.25rem 0.5rem;
+      border: 1px solid #555;
+      border-radius: 2px;
+      background: #2a2a2a;
+      color: var(--output-fg);
+      cursor: pointer;
+    }
+
+    .output-header button:hover {
+      background: #3a3a3a;
+      border-color: #666;
+    }
+
+    #output {
+      flex: 1;
+      overflow: auto;
+      padding: 0.5rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .out-info {
+      color: #4af;
+    }
+
+    .out-error {
+      color: #f44;
+    }
+
+    .out-stdout {
+      color: var(--output-fg);
+    }
+
+    .out-stderr {
+      color: #ff8844;
+    }
 
     /* --- Status bar --- */
     .status-bar {
@@ -194,8 +299,27 @@
       flex-shrink: 0;
     }
 
-    /* --- Console modal --- */
-    .modal-overlay {
+    /* --- Empty state --- */
+    .empty-state {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      background: var(--tab-active);
+      color: var(--gutter-fg);
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      text-align: center;
+      user-select: none;
+    }
+
+    body.no-tabs .editor-pane { display: none; }
+    body.no-tabs .empty-state { display: flex; }
+
+    /* --- File picker modal --- */
+    .file-picker-overlay {
       display: none;
       position: fixed;
       inset: 0;
@@ -204,35 +328,43 @@
       justify-content: center;
       align-items: center;
     }
-    .modal-overlay.visible { display: flex; }
-    .modal {
+
+    .file-picker-overlay.visible {
+      display: flex;
+    }
+
+    .file-picker {
       background: var(--modal-bg);
-      color: var(--modal-fg);
+      color: var(--output-fg);
       border-radius: 6px;
-      width: min(90vw, 700px);
-      max-height: 80vh;
+      width: min(90vw, 400px);
+      max-height: 70vh;
       display: flex;
       flex-direction: column;
       box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      background: var(--output-bg);
     }
-    .modal-header {
+
+    .file-picker-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       padding: 0.6rem 1rem;
       border-bottom: 1px solid #444;
     }
-    .modal-header h3 {
+
+    .file-picker-header h3 {
       font-family: var(--mono);
       font-size: 0.85rem;
       font-weight: 600;
     }
-    .modal-close {
+
+    .file-picker-close {
       width: 1.8rem;
       height: 1.8rem;
       border: none;
       background: none;
-      color: var(--modal-fg);
+      color: var(--output-fg);
       font-size: 1.2rem;
       cursor: pointer;
       border-radius: 3px;
@@ -240,19 +372,61 @@
       align-items: center;
       justify-content: center;
     }
-    .modal-close:hover { background: #444; }
-    .modal-body {
+
+    .file-picker-close:hover { background: #444; }
+
+    .file-picker-list {
       flex: 1;
       overflow: auto;
-      padding: 1rem;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+
+    .file-picker-item {
+      padding: 0.6rem 1rem;
+      border-bottom: 1px solid #333;
+      cursor: pointer;
       font-family: var(--mono);
       font-size: 0.8rem;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      word-break: break-all;
     }
-    .modal-body .error { color: #f44; }
-    .modal-body .info { color: #4af; }
+
+    .file-picker-item:hover {
+      background: #2a2a2a;
+    }
+
+    .file-picker-name {
+      font-weight: 600;
+      margin-bottom: 0.2rem;
+    }
+
+    .file-picker-desc {
+      font-size: 0.7rem;
+      color: #999;
+    }
+
+    /* --- Responsive: stack on narrow screens --- */
+    @media (max-width: 700px) {
+      .content-area {
+        flex-direction: column;
+      }
+
+      .editor-pane {
+        flex: 0 0 50%;
+      }
+
+      .output-pane {
+        flex: 0 0 50%;
+        border-left: none;
+        border-top: 1px solid var(--border);
+      }
+
+      .splitter {
+        width: 100%;
+        height: 5px;
+        cursor: row-resize;
+      }
+    }
   </style>
 </head>
 <body>
@@ -262,23 +436,15 @@
     <div class="top-bar-left">
       <a href="../" class="title">Compact Pascal</a>
     </div>
-    <span style="font-size:0.8rem; color:#999;">Playground</span>
-  </div>
-
-  <!-- Menu bar -->
-  <div class="menu-bar">
-    <button onclick="doSave()" title="Save to browser storage">Save</button>
-    <select id="loadSelect" onchange="doLoad(this)" title="Load sample program">
-      <option value="">Load...</option>
-    </select>
-    <button onclick="doUpload()" title="Open file from disk">Upload</button>
-    <button onclick="doDownload()" title="Download as .pas file">Download</button>
-    <div class="menu-sep"></div>
-    <button onclick="doCopy()" title="Copy to clipboard">Copy</button>
-    <button onclick="doPaste()" title="Replace from clipboard">Paste</button>
-    <div class="menu-sep"></div>
-    <button onclick="doCompile()" title="Compile current buffer">Compile</button>
-    <button onclick="doRun()" title="Compile and run">Run</button>
+    <div class="top-bar-buttons">
+      <button id="openBtn" onclick="showFilePicker()" title="Open sample">Open</button>
+      <button onclick="doUpload()" title="Upload .pas file">Upload</button>
+      <button onclick="doDownload()" title="Download current buffer">Download</button>
+      <div class="button-sep"></div>
+      <button id="compileBtn" onclick="doCompile()" title="Compile (Ctrl+S)">Compile</button>
+      <button id="runBtn" onclick="doRun()" title="Run (Ctrl+Enter)">Run</button>
+      <button id="stopBtn" onclick="doStop()" title="Stop program" disabled>Stop</button>
+    </div>
   </div>
 
   <!-- Tab bar -->
@@ -286,16 +452,30 @@
     <button class="tab-new" onclick="newTab()" title="New buffer">+</button>
   </div>
 
-  <!-- Editor -->
-  <div class="editor-wrap">
-    <div class="gutter"><div class="gutter-inner" id="gutter"></div></div>
-    <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
-  </div>
+  <!-- Content area: editor + output -->
+  <div class="content-area">
+    <!-- Editor pane -->
+    <div class="editor-pane">
+      <div class="editor-wrap">
+        <div class="gutter"><div class="gutter-inner" id="gutter"></div></div>
+        <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      </div>
+      <div class="empty-state">
+        <p>No open buffers.<br>Click <strong>+</strong> to create one,<br>or click <strong>Open</strong> to load a sample.</p>
+      </div>
+    </div>
 
-  <!-- Empty state (shown when all tabs are closed) -->
-  <div class="empty-state">
-    <img src="../logo/compact-pascal-icon-128.png" alt="" width="128" height="128">
-    <p>No open buffers.<br>Click <strong>+</strong> to create one,<br>or load a sample program.</p>
+    <!-- Splitter -->
+    <div class="splitter" id="splitter"></div>
+
+    <!-- Output pane -->
+    <div class="output-pane">
+      <div class="output-header">
+        <span>Output</span>
+        <button onclick="clearOutput()" title="Clear output">Clear</button>
+      </div>
+      <pre id="output"></pre>
+    </div>
   </div>
 
   <!-- Status bar -->
@@ -304,14 +484,14 @@
     <span id="statusRight"></span>
   </div>
 
-  <!-- Console modal -->
-  <div class="modal-overlay" id="modalOverlay" onclick="closeModalOverlay(event)">
-    <div class="modal">
-      <div class="modal-header">
-        <h3 id="modalTitle">Console</h3>
-        <button class="modal-close" onclick="closeModal()" title="Close">&times;</button>
+  <!-- File picker modal -->
+  <div class="file-picker-overlay" id="filePickerOverlay" onclick="closeFilePickerOnBg(event)">
+    <div class="file-picker">
+      <div class="file-picker-header">
+        <h3>Open Sample</h3>
+        <button class="file-picker-close" onclick="closeFilePicker()" title="Close">&times;</button>
       </div>
-      <div class="modal-body" id="modalBody"></div>
+      <ul class="file-picker-list" id="filePickerList"></ul>
     </div>
   </div>
 
@@ -321,25 +501,19 @@
 <script>
 'use strict';
 
-// --- Sample programs catalog ---
-var SAMPLES = [
-  { name: 'Hello World', file: 'hello.pas' },
-  { name: 'FizzBuzz', file: 'fizzbuzz.pas' },
-  { name: 'Fibonacci', file: 'fibonacci.pas' }
-];
-
 // --- Tab / buffer state ---
-var buffers = [];      // { id, name, content, initContent, saved }
+var buffers = [];      // { id, name, content, initContent, compiled }
 var activeTab = null;  // buffer id
 var nextId = 1;
+var runningWorker = null;
 
 var editor = document.getElementById('editor');
 var gutter = document.getElementById('gutter');
 var tabBar = document.getElementById('tabBar');
+var output = document.getElementById('output');
 
 // --- Initialize ---
 (function init() {
-  populateLoadMenu();
   restoreSession();
   if (buffers.length === 0) {
     newTab('hello.pas', "program hello;\nbegin\n  writeln('Hello, world!')\nend.\n");
@@ -355,16 +529,75 @@ var tabBar = document.getElementById('tabBar');
   initCompiler().catch(function(err) {
     console.error('Failed to load compiler:', err);
   });
+
+  // Setup splitter
+  setupSplitter();
+
+  // Fetch file catalog
+  fetchFileCatalog();
 })();
 
-function populateLoadMenu() {
-  var sel = document.getElementById('loadSelect');
-  SAMPLES.forEach(function(s) {
-    var opt = document.createElement('option');
-    opt.value = s.file;
-    opt.textContent = s.name;
-    sel.appendChild(opt);
+// --- Splitter ---
+var splitterActive = false;
+var splitStart = 0;
+var splitStart1 = 0;
+var splitStart2 = 0;
+
+function setupSplitter() {
+  var splitter = document.getElementById('splitter');
+  var contentArea = document.querySelector('.content-area');
+  var editorPane = document.querySelector('.editor-pane');
+  var outputPane = document.querySelector('.output-pane');
+
+  var isVertical = contentArea.style.flexDirection !== 'column';
+
+  splitter.addEventListener('mousedown', function(ev) {
+    ev.preventDefault();
+    splitterActive = true;
+    splitStart = isVertical ? ev.clientX : ev.clientY;
+
+    if (isVertical) {
+      splitStart1 = editorPane.offsetWidth;
+      splitStart2 = outputPane.offsetWidth;
+    } else {
+      splitStart1 = editorPane.offsetHeight;
+      splitStart2 = outputPane.offsetHeight;
+    }
+
+    document.addEventListener('mousemove', onSplitterMove);
+    document.addEventListener('mouseup', onSplitterUp);
   });
+
+  function onSplitterMove(ev) {
+    if (!splitterActive) return;
+
+    if (isVertical) {
+      var delta = ev.clientX - splitStart;
+      var newWidth1 = splitStart1 + delta;
+      var newWidth2 = splitStart2 - delta;
+      if (newWidth1 > 200 && newWidth2 > 150) {
+        var total = newWidth1 + newWidth2;
+        editorPane.style.flex = '0 0 ' + (newWidth1 / (total) * 100) + '%';
+        outputPane.style.flex = '0 0 ' + (newWidth2 / (total) * 100) + '%';
+      }
+    } else {
+      var delta = ev.clientY - splitStart;
+      var newHeight1 = splitStart1 + delta;
+      var newHeight2 = splitStart2 - delta;
+      if (newHeight1 > 100 && newHeight2 > 100) {
+        var total = newHeight1 + newHeight2;
+        editorPane.style.flex = '0 0 ' + (newHeight1 / (total) * 100) + '%';
+        outputPane.style.flex = '0 0 ' + (newHeight2 / (total) * 100) + '%';
+      }
+    }
+  }
+
+  function onSplitterUp(ev) {
+    if (!splitterActive) return;
+    splitterActive = false;
+    document.removeEventListener('mousemove', onSplitterMove);
+    document.removeEventListener('mouseup', onSplitterUp);
+  }
 }
 
 // --- Tab management ---
@@ -372,7 +605,7 @@ function newTab(name, content) {
   var id = nextId++;
   name = name || 'untitled.pas';
   content = content || "program untitled;\nbegin\n  \nend.\n";
-  buffers.push({ id: id, name: name, content: content, initContent: content, saved: false });
+  buffers.push({ id: id, name: name, content: content, initContent: content, compiled: null });
   renderTabs();
   switchTab(id);
 }
@@ -385,7 +618,7 @@ function replaceBuffer(buf, name, content) {
   buf.name = name;
   buf.content = content;
   buf.initContent = content;
-  buf.saved = false;
+  buf.compiled = null;
   if (buf.id === activeTab) {
     editor.value = content;
     updateGutter();
@@ -466,7 +699,7 @@ function renderTabs() {
 function onEditorInput() {
   updateGutter();
   var buf = findBuffer(activeTab);
-  if (buf) { buf.content = editor.value; buf.saved = false; }
+  if (buf) { buf.content = editor.value; }
 }
 
 function onEditorKey(ev) {
@@ -477,6 +710,13 @@ function onEditorKey(ev) {
     editor.value = editor.value.substring(0, start) + '  ' + editor.value.substring(end);
     editor.selectionStart = editor.selectionEnd = start + 2;
     onEditorInput();
+  } else if ((ev.ctrlKey || ev.metaKey) && ev.key === 's') {
+    ev.preventDefault();
+    doSave();
+  } else if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+    ev.preventDefault();
+    doCompile();
+    doRun();
   }
 }
 
@@ -490,7 +730,6 @@ function updateGutter() {
 
 function syncGutter() {
   gutter.parentElement.scrollTop = editor.scrollTop;
-  // sync the gutter inner offset
   gutter.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
 }
 
@@ -503,42 +742,53 @@ function updateCursorPos() {
   document.getElementById('statusRight').textContent = 'Ln ' + line + ', Col ' + col;
 }
 
-// --- Menu actions ---
-function doSave() {
-  saveCurrentBuffer();
-  var data = buffers.map(function(b) { return { name: b.name, content: b.content }; });
-  try {
-    localStorage.setItem('cpas-playground', JSON.stringify(data));
-    localStorage.setItem('cpas-active', String(activeTab));
-    var buf = findBuffer(activeTab);
-    if (buf) buf.saved = true;
-    setStatus('Saved to browser storage');
-  } catch (e) {
-    setStatus('Save failed: ' + e.message);
-  }
-}
+// --- File picker ---
+var fileCatalog = [];
 
-function restoreSession() {
-  try {
-    var raw = localStorage.getItem('cpas-playground');
-    if (!raw) return;
-    var data = JSON.parse(raw);
-    if (!Array.isArray(data) || data.length === 0) return;
-    data.forEach(function(d) {
-      var id = nextId++;
-      buffers.push({ id: id, name: d.name, content: d.content, initContent: d.content, saved: true });
+function fetchFileCatalog() {
+  fetch('files.json')
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      fileCatalog = data || [];
+    })
+    .catch(function(err) {
+      console.error('Failed to load file catalog:', err);
     });
-    renderTabs();
-    switchTab(buffers[0].id);
-  } catch (e) {
-    // ignore corrupt storage
+}
+
+function showFilePicker() {
+  var list = document.getElementById('filePickerList');
+  list.innerHTML = '';
+  fileCatalog.forEach(function(entry) {
+    var li = document.createElement('li');
+    li.className = 'file-picker-item';
+    li.innerHTML =
+      '<div class="file-picker-name">' + htmlEscape(entry.name) + '</div>' +
+      '<div class="file-picker-desc">' + htmlEscape(entry.description) + '</div>';
+    li.onclick = function() {
+      openSampleFile(entry.file, entry.name);
+    };
+    list.appendChild(li);
+  });
+  document.getElementById('filePickerOverlay').classList.add('visible');
+}
+
+function closeFilePicker() {
+  document.getElementById('filePickerOverlay').classList.remove('visible');
+}
+
+function closeFilePickerOnBg(ev) {
+  if (ev.target === document.getElementById('filePickerOverlay')) {
+    closeFilePicker();
   }
 }
 
-function doLoad(sel) {
-  var file = sel.value;
-  if (!file) return;
-  sel.value = '';
+function openSampleFile(file, displayName) {
+  closeFilePicker();
+  setStatus('Loading ' + file + '...');
   fetch('samples/' + file)
     .then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -548,11 +798,12 @@ function doLoad(sel) {
       saveCurrentBuffer();
       var buf = findBuffer(activeTab);
       if (buf && !isBufferModified(buf)) {
-        replaceBuffer(buf, file, text);
+        replaceBuffer(buf, displayName, text);
       } else {
-        newTab(file, text);
+        newTab(displayName, text);
       }
-      setStatus('Loaded ' + file);
+      clearOutput();
+      setStatus('Loaded ' + displayName);
     })
     .catch(function(e) {
       setStatus('Load failed: ' + e.message);
@@ -569,6 +820,7 @@ function handleUpload(input) {
   var reader = new FileReader();
   reader.onload = function() {
     newTab(file.name, reader.result);
+    clearOutput();
     setStatus('Opened ' + file.name);
   };
   reader.readAsText(file);
@@ -589,29 +841,33 @@ function doDownload() {
   setStatus('Downloaded ' + buf.name);
 }
 
-function doCopy() {
-  var text = editor.value;
-  if (editor.selectionStart !== editor.selectionEnd) {
-    text = editor.value.substring(editor.selectionStart, editor.selectionEnd);
+function doSave() {
+  saveCurrentBuffer();
+  var data = buffers.map(function(b) { return { name: b.name, content: b.content }; });
+  try {
+    localStorage.setItem('cpas-playground', JSON.stringify(data));
+    localStorage.setItem('cpas-active', String(activeTab));
+    setStatus('Saved to browser storage');
+  } catch (e) {
+    setStatus('Save failed: ' + e.message);
   }
-  navigator.clipboard.writeText(text).then(function() {
-    setStatus('Copied to clipboard');
-  }).catch(function(e) {
-    setStatus('Copy failed: ' + e.message);
-  });
 }
 
-function doPaste() {
-  navigator.clipboard.readText().then(function(text) {
-    var start = editor.selectionStart;
-    var end = editor.selectionEnd;
-    editor.value = editor.value.substring(0, start) + text + editor.value.substring(end);
-    editor.selectionStart = editor.selectionEnd = start + text.length;
-    onEditorInput();
-    setStatus('Pasted from clipboard');
-  }).catch(function(e) {
-    setStatus('Paste failed: ' + e.message);
-  });
+function restoreSession() {
+  try {
+    var raw = localStorage.getItem('cpas-playground');
+    if (!raw) return;
+    var data = JSON.parse(raw);
+    if (!Array.isArray(data) || data.length === 0) return;
+    data.forEach(function(d) {
+      var id = nextId++;
+      buffers.push({ id: id, name: d.name, content: d.content, initContent: d.content, compiled: null });
+    });
+    renderTabs();
+    switchTab(buffers[0].id);
+  } catch (e) {
+    // ignore corrupt storage
+  }
 }
 
 // --- Compiler and WASI ---
@@ -620,14 +876,12 @@ var compilerReady = false;
 
 // WASI context for sandboxing
 var WasiContext = {
-  // File descriptor state
   fdState: {
     0: { data: null, pos: 0 },  // stdin
     1: { data: [], pos: 0 },    // stdout
     2: { data: [], pos: 0 }     // stderr
   },
 
-  // Write to an fd
   fdWrite: function(fd, iovsPtr, iovsLen, nwrittenPtr, memory) {
     var written = 0;
     var view = new Uint8Array(memory.buffer);
@@ -647,7 +901,6 @@ var WasiContext = {
     return 0;
   },
 
-  // Read from an fd
   fdRead: function(fd, iovsPtr, iovsLen, nreadPtr, memory) {
     var nread = 0;
     var view = new Uint8Array(memory.buffer);
@@ -674,7 +927,7 @@ var WasiContext = {
       srcPos += toCopy;
       nread += toCopy;
 
-      if (toCopy < bufLen) break; // Not enough data
+      if (toCopy < bufLen) break;
     }
 
     this.fdState[fd].pos = srcPos;
@@ -682,7 +935,6 @@ var WasiContext = {
     return 0;
   },
 
-  // Reset for a new operation
   reset: function() {
     this.fdState[0].pos = 0;
     this.fdState[1].data = [];
@@ -690,17 +942,14 @@ var WasiContext = {
   }
 };
 
-// Exception for proc_exit
 function WasiExit(code) {
   this.code = code;
   this.message = 'WASI exit code ' + code;
 }
 
-// Load the compiler WASM module
 function initCompiler() {
   if (compilerModule) {
     compilerReady = true;
-    setStatus('Compiler ready');
     return Promise.resolve();
   }
 
@@ -712,25 +961,24 @@ function initCompiler() {
       return response.arrayBuffer();
     })
     .then(function(bytes) {
+      var currentInstance = null;
+
       var wasmImports = {
         wasi_snapshot_preview1: {
           fd_write: function(fd, iovs, iovs_len, nwritten) {
-            var inst = compilerModule.instance;
-            return WasiContext.fdWrite(fd, iovs, iovs_len, nwritten, inst.exports.memory);
+            return WasiContext.fdWrite(fd, iovs, iovs_len, nwritten, currentInstance.exports.memory);
           },
           fd_read: function(fd, iovs, iovs_len, nread) {
-            var inst = compilerModule.instance;
-            return WasiContext.fdRead(fd, iovs, iovs_len, nread, inst.exports.memory);
+            return WasiContext.fdRead(fd, iovs, iovs_len, nread, currentInstance.exports.memory);
           },
           proc_exit: function(code) {
             throw new WasiExit(code);
           },
           args_get: function(argv, buf) {
-            return 0; // No arguments
+            return 0;
           },
           args_sizes_get: function(argc, buf_size) {
-            var inst = compilerModule.instance;
-            var dv = new DataView(inst.exports.memory.buffer);
+            var dv = new DataView(currentInstance.exports.memory.buffer);
             dv.setUint32(argc, 0, true);
             dv.setUint32(buf_size, 0, true);
             return 0;
@@ -738,270 +986,166 @@ function initCompiler() {
         }
       };
 
-      return WebAssembly.instantiate(bytes, wasmImports);
-    })
-    .then(function(result) {
-      compilerModule = result;
-      compilerReady = true;
-      setStatus('Compiler ready');
+      return WebAssembly.compile(bytes).then(function(mod) {
+        compilerModule = {
+          module: mod,
+          createInstance: function() {
+            var inst = new WebAssembly.Instance(mod, wasmImports);
+            currentInstance = inst;
+            return inst;
+          }
+        };
+        compilerReady = true;
+        setStatus('Compiler ready');
+      });
     })
     .catch(function(err) {
-      // Fallback: try to use backend server (for development)
-      setStatus('WASM compiler not available, trying development server...');
-      return testBackendCompiler();
+      compilerReady = false;
+      setStatus('Compiler unavailable (snapshot not found)');
     });
 }
 
-// Test if a development server is available for compilation
-function testBackendCompiler() {
-  return fetch('/api/compile', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source: 'program test; begin end.' })
-  })
-  .then(function(response) {
-    if (!response.ok) throw new Error('No backend');
-    compilerMode = 'backend';
-    compilerReady = true;
-    setStatus('Using development server for compilation');
-  })
-  .catch(function(err) {
-    compilerMode = 'unavailable';
-    setStatus('Compiler unavailable (WASM snapshot not built yet)');
-  });
-}
-
-var compilerMode = 'wasm'; // 'wasm', 'backend', or 'unavailable'
-
 function doCompile() {
+  if (!compilerReady || !compilerModule) {
+    appendOutput('<span class="out-error">Compiler not available</span>\n');
+    setStatus('Compiler not available');
+    return;
+  }
+
   saveCurrentBuffer();
   var buf = findBuffer(activeTab);
   if (!buf) {
-    showModal('Compile Error', '<span class="error">No active buffer</span>');
+    appendOutput('<span class="out-error">No active buffer</span>\n');
     return;
   }
 
-  if (compilerMode === 'unavailable') {
-    showModal('Compiler Output',
-      '<span class="error">Compiler unavailable</span>\n\n' +
-      'The WASM snapshot has not been built yet.\n\n' +
-      'The Compact Pascal compiler is under active development. ' +
-      'When the compiler achieves self-hosting (can compile itself to WASM), ' +
-      'the snapshot will be created and integrated into the playground.\n\n' +
-      'Current compiler status:\n' +
-      '- Can compile sample programs ✓\n' +
-      '- Self-hosting not yet complete ✗\n\n' +
-      'For development environment setup, see:\n' +
-      'pages/playground/README.md'
-    );
-    setStatus('Compiler unavailable');
-    return;
-  }
+  setStatus('Compiling...');
+  appendOutput('<span class="out-info">Compiling ' + buf.name + '...</span>\n');
 
-  if (compilerMode === 'backend') {
-    doCompileViaBackend(buf);
-    return;
-  }
-
-  // WASM mode
   try {
-    // Reset I/O for this compilation
+    var inst = compilerModule.createInstance();
+
     WasiContext.reset();
     WasiContext.fdState[0].data = new TextEncoder().encode(buf.content);
 
-    // Call _start to run the compiler
     try {
-      compilerModule.instance.exports._start();
+      inst.exports._start();
     } catch (e) {
       if (!(e instanceof WasiExit)) throw e;
-      // Normal exit via proc_exit
     }
 
-    // Collect stderr (errors) and stdout (compiled WASM)
     var stderr = new TextDecoder().decode(new Uint8Array(WasiContext.fdState[2].data));
     var wasmBytes = new Uint8Array(WasiContext.fdState[1].data);
 
     if (stderr) {
-      showModal('Compiler Output', '<span class="error">' + htmlEscape(stderr) + '</span>');
+      appendOutput('<span class="out-error">' + htmlEscape(stderr) + '</span>\n');
       setStatus('Compilation failed');
+      buf.compiled = null;
     } else if (wasmBytes.length === 0) {
-      showModal('Compiler Output', '<span class="error">No output from compiler</span>');
+      appendOutput('<span class="out-error">No output from compiler</span>\n');
       setStatus('Compilation failed');
+      buf.compiled = null;
     } else {
-      showModal('Compiler Output',
-        '<span class="info">Successfully compiled ' + wasmBytes.length + ' bytes of WASM</span>');
+      appendOutput('<span class="out-info">Compiled ' + wasmBytes.length + ' bytes</span>\n');
       setStatus('Compiled ' + wasmBytes.length + ' bytes');
-
-      // Store compiled WASM for doRun
       buf.compiled = wasmBytes;
     }
   } catch (e) {
-    showModal('Compiler Output',
-      '<span class="error">Compiler error: ' + htmlEscape(e.message) + '</span>');
+    appendOutput('<span class="out-error">Compiler error: ' + htmlEscape(e.message) + '</span>\n');
     setStatus('Compilation failed');
+    buf.compiled = null;
   }
-}
-
-function doCompileViaBackend(buf) {
-  setStatus('Compiling...');
-  fetch('/api/compile', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source: buf.content })
-  })
-  .then(function(response) {
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    return response.json();
-  })
-  .then(function(result) {
-    if (result.error) {
-      showModal('Compiler Output', '<span class="error">' + htmlEscape(result.error) + '</span>');
-      setStatus('Compilation failed');
-      return;
-    }
-
-    if (result.stderr) {
-      showModal('Compiler Output', '<span class="error">' + htmlEscape(result.stderr) + '</span>');
-      setStatus('Compilation failed');
-      return;
-    }
-
-    if (!result.success) {
-      showModal('Compiler Output', '<span class="error">Compilation failed</span>');
-      setStatus('Compilation failed');
-      return;
-    }
-
-    var wasmBytes = new Uint8Array(atob(result.wasm).split('').map(function(c) {
-      return c.charCodeAt(0);
-    }));
-
-    showModal('Compiler Output',
-      '<span class="info">Successfully compiled ' + wasmBytes.length + ' bytes of WASM</span>');
-    setStatus('Compiled ' + wasmBytes.length + ' bytes');
-
-    // Store compiled WASM for doRun
-    buf.compiled = wasmBytes;
-  })
-  .catch(function(err) {
-    showModal('Compiler Output',
-      '<span class="error">Compilation error: ' + htmlEscape(err.message) + '</span>');
-    setStatus('Compilation failed');
-  });
 }
 
 function doRun() {
-  saveCurrentBuffer();
-  var buf = findBuffer(activeTab);
-  if (!buf) {
-    showModal('Program Output', '<span class="error">No active buffer</span>');
+  if (runningWorker) {
+    appendOutput('<span class="out-error">Program already running</span>\n');
     return;
   }
 
-  // First, compile if not already compiled
+  saveCurrentBuffer();
+  var buf = findBuffer(activeTab);
+  if (!buf) {
+    appendOutput('<span class="out-error">No active buffer</span>\n');
+    return;
+  }
+
   if (!buf.compiled) {
     doCompile();
-    // After compile, we should have buf.compiled if successful
     if (!buf.compiled) {
-      return; // Compilation failed
+      appendOutput('<span class="out-error">Cannot run: compilation failed</span>\n');
+      return;
     }
   }
 
-  try {
-    // Reset I/O for program execution
-    WasiContext.reset();
-    WasiContext.fdState[1].data = []; // Clear stdout
-    WasiContext.fdState[2].data = []; // Clear stderr
+  setStatus('Running...');
+  appendOutput('<span class="out-info">>> Running...</span>\n');
 
-    // Instantiate the compiled program
-    var progImports = {
-      wasi_snapshot_preview1: {
-        fd_write: function(fd, iovs, iovs_len, nwritten) {
-          var inst = progInstance;
-          return WasiContext.fdWrite(fd, iovs, iovs_len, nwritten, inst.exports.memory);
-        },
-        fd_read: function(fd, iovs, iovs_len, nread) {
-          var inst = progInstance;
-          return WasiContext.fdRead(fd, iovs, iovs_len, nread, inst.exports.memory);
-        },
-        proc_exit: function(code) {
-          throw new WasiExit(code);
-        },
-        args_get: function(argv, buf) { return 0; },
-        args_sizes_get: function(argc, buf_size) {
-          var inst = progInstance;
-          var dv = new DataView(inst.exports.memory.buffer);
-          dv.setUint32(argc, 0, true);
-          dv.setUint32(buf_size, 0, true);
-          return 0;
-        }
-      }
-    };
+  runningWorker = new Worker('run-worker.js');
 
-    var progModule = new WebAssembly.Instance(
-      new WebAssembly.Module(buf.compiled),
-      progImports
-    );
-    var progInstance = progModule;
-
-    // Run the program
-    try {
-      progModule.exports._start();
-    } catch (e) {
-      if (!(e instanceof WasiExit)) throw e;
+  runningWorker.onmessage = function(ev) {
+    var msg = ev.data;
+    if (msg.type === 'stdout') {
+      appendOutput('<span class="out-stdout">' + htmlEscape(msg.data) + '</span>');
+    } else if (msg.type === 'stderr') {
+      appendOutput('<span class="out-stderr">' + htmlEscape(msg.data) + '</span>');
+    } else if (msg.type === 'exit') {
+      appendOutput('<span class="out-info">>> Program exited with code ' + msg.code + '</span>\n');
+      setStatus('Program completed');
+      runningWorker = null;
+      document.getElementById('runBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
     }
+  };
 
-    // Show program output
-    var stdout = new TextDecoder().decode(new Uint8Array(WasiContext.fdState[1].data));
-    var stderr = new TextDecoder().decode(new Uint8Array(WasiContext.fdState[2].data));
-
-    var output = '';
-    if (stdout) {
-      output += '<span class="info">Output:</span>\n' + htmlEscape(stdout);
-    }
-    if (stderr) {
-      output += '\n<span class="error">Errors:</span>\n' + htmlEscape(stderr);
-    }
-    if (!stdout && !stderr) {
-      output = '<span class="info">Program completed with no output</span>';
-    }
-
-    showModal('Program Output', output);
-    setStatus('Program completed');
-  } catch (e) {
-    showModal('Program Output',
-      '<span class="error">Runtime error: ' + htmlEscape(e.message) + '</span>');
+  runningWorker.onerror = function(err) {
+    appendOutput('<span class="out-error">Worker error: ' + htmlEscape(err.message) + '</span>\n');
     setStatus('Execution failed');
-  }
-}
+    runningWorker = null;
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('stopBtn').disabled = true;
+  };
 
-function htmlEscape(str) {
-  return str.replace(/[&<>"']/g, function(c) {
-    var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-    return map[c];
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+
+  runningWorker.postMessage({
+    type: 'run',
+    wasmBytes: buf.compiled
   });
 }
 
-// --- Modal ---
-function showModal(title, html) {
-  document.getElementById('modalTitle').textContent = title;
-  document.getElementById('modalBody').innerHTML = html;
-  document.getElementById('modalOverlay').classList.add('visible');
+function doStop() {
+  if (!runningWorker) return;
+  runningWorker.terminate();
+  runningWorker = null;
+  appendOutput('<span class="out-info">>> Program stopped</span>\n');
+  setStatus('Program stopped');
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
 }
 
-function closeModal() {
-  document.getElementById('modalOverlay').classList.remove('visible');
+// --- Output pane ---
+function appendOutput(html) {
+  var temp = document.createElement('div');
+  temp.innerHTML = html;
+  while (temp.firstChild) {
+    output.appendChild(temp.firstChild);
+  }
+  output.scrollTop = output.scrollHeight;
 }
 
-function closeModalOverlay(ev) {
-  if (ev.target === document.getElementById('modalOverlay')) closeModal();
+function clearOutput() {
+  output.textContent = '';
 }
 
-document.addEventListener('keydown', function(ev) {
-  if (ev.key === 'Escape') closeModal();
-});
+// --- Utilities ---
+function htmlEscape(str) {
+  var div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
 
-// --- Status ---
 function setStatus(msg) {
   document.getElementById('statusLeft').textContent = msg;
 }

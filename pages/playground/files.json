@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Hello World",
+    "file": "hello.pas",
+    "description": "Simple writeln example"
+  },
+  {
+    "name": "FizzBuzz",
+    "file": "fizzbuzz.pas",
+    "description": "Classic loop with conditionals"
+  },
+  {
+    "name": "Fibonacci",
+    "file": "fibonacci.pas",
+    "description": "Recursive function demo"
+  }
+]
