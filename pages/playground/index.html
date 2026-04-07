@@ -350,6 +350,11 @@ var tabBar = document.getElementById('tabBar');
   editor.addEventListener('click', updateCursorPos);
   editor.addEventListener('keyup', updateCursorPos);
   updateGutter();
+
+  // Load compiler on page load
+  initCompiler().catch(function(err) {
+    console.error('Failed to load compiler:', err);
+  });
 })();
 
 function populateLoadMenu() {
@@ -609,25 +614,372 @@ function doPaste() {
   });
 }
 
+// --- Compiler and WASI ---
+var compilerModule = null;
+var compilerReady = false;
+
+// WASI context for sandboxing
+var WasiContext = {
+  // File descriptor state
+  fdState: {
+    0: { data: null, pos: 0 },  // stdin
+    1: { data: [], pos: 0 },    // stdout
+    2: { data: [], pos: 0 }     // stderr
+  },
+
+  // Write to an fd
+  fdWrite: function(fd, iovsPtr, iovsLen, nwrittenPtr, memory) {
+    var written = 0;
+    var view = new Uint8Array(memory.buffer);
+    var dataView = new DataView(memory.buffer);
+
+    for (var i = 0; i < iovsLen; i++) {
+      var iovPtr = iovsPtr + (i * 8);
+      var bufPtr = dataView.getUint32(iovPtr, true);
+      var bufLen = dataView.getUint32(iovPtr + 4, true);
+
+      var chunk = view.slice(bufPtr, bufPtr + bufLen);
+      this.fdState[fd].data.push(...chunk);
+      written += bufLen;
+    }
+
+    dataView.setUint32(nwrittenPtr, written, true);
+    return 0;
+  },
+
+  // Read from an fd
+  fdRead: function(fd, iovsPtr, iovsLen, nreadPtr, memory) {
+    var nread = 0;
+    var view = new Uint8Array(memory.buffer);
+    var dataView = new DataView(memory.buffer);
+
+    if (!this.fdState[fd].data) {
+      dataView.setUint32(nreadPtr, 0, true);
+      return 0;
+    }
+
+    var srcData = this.fdState[fd].data;
+    var srcPos = this.fdState[fd].pos;
+
+    for (var i = 0; i < iovsLen && srcPos < srcData.length; i++) {
+      var iovPtr = iovsPtr + (i * 8);
+      var bufPtr = dataView.getUint32(iovPtr, true);
+      var bufLen = dataView.getUint32(iovPtr + 4, true);
+
+      var toCopy = Math.min(bufLen, srcData.length - srcPos);
+      for (var j = 0; j < toCopy; j++) {
+        view[bufPtr + j] = srcData[srcPos + j];
+      }
+
+      srcPos += toCopy;
+      nread += toCopy;
+
+      if (toCopy < bufLen) break; // Not enough data
+    }
+
+    this.fdState[fd].pos = srcPos;
+    dataView.setUint32(nreadPtr, nread, true);
+    return 0;
+  },
+
+  // Reset for a new operation
+  reset: function() {
+    this.fdState[0].pos = 0;
+    this.fdState[1].data = [];
+    this.fdState[2].data = [];
+  }
+};
+
+// Exception for proc_exit
+function WasiExit(code) {
+  this.code = code;
+  this.message = 'WASI exit code ' + code;
+}
+
+// Load the compiler WASM module
+function initCompiler() {
+  if (compilerModule) {
+    compilerReady = true;
+    setStatus('Compiler ready');
+    return Promise.resolve();
+  }
+
+  setStatus('Loading compiler...');
+
+  return fetch('../snapshot/compiler.wasm')
+    .then(function(response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.arrayBuffer();
+    })
+    .then(function(bytes) {
+      var wasmImports = {
+        wasi_snapshot_preview1: {
+          fd_write: function(fd, iovs, iovs_len, nwritten) {
+            var inst = compilerModule.instance;
+            return WasiContext.fdWrite(fd, iovs, iovs_len, nwritten, inst.exports.memory);
+          },
+          fd_read: function(fd, iovs, iovs_len, nread) {
+            var inst = compilerModule.instance;
+            return WasiContext.fdRead(fd, iovs, iovs_len, nread, inst.exports.memory);
+          },
+          proc_exit: function(code) {
+            throw new WasiExit(code);
+          },
+          args_get: function(argv, buf) {
+            return 0; // No arguments
+          },
+          args_sizes_get: function(argc, buf_size) {
+            var inst = compilerModule.instance;
+            var dv = new DataView(inst.exports.memory.buffer);
+            dv.setUint32(argc, 0, true);
+            dv.setUint32(buf_size, 0, true);
+            return 0;
+          }
+        }
+      };
+
+      return WebAssembly.instantiate(bytes, wasmImports);
+    })
+    .then(function(result) {
+      compilerModule = result;
+      compilerReady = true;
+      setStatus('Compiler ready');
+    })
+    .catch(function(err) {
+      // Fallback: try to use backend server (for development)
+      setStatus('WASM compiler not available, trying development server...');
+      return testBackendCompiler();
+    });
+}
+
+// Test if a development server is available for compilation
+function testBackendCompiler() {
+  return fetch('/api/compile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: 'program test; begin end.' })
+  })
+  .then(function(response) {
+    if (!response.ok) throw new Error('No backend');
+    compilerMode = 'backend';
+    compilerReady = true;
+    setStatus('Using development server for compilation');
+  })
+  .catch(function(err) {
+    compilerMode = 'unavailable';
+    setStatus('Compiler unavailable (WASM snapshot not built yet)');
+  });
+}
+
+var compilerMode = 'wasm'; // 'wasm', 'backend', or 'unavailable'
+
 function doCompile() {
-  showModal('Compiler Output',
-    '<span class="info">Compiler not yet available.</span>\n\n' +
-    'The Compact Pascal compiler is under development.\n' +
-    'When the compiler WASM snapshot is ready, this button\n' +
-    'will compile the current buffer and display diagnostics here.'
-  );
-  setStatus('Compiler not yet available');
+  saveCurrentBuffer();
+  var buf = findBuffer(activeTab);
+  if (!buf) {
+    showModal('Compile Error', '<span class="error">No active buffer</span>');
+    return;
+  }
+
+  if (compilerMode === 'unavailable') {
+    showModal('Compiler Output',
+      '<span class="error">Compiler unavailable</span>\n\n' +
+      'The WASM snapshot has not been built yet.\n\n' +
+      'The Compact Pascal compiler is under active development. ' +
+      'When the compiler achieves self-hosting (can compile itself to WASM), ' +
+      'the snapshot will be created and integrated into the playground.\n\n' +
+      'Current compiler status:\n' +
+      '- Can compile sample programs ✓\n' +
+      '- Self-hosting not yet complete ✗\n\n' +
+      'For development environment setup, see:\n' +
+      'pages/playground/README.md'
+    );
+    setStatus('Compiler unavailable');
+    return;
+  }
+
+  if (compilerMode === 'backend') {
+    doCompileViaBackend(buf);
+    return;
+  }
+
+  // WASM mode
+  try {
+    // Reset I/O for this compilation
+    WasiContext.reset();
+    WasiContext.fdState[0].data = new TextEncoder().encode(buf.content);
+
+    // Call _start to run the compiler
+    try {
+      compilerModule.instance.exports._start();
+    } catch (e) {
+      if (!(e instanceof WasiExit)) throw e;
+      // Normal exit via proc_exit
+    }
+
+    // Collect stderr (errors) and stdout (compiled WASM)
+    var stderr = new TextDecoder().decode(new Uint8Array(WasiContext.fdState[2].data));
+    var wasmBytes = new Uint8Array(WasiContext.fdState[1].data);
+
+    if (stderr) {
+      showModal('Compiler Output', '<span class="error">' + htmlEscape(stderr) + '</span>');
+      setStatus('Compilation failed');
+    } else if (wasmBytes.length === 0) {
+      showModal('Compiler Output', '<span class="error">No output from compiler</span>');
+      setStatus('Compilation failed');
+    } else {
+      showModal('Compiler Output',
+        '<span class="info">Successfully compiled ' + wasmBytes.length + ' bytes of WASM</span>');
+      setStatus('Compiled ' + wasmBytes.length + ' bytes');
+
+      // Store compiled WASM for doRun
+      buf.compiled = wasmBytes;
+    }
+  } catch (e) {
+    showModal('Compiler Output',
+      '<span class="error">Compiler error: ' + htmlEscape(e.message) + '</span>');
+    setStatus('Compilation failed');
+  }
+}
+
+function doCompileViaBackend(buf) {
+  setStatus('Compiling...');
+  fetch('/api/compile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: buf.content })
+  })
+  .then(function(response) {
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  })
+  .then(function(result) {
+    if (result.error) {
+      showModal('Compiler Output', '<span class="error">' + htmlEscape(result.error) + '</span>');
+      setStatus('Compilation failed');
+      return;
+    }
+
+    if (result.stderr) {
+      showModal('Compiler Output', '<span class="error">' + htmlEscape(result.stderr) + '</span>');
+      setStatus('Compilation failed');
+      return;
+    }
+
+    if (!result.success) {
+      showModal('Compiler Output', '<span class="error">Compilation failed</span>');
+      setStatus('Compilation failed');
+      return;
+    }
+
+    var wasmBytes = new Uint8Array(atob(result.wasm).split('').map(function(c) {
+      return c.charCodeAt(0);
+    }));
+
+    showModal('Compiler Output',
+      '<span class="info">Successfully compiled ' + wasmBytes.length + ' bytes of WASM</span>');
+    setStatus('Compiled ' + wasmBytes.length + ' bytes');
+
+    // Store compiled WASM for doRun
+    buf.compiled = wasmBytes;
+  })
+  .catch(function(err) {
+    showModal('Compiler Output',
+      '<span class="error">Compilation error: ' + htmlEscape(err.message) + '</span>');
+    setStatus('Compilation failed');
+  });
 }
 
 function doRun() {
-  showModal('Program Output',
-    '<span class="info">Compiler not yet available.</span>\n\n' +
-    'The Compact Pascal compiler is under development.\n' +
-    'When the compiler WASM snapshot is ready, this button\n' +
-    'will compile and run the current buffer, displaying\n' +
-    'program output here.'
-  );
-  setStatus('Compiler not yet available');
+  saveCurrentBuffer();
+  var buf = findBuffer(activeTab);
+  if (!buf) {
+    showModal('Program Output', '<span class="error">No active buffer</span>');
+    return;
+  }
+
+  // First, compile if not already compiled
+  if (!buf.compiled) {
+    doCompile();
+    // After compile, we should have buf.compiled if successful
+    if (!buf.compiled) {
+      return; // Compilation failed
+    }
+  }
+
+  try {
+    // Reset I/O for program execution
+    WasiContext.reset();
+    WasiContext.fdState[1].data = []; // Clear stdout
+    WasiContext.fdState[2].data = []; // Clear stderr
+
+    // Instantiate the compiled program
+    var progImports = {
+      wasi_snapshot_preview1: {
+        fd_write: function(fd, iovs, iovs_len, nwritten) {
+          var inst = progInstance;
+          return WasiContext.fdWrite(fd, iovs, iovs_len, nwritten, inst.exports.memory);
+        },
+        fd_read: function(fd, iovs, iovs_len, nread) {
+          var inst = progInstance;
+          return WasiContext.fdRead(fd, iovs, iovs_len, nread, inst.exports.memory);
+        },
+        proc_exit: function(code) {
+          throw new WasiExit(code);
+        },
+        args_get: function(argv, buf) { return 0; },
+        args_sizes_get: function(argc, buf_size) {
+          var inst = progInstance;
+          var dv = new DataView(inst.exports.memory.buffer);
+          dv.setUint32(argc, 0, true);
+          dv.setUint32(buf_size, 0, true);
+          return 0;
+        }
+      }
+    };
+
+    var progModule = new WebAssembly.Instance(
+      new WebAssembly.Module(buf.compiled),
+      progImports
+    );
+    var progInstance = progModule;
+
+    // Run the program
+    try {
+      progModule.exports._start();
+    } catch (e) {
+      if (!(e instanceof WasiExit)) throw e;
+    }
+
+    // Show program output
+    var stdout = new TextDecoder().decode(new Uint8Array(WasiContext.fdState[1].data));
+    var stderr = new TextDecoder().decode(new Uint8Array(WasiContext.fdState[2].data));
+
+    var output = '';
+    if (stdout) {
+      output += '<span class="info">Output:</span>\n' + htmlEscape(stdout);
+    }
+    if (stderr) {
+      output += '\n<span class="error">Errors:</span>\n' + htmlEscape(stderr);
+    }
+    if (!stdout && !stderr) {
+      output = '<span class="info">Program completed with no output</span>';
+    }
+
+    showModal('Program Output', output);
+    setStatus('Program completed');
+  } catch (e) {
+    showModal('Program Output',
+      '<span class="error">Runtime error: ' + htmlEscape(e.message) + '</span>');
+    setStatus('Execution failed');
+  }
+}
+
+function htmlEscape(str) {
+  return str.replace(/[&<>"']/g, function(c) {
+    var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return map[c];
+  });
 }
 
 // --- Modal ---
