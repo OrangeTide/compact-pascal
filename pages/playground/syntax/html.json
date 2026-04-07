@@ -8,7 +8,8 @@
     "entity": "syn-entity",
     "keyword": "syn-keyword",
     "error": "syn-error",
-    "attr": "syn-attr"
+    "attr": "syn-attr",
+    "embedded": "syn-embedded"
   },
   "states": {
     "idle": {
@@ -29,9 +30,96 @@
     "tag_start": {
       "default": { "next": "markup", "noeat": true },
       "rules": [
-        { "match": "!", "next": "bang" }
+        { "match": "!", "next": "bang" },
+        { "match": "sS", "next": "open_s", "buffer": true, "recolor": 1 }
       ]
     },
+
+    "open_s": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "cC", "next": "open_sc" },
+        { "match": "tT", "next": "open_st" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_sc": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "rR", "next": "open_scr" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_scr": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "iI", "next": "open_scri" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_scri": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "pP", "next": "open_scrip" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_scrip": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "tT", "next": "open_script" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_script": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": ">", "next": "embedded_body" },
+        { "match": " \t\n", "next": "embedded_tag" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+
+    "open_st": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "yY", "next": "open_sty" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_sty": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "lL", "next": "open_styl" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_styl": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": "eE", "next": "open_style" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+    "open_style": {
+      "style": "keyword",
+      "default": { "next": "tag_ident", "noeat": true },
+      "rules": [
+        { "match": ">", "next": "embedded_body" },
+        { "match": " \t\n", "next": "embedded_tag" },
+        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+      ]
+    },
+
     "bang": {
       "default": { "next": "markup", "noeat": true },
       "rules": [
@@ -41,7 +129,7 @@
     "maybe_comment": {
       "default": { "next": "markup", "noeat": true },
       "rules": [
-        { "match": "-", "next": "comment", "recolor": 2 }
+        { "match": "-", "next": "comment", "recolor": 4 }
       ]
     },
 
@@ -59,12 +147,12 @@
       ]
     },
     "end_comment": {
-      "style": "error",
+      "style": "comment",
       "default": "idle",
       "rules": [
         { "match": "-", "next": "maybe_another_comment" },
         { "match": " \t\n", "next": "end_comment" },
-        { "match": ">", "next": "idle", "recolor": 1 }
+        { "match": ">", "next": "idle" }
       ]
     },
     "maybe_another_comment": {
@@ -109,44 +197,222 @@
     "tag_ident": {
       "default": { "next": "markup", "noeat": true },
       "rules": [
-        { "match": "a-zA-Z0-9_", "next": "tag_ident" }
+        { "match": "a-zA-Z0-9_-", "next": "tag_ident" }
       ],
       "keywords": {
-        "html": "keyword", "head": "keyword", "base": "keyword",
-        "isindex": "keyword", "link": "keyword", "meta": "keyword",
-        "nextid": "keyword", "script": "keyword", "title": "keyword",
-        "body": "keyword", "address": "keyword", "blockquote": "keyword",
-        "form": "keyword", "input": "keyword", "select": "keyword",
-        "option": "keyword", "textarea": "keyword",
+        "html": "keyword", "head": "keyword", "body": "keyword",
+        "title": "keyword", "meta": "keyword", "link": "keyword",
+        "base": "keyword", "script": "keyword", "style": "keyword",
+        "noscript": "keyword", "template": "keyword",
+
+        "div": "keyword", "span": "keyword", "p": "keyword",
+        "a": "keyword", "br": "keyword", "hr": "keyword",
+        "img": "keyword", "pre": "keyword", "code": "keyword",
+        "em": "keyword", "strong": "keyword", "b": "keyword",
+        "i": "keyword", "u": "keyword", "s": "keyword",
+        "small": "keyword", "big": "keyword", "sub": "keyword",
+        "sup": "keyword", "mark": "keyword", "del": "keyword",
+        "ins": "keyword", "abbr": "keyword", "dfn": "keyword",
+        "cite": "keyword", "q": "keyword", "blockquote": "keyword",
+        "kbd": "keyword", "samp": "keyword", "var": "keyword",
+        "tt": "keyword", "wbr": "keyword", "nobr": "keyword",
+
         "h1": "keyword", "h2": "keyword", "h3": "keyword",
         "h4": "keyword", "h5": "keyword", "h6": "keyword",
-        "hr": "keyword", "dl": "keyword", "dt": "keyword",
-        "dd": "keyword", "ol": "keyword", "li": "keyword",
-        "ul": "keyword", "dir": "keyword", "menu": "keyword",
-        "pre": "keyword", "table": "keyword", "caption": "keyword",
-        "tr": "keyword", "td": "keyword", "th": "keyword",
-        "p": "keyword", "applet": "keyword", "param": "keyword",
-        "basefont": "keyword", "center": "keyword",
-        "map": "keyword", "area": "keyword",
-        "bgsound": "keyword", "marquee": "keyword",
-        "frameset": "keyword", "frame": "keyword", "noframes": "keyword",
-        "b": "keyword", "i": "keyword", "tt": "keyword",
-        "big": "keyword", "small": "keyword",
-        "sub": "keyword", "sup": "keyword", "u": "keyword",
-        "font": "keyword", "blink": "keyword", "nobr": "keyword",
-        "cite": "keyword", "code": "keyword", "em": "keyword",
-        "kbd": "keyword", "samp": "keyword", "strong": "keyword",
-        "var": "keyword", "a": "keyword", "br": "keyword",
-        "img": "keyword", "wbr": "keyword",
 
-        "href": "attr", "target": "attr", "prompt": "attr",
-        "methods": "attr", "name": "attr", "rel": "attr",
-        "rev": "attr", "urn": "attr", "http-equiv": "attr",
-        "content": "attr", "n": "attr",
+        "header": "keyword", "footer": "keyword", "nav": "keyword",
+        "main": "keyword", "section": "keyword", "article": "keyword",
+        "aside": "keyword", "details": "keyword", "summary": "keyword",
+        "figure": "keyword", "figcaption": "keyword", "dialog": "keyword",
+        "address": "keyword", "hgroup": "keyword", "search": "keyword",
+
+        "ul": "keyword", "ol": "keyword", "li": "keyword",
+        "dl": "keyword", "dt": "keyword", "dd": "keyword",
+        "dir": "keyword", "menu": "keyword",
+
+        "table": "keyword", "caption": "keyword",
+        "thead": "keyword", "tbody": "keyword", "tfoot": "keyword",
+        "tr": "keyword", "td": "keyword", "th": "keyword",
+        "col": "keyword", "colgroup": "keyword",
+
+        "form": "keyword", "input": "keyword", "button": "keyword",
+        "select": "keyword", "option": "keyword", "optgroup": "keyword",
+        "textarea": "keyword", "label": "keyword", "fieldset": "keyword",
+        "legend": "keyword", "datalist": "keyword", "output": "keyword",
+        "progress": "keyword", "meter": "keyword",
+
+        "iframe": "keyword", "embed": "keyword", "object": "keyword",
+        "param": "keyword", "video": "keyword", "audio": "keyword",
+        "source": "keyword", "track": "keyword", "canvas": "keyword",
+        "map": "keyword", "area": "keyword", "picture": "keyword",
+        "svg": "keyword", "math": "keyword",
+
+        "font": "keyword", "blink": "keyword", "center": "keyword",
+        "basefont": "keyword", "applet": "keyword",
+        "frameset": "keyword", "frame": "keyword", "noframes": "keyword",
+        "bgsound": "keyword", "marquee": "keyword",
+        "isindex": "keyword", "nextid": "keyword", "slot": "keyword",
+        "data": "keyword", "time": "keyword", "ruby": "keyword",
+        "rt": "keyword", "rp": "keyword",
+
+        "href": "attr", "src": "attr", "alt": "attr", "title": "attr",
+        "id": "attr", "class": "attr", "style": "attr", "type": "attr",
+        "name": "attr", "value": "attr", "action": "attr", "method": "attr",
+        "target": "attr", "rel": "attr", "rev": "attr",
+        "for": "attr", "role": "attr", "tabindex": "attr",
+        "placeholder": "attr", "disabled": "attr", "checked": "attr",
+        "selected": "attr", "readonly": "attr", "required": "attr",
+        "width": "attr", "height": "attr", "colspan": "attr",
+        "rowspan": "attr", "charset": "attr", "lang": "attr",
+        "dir": "attr", "defer": "attr", "async": "attr",
+        "content": "attr", "http-equiv": "attr", "property": "attr",
+        "media": "attr", "sizes": "attr", "crossorigin": "attr",
+        "integrity": "attr", "loading": "attr", "decoding": "attr",
         "background": "attr", "bgcolor": "attr", "text": "attr",
         "vlink": "attr", "bgproperties": "attr",
-        "action": "attr", "enctype": "attr", "method": "attr"
+        "enctype": "attr", "prompt": "attr", "methods": "attr",
+        "urn": "attr", "n": "attr"
       }
+    },
+
+    "embedded_tag": {
+      "style": "keyword",
+      "default": "embedded_tag",
+      "rules": [
+        { "match": ">", "next": "embedded_body" },
+        { "match": "\"", "next": "embedded_dstring" },
+        { "match": "'", "next": "embedded_sstring" }
+      ]
+    },
+    "embedded_dstring": {
+      "style": "constant",
+      "default": "embedded_dstring",
+      "rules": [
+        { "match": "\"", "next": "embedded_tag" }
+      ]
+    },
+    "embedded_sstring": {
+      "style": "constant",
+      "default": "embedded_sstring",
+      "rules": [
+        { "match": "'", "next": "embedded_tag" }
+      ]
+    },
+
+    "embedded_body": {
+      "style": "embedded",
+      "default": "embedded_body",
+      "rules": [
+        { "match": "<", "next": "embedded_lt" }
+      ]
+    },
+    "embedded_lt": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "/", "next": "embedded_sl" }
+      ]
+    },
+    "embedded_sl": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "sS", "next": "embedded_s" }
+      ]
+    },
+    "embedded_s": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "cC", "next": "embedded_sc" },
+        { "match": "tT", "next": "embedded_st" }
+      ]
+    },
+
+    "embedded_sc": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "rR", "next": "embedded_scr" }
+      ]
+    },
+    "embedded_scr": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "iI", "next": "embedded_scri" }
+      ]
+    },
+    "embedded_scri": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "pP", "next": "embedded_scrip" }
+      ]
+    },
+    "embedded_scrip": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "tT", "next": "embedded_script" }
+      ]
+    },
+    "embedded_script": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": " \t\n>", "next": "embedded_script_end", "recolor": 9 }
+      ]
+    },
+
+    "embedded_st": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "yY", "next": "embedded_sty" }
+      ]
+    },
+    "embedded_sty": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "lL", "next": "embedded_styl" }
+      ]
+    },
+    "embedded_styl": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": "eE", "next": "embedded_style" }
+      ]
+    },
+    "embedded_style": {
+      "style": "embedded",
+      "default": { "next": "embedded_body", "noeat": true },
+      "rules": [
+        { "match": " \t\n>", "next": "embedded_style_end", "recolor": 8 }
+      ]
+    },
+
+    "embedded_script_end": {
+      "style": "keyword",
+      "default": { "next": "idle", "noeat": true },
+      "rules": [
+        { "match": " \t\n", "next": "embedded_script_end" },
+        { "match": ">", "next": "embedded_close" }
+      ]
+    },
+    "embedded_style_end": {
+      "style": "keyword",
+      "default": { "next": "idle", "noeat": true },
+      "rules": [
+        { "match": " \t\n", "next": "embedded_style_end" },
+        { "match": ">", "next": "embedded_close" }
+      ]
+    },
+    "embedded_close": {
+      "style": "keyword",
+      "default": { "next": "idle", "noeat": true }
     }
   }
 }

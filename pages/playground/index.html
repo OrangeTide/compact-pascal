@@ -28,6 +28,10 @@
       --syn-type: #2e7d6e;
       --syn-operator: #2c2420;
       --syn-function: #6f4e37;
+      --syn-entity: #6f4e37;
+      --syn-attr: #2e7d6e;
+      --syn-error: #dc3545;
+      --syn-embedded: #6e5494;
     }
 
     html, body { height: 100%; }
@@ -131,6 +135,18 @@
     .tab:hover { background: var(--tab-active); }
     .tab.active { background: var(--tab-active); font-weight: 600; }
 
+    .tab .tab-menu {
+      font-size: 0.7rem;
+      width: 1.2em;
+      height: 1.2em;
+      line-height: 1.2em;
+      text-align: center;
+      border-radius: 2px;
+      color: #999;
+      cursor: pointer;
+    }
+    .tab .tab-menu:hover { background: #ddd; color: #333; }
+
     .tab .close {
       font-size: 0.7rem;
       width: 1.2em;
@@ -155,6 +171,36 @@
     }
 
     .tab-new:hover { background: var(--tab-active); }
+
+    .tab-context-menu {
+      display: none;
+      position: absolute;
+      z-index: 100;
+      background: var(--menu-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      min-width: 120px;
+      padding: 0.2rem 0;
+      font-family: var(--sans);
+      font-size: 0.85rem;
+    }
+    .tab-context-menu.visible { display: block; }
+    .tab-context-menu button {
+      display: block;
+      width: 100%;
+      padding: 0.4rem 0.8rem;
+      border: none;
+      background: none;
+      color: var(--fg);
+      cursor: pointer;
+      text-align: left;
+      font-size: 0.85rem;
+    }
+    .tab-context-menu button:hover {
+      background: var(--accent);
+      color: #fff;
+    }
 
     /* --- Content area: editor + output panes --- */
     .content-area {
@@ -242,6 +288,10 @@
     .syn-type     { color: var(--syn-type); font-weight: 600; }
     .syn-operator { color: var(--syn-operator); font-weight: 600; }
     .syn-function { color: var(--syn-function); font-weight: 600; }
+    .syn-embedded { color: var(--syn-embedded); font-style: italic; }
+    .syn-entity   { color: var(--syn-entity); }
+    .syn-attr     { color: var(--syn-attr); }
+    .syn-error    { color: var(--syn-error); }
 
     /* --- Splitter --- */
     .splitter {
@@ -461,6 +511,10 @@
       --syn-type: #4ec9b0;
       --syn-operator: #d4d4d4;
       --syn-function: #dcdcaa;
+      --syn-entity: #dcdcaa;
+      --syn-attr: #4ec9b0;
+      --syn-error: #f44747;
+      --syn-embedded: #b8a2d0;
     }
 
     body.dark .top-bar button {
@@ -479,6 +533,8 @@
       opacity: 0.4;
     }
 
+    body.dark .tab .tab-menu { color: #666; }
+    body.dark .tab .tab-menu:hover { background: #444; color: #ccc; }
     body.dark .tab .close { color: #666; }
     body.dark .tab .close:hover { background: #444; color: #ccc; }
 
@@ -489,6 +545,13 @@
 
     body.dark .output-header button:hover {
       background: #2a2a2a;
+    }
+
+    body.dark .tab-context-menu {
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+    body.dark .tab-context-menu button:hover {
+      background: var(--accent);
     }
 
     body.dark .file-picker-item:hover { background: #222; }
@@ -542,6 +605,10 @@
   <div class="tab-bar" id="tabBar">
     <button class="tab-new" onclick="newTab()" title="New buffer">+</button>
   </div>
+  <div class="tab-context-menu" id="tabContextMenu">
+    <button onclick="doRenameTab()">Rename</button>
+    <button onclick="doDuplicateTab()">Duplicate</button>
+  </div>
 
   <!-- Content area: editor + output -->
   <div class="content-area">
@@ -588,7 +655,7 @@
   </div>
 
   <!-- Hidden file input for upload -->
-  <input type="file" id="fileInput" accept=".pas,.pp,.p,.txt" style="display:none" onchange="handleUpload(this)">
+  <input type="file" id="fileInput" accept=".pas,.pp,.p,.txt,.html,.htm,.xml" style="display:none" onchange="handleUpload(this)">
 
 <script>
 'use strict';
@@ -606,8 +673,24 @@ var tabBar = document.getElementById('tabBar');
 var output = document.getElementById('output');
 
 // --- Syntax highlighting ---
-var syntaxDef = null;
+var syntaxDefs = {};     // extension -> normalized syntax def (e.g. 'pas', 'html', 'xml')
 var charClassCache = {};
+
+var extToSyntaxFile = {
+  'pas': 'pascal.json', 'pp': 'pascal.json', 'p': 'pascal.json',
+  'html': 'html.json', 'htm': 'html.json',
+  'xml': 'xml.json'
+};
+
+function fileExt(name) {
+  var dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function syntaxForFile(name) {
+  var ext = fileExt(name);
+  return syntaxDefs[ext] || null;
+}
 
 function matchCharClass(ch, classStr) {
   if (classStr === '\n') return ch === '\n';
@@ -682,7 +765,7 @@ function tokenize(text, def) {
       var targetStyle = states[nextState].style;
 
       // Buffer start for keyword tracking
-      if (rule.buffer && bufStart < 0) bufStart = pos;
+      if (rule.buffer) bufStart = pos;
 
       // Assign current char's style first
       styles[pos] = st.style;
@@ -712,13 +795,15 @@ function tokenize(text, def) {
 
       if (st.defaultNoeat) {
         // Keyword lookup when leaving via default
+        var kwNext = null;
         if (st.keywords && bufStart >= 0) {
           var word = text.slice(bufStart, pos).toLowerCase();
           var kwStyle = st.keywords[word] || 'idle';
           for (var k = bufStart; k < pos; k++) styles[k] = kwStyle;
+          if (st.keywordNext) kwNext = st.keywordNext[word];
           bufStart = -1;
         }
-        state = st.default;
+        state = kwNext || st.default;
       } else {
         // Multi-char string matching
         if (st.strings && bufStart >= 0) {
@@ -786,9 +871,11 @@ function renderHighlight(text, styles, def) {
 
 function updateHighlight() {
   var text = editor.value;
-  if (syntaxDef) {
-    var styles = tokenize(text, syntaxDef);
-    highlight.innerHTML = renderHighlight(text, styles, syntaxDef);
+  var buf = findBuffer(activeTab);
+  var def = buf ? syntaxForFile(buf.name) : null;
+  if (def) {
+    var styles = tokenize(text, def);
+    highlight.innerHTML = renderHighlight(text, styles, def);
   } else {
     // No syntax def — show plain text so editor is readable
     highlight.textContent = text || '\n';
@@ -815,11 +902,21 @@ function syncHighlight() {
   updateGutter();
   updateHighlight();
 
-  // Load syntax definition
-  fetch('syntax/pascal.json')
-    .then(function(r) { return r.json(); })
-    .then(function(def) { syntaxDef = normalizeSyntax(def); updateHighlight(); })
-    .catch(function(e) { console.warn('Syntax highlighting unavailable:', e); });
+  // Load syntax definitions
+  var syntaxFiles = {};
+  Object.keys(extToSyntaxFile).forEach(function(ext) { syntaxFiles[extToSyntaxFile[ext]] = true; });
+  Object.keys(syntaxFiles).forEach(function(file) {
+    fetch('syntax/' + file)
+      .then(function(r) { return r.json(); })
+      .then(function(def) {
+        var norm = normalizeSyntax(def);
+        Object.keys(extToSyntaxFile).forEach(function(ext) {
+          if (extToSyntaxFile[ext] === file) syntaxDefs[ext] = norm;
+        });
+        updateHighlight();
+      })
+      .catch(function(e) { console.warn('Syntax ' + file + ' unavailable:', e); });
+  });
 
   // Load compiler on page load
   initCompiler().catch(function(err) {
@@ -982,6 +1079,12 @@ function renderTabs() {
     label.textContent = (isBufferModified(buf) ? '\u2022 ' : '') + buf.name;
     tab.appendChild(label);
 
+    var menu = document.createElement('span');
+    menu.className = 'tab-menu';
+    menu.textContent = '\u25BE';
+    menu.onclick = function(ev) { ev.stopPropagation(); showTabContextMenu(ev, buf.id); };
+    tab.appendChild(menu);
+
     var close = document.createElement('span');
     close.className = 'close';
     close.textContent = '\u00d7';
@@ -991,6 +1094,50 @@ function renderTabs() {
     tabBar.insertBefore(tab, newBtn);
   });
   updateEmptyState();
+}
+
+// --- Tab context menu ---
+var contextMenuTabId = null;
+var tabContextMenu = document.getElementById('tabContextMenu');
+
+function showTabContextMenu(ev, id) {
+  contextMenuTabId = id;
+  var rect = ev.target.getBoundingClientRect();
+  tabContextMenu.style.left = rect.left + 'px';
+  tabContextMenu.style.top = (rect.bottom + 2) + 'px';
+  tabContextMenu.classList.add('visible');
+}
+
+function hideTabContextMenu() {
+  tabContextMenu.classList.remove('visible');
+  contextMenuTabId = null;
+}
+
+document.addEventListener('click', function(ev) {
+  if (!tabContextMenu.contains(ev.target)) hideTabContextMenu();
+});
+
+function doRenameTab() {
+  hideTabContextMenu();
+  var buf = findBuffer(contextMenuTabId || activeTab);
+  if (!buf) return;
+  var name = prompt('Rename file:', buf.name);
+  if (name && name !== buf.name) {
+    buf.name = name;
+    if (buf.id === activeTab) updateHighlight();
+    renderTabs();
+  }
+}
+
+function doDuplicateTab() {
+  hideTabContextMenu();
+  var buf = findBuffer(contextMenuTabId || activeTab);
+  if (!buf) return;
+  saveCurrentBuffer();
+  var ext = fileExt(buf.name);
+  var base = ext ? buf.name.slice(0, buf.name.length - ext.length - 1) : buf.name;
+  var copyName = base + ' (copy)' + (ext ? '.' + ext : '');
+  newTab(copyName, buf.content);
 }
 
 // --- Editor ---
@@ -1111,9 +1258,9 @@ function openSampleFile(file, displayName) {
       var buf = findBuffer(activeTab);
       // Only replace if the current tab is unmodified AND was not restored from localStorage
       if (buf && !isBufferModified(buf) && !buf.fromStorage) {
-        replaceBuffer(buf, displayName, text);
+        replaceBuffer(buf, file, text);
       } else {
-        newTab(displayName, text);
+        newTab(file, text);
       }
       clearOutput();
       setStatus('Loaded ' + displayName);

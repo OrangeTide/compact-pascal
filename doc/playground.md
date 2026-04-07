@@ -14,25 +14,25 @@ directory and providing a compiler snapshot.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Browser                                                      │
-│                                                               │
-│  ┌─────────────┐    stdin     ┌──────────────┐               │
-│  │  Editor      │───(source)──▶  Compiler     │               │
-│  │  (textarea)  │             │  (WASM)       │               │
-│  └─────────────┘             └──────┬───────┘               │
-│                                      │ stdout (compiled .wasm)│
-│                                      ▼                        │
-│                              ┌──────────────┐               │
-│                              │  Web Worker   │               │
-│                              │  (runs prog)  │               │
-│                              └──────┬───────┘               │
-│                                      │ postMessage           │
-│                                      ▼                        │
-│                              ┌──────────────┐               │
-│                              │  Output Pane  │               │
-│                              └──────────────┘               │
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  Browser                                                       │
+│                                                                │
+│  ┌─────────────┐    stdin    ┌──────────────┐                  │
+│  │  Editor     │───(source)──▶  Compiler    │                  │
+│  │  (textarea) │             │  (WASM)      │                  │
+│  └─────────────┘             └──────┬───────┘                  │
+│                                     │ stdout (compiled .wasm)  │
+│                                     ▼                          │
+│                              ┌──────────────┐                  │
+│                              │  Web Worker  │                  │
+│                              │  (runs prog) │                  │
+│                              └──────┬───────┘                  │
+│                                     │ postMessage              │
+│                                     ▼                          │
+│                              ┌──────────────┐                  │
+│                              │  Output Pane │                  │
+│                              └──────────────┘                  │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 **Compile** runs on the main thread: the compiler WASM module is
@@ -47,18 +47,18 @@ posts stdout/stderr chunks back to the main thread via `postMessage`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ [Compact Pascal]  📂 Open Sample  📤 Upload  📥 Download  🔧 Compile  │
-│                   ▶️ Run  ⏹️ Stop                            [☀/🌙]   │
+│ [Compact Pascal]  📂 Open Sample  📤 Upload  📥 Download  🔧 Compile    │
+│                   ▶️ Run  ⏹️ Stop                            [☀/🌙]      │
 ├────────────────────────────────────┬────────────────────────────────────┤
-│ [• hello.pas ×] [fizzbuzz.pas ×]  │  Output                [Clear]    │
-├────────────────────────────────────┤  ──────                           │
-│  1│ program hello;                 │  Compiled 142 bytes               │
-│  2│ begin                          │  > Hello, world!                  │
-│  3│   writeln('Hello, world!')     │                                   │
-│  4│ end.                           │                                   │
-│  │                                 │                                   │
+│ [• hello.pas ×] [fizzbuzz.pas ×]   │  Output                [Clear]     │
+├────────────────────────────────────┤  ──────                            │
+│  1│ program hello;                 │  Compiled 142 bytes                │
+│  2│ begin                          │  > Hello, world!                   │
+│  3│   writeln('Hello, world!')     │                                    │
+│  4│ end.                           │                                    │
+│   │                                │                                    │
 ├────────────────────────────────────┴────────────────────────────────────┤
-│ Ready                                                      Ln 1, Col 1 │
+│ Ready                                                       Ln 1, Col 1 │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -268,7 +268,7 @@ the original explicit format.
 | File | Source | States | Notes |
 |------|--------|--------|-------|
 | `pascal.json` | `pascal.jsf` | 13 | Keywords, `{}` and `(* *)` comments, `''` strings, numbers with exponents |
-| `html.json` | `html.jsf` | 15 | Tag/attribute keywords, entity refs, comments |
+| `html.json` | `html.jsf` | 43 | Tag/attribute keywords, entity refs, comments, `<script>`/`<style>` embedded content |
 | `xml.json` | `xml.jsf` | 34 | Strict validation, entity refs, `<!-- -->`, `<![CDATA[]]>`, `<?...?>`, uses `strings` for multi-char matching |
 
 ### CSS classes
@@ -287,6 +287,7 @@ and dark themes:
 | `.syn-entity` | `#6f4e37` | `#dcdcaa` | Entity references |
 | `.syn-attr` | `#2e7d6e` | `#4ec9b0` | Attributes, declarations |
 | `.syn-error` | `#dc3545` | `#f44747` | Malformed markup |
+| `.syn-embedded` | `#6e5494` | `#b8a2d0` | `<script>`/`<style>` body content (italic) |
 
 ## Future Extras
 
@@ -339,3 +340,21 @@ server. The playground fetches the compiler snapshot from
 
 For local development without the snapshot, the playground shows
 "Compiler unavailable" in the output pane but all editing features work.
+
+## Future Items
+
+- [ ] plumb some WASI calls that are appropriate for our playground environment.
+    - fd_write, fd_read, fd_close, and path_open calls.
+    - our javascript runtime keeps a file descriptor table. Each entry is an file_ops
+    - initial program starts with file_ops entries, 0, 1, 2 set to file_ops with callbacks appropriate for stdin, stdout, and stderr respectively.
+    - [ ] path_open allocates the next available file descriptor table entry. file_ops is a read and/or write to an editor buffer of the same name. the write callback handler calls notifiers array in the file_ops object that editor tab(s) can use to receive update events. (fd_datasync would have been a more elegant way to implement this, but we didn't implement that API)
+    - the end result: Pascal programs can create new editor tabs and read/write text.
+- [ ] update our layout to support mobile friendly view. perhaps editor and output are top/bottom instead of side-by-side? (need to make some decisions)
+- [ ] support binary editor tabs. these would be displayed in an hex/ascii
+  view. user can change the view's "record size" to change the number of hex
+  values per row. default is 16 like a standard hex viewer. This enables users
+  to view and modify pascal records. Creating an ideal environment for
+  teaching.
+- [ ] add a scroll lock button for the output window. (lock/unlock emoji)
+- [ ] output window and graphic windows are tabs on the right-hand side, mirroring the tab UI of the editor panes. These output/graphics tabs can also be popped out of the frame.
+- [ ] add syntax for c (and h), json (use c.jsf as inspiration?), tex, csv (I have no examples, but commas and quotes seem obvious), wasm (use lisp.jsf as inspiration?), markdown (I have no example), sh, ini (perhaps conf.jsf as a starting point, add [section], might also be a basis for a toml syntax), diff/patch.
