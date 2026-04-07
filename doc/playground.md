@@ -293,19 +293,22 @@ and dark themes:
 
 These are not part of the initial implementation but are planned:
 
+- **stdin input**: a text field in the output pane where the user can
+  type input for programs that call `readln`. MVP requirement — users
+  will expect interactive programs to work.
 - **Graphics canvas**: a pop-out window for programs that use a graphics
   API. Appears on demand when the program calls graphics imports.
-  Can be popped out of the browser window.
+  Can be popped out of the browser window. Aspirational — tied to
+  TN-002, which is a large project on its own.
 - **WASM disassembly pane**: shows `wasm2wat`-style disassembly of the
-  compiled output. Useful for the tutorial.
+  compiled output. Useful for the tutorial. Large implementation effort
+  but high value for teaching WASM concepts.
 - **GitHub Gist sharing**: POST to the GitHub Gist API (unauthenticated
   creates anonymous gists; authenticated via OAuth for user gists).
   The Gist API endpoint is `POST https://api.github.com/gists`.
 - **Paste URL loading**: accept a URL query parameter (`?url=...`) that
   fetches a Pascal source file. Content-type must be `text/*`. This
   enables sharing via paste services.
-- **stdin input**: a text field in the output pane where the user can
-  type input for programs that call `readln`.
 
 ## File Structure
 
@@ -343,18 +346,41 @@ For local development without the snapshot, the playground shows
 
 ## Future Items
 
-- [ ] plumb some WASI calls that are appropriate for our playground environment.
+- [ ] stdin input for running programs. A text field in the output pane
+  where the user can type input for programs that call `readln`. This is
+  an MVP requirement — users will expect interactive programs to work.
+- [ ] plumb WASI calls for the playground environment.
     - fd_write, fd_read, fd_close, and path_open calls.
-    - our javascript runtime keeps a file descriptor table. Each entry is an file_ops
-    - initial program starts with file_ops entries, 0, 1, 2 set to file_ops with callbacks appropriate for stdin, stdout, and stderr respectively.
-    - [ ] path_open allocates the next available file descriptor table entry. file_ops is a read and/or write to an editor buffer of the same name. the write callback handler calls notifiers array in the file_ops object that editor tab(s) can use to receive update events. (fd_datasync would have been a more elegant way to implement this, but we didn't implement that API)
-    - the end result: Pascal programs can create new editor tabs and read/write text.
-- [ ] update our layout to support mobile friendly view. perhaps editor and output are top/bottom instead of side-by-side? (need to make some decisions)
-- [ ] support binary editor tabs. these would be displayed in an hex/ascii
-  view. user can change the view's "record size" to change the number of hex
-  values per row. default is 16 like a standard hex viewer. This enables users
-  to view and modify pascal records. Creating an ideal environment for
-  teaching.
+    - The JavaScript runtime keeps a file descriptor table. Each entry
+      is a file_ops object. Programs start with fd 0, 1, 2 mapped to
+      stdin, stdout, and stderr respectively.
+    - path_open takes an fd_dir parameter — a pre-opened directory
+      handle. The WASM side maintains a table of 26 directory root
+      globals (A: through Z:, like drive letters), most initialized
+      to -1. By default fd=3 is the "root" directory of the editor
+      (A:), which is what programs normally pass.
+    - path_open allocates the next available fd table entry. The
+      file_ops is a read and/or write to an editor buffer of the same
+      name. Creation vs error is controlled by oflags; fs_flags
+      handles O_RDONLY and similar. The write callback calls a
+      notifiers array in the file_ops object that editor tab(s) use
+      to receive update events. (fd_datasync would have been a more
+      elegant way to implement this, but we didn't implement that API.)
+    - The end result: Pascal programs can create new editor tabs and
+      read/write text.
+- [ ] binary editor tabs (depends on WASI plumbing). Displayed in a
+  hex/ascii view. User can change the view's "record size" to set the
+  number of hex values per row. Default is 16 like a standard hex
+  viewer. This enables users to view and modify Pascal records —
+  creating an ideal environment for teaching file I/O without jumping
+  straight to binary record dumps.
 - [ ] add a scroll lock button for the output window. (lock/unlock emoji)
-- [ ] output window and graphic windows are tabs on the right-hand side, mirroring the tab UI of the editor panes. These output/graphics tabs can also be popped out of the frame.
-- [ ] add syntax for c (and h), json (use c.jsf as inspiration?), tex, csv (I have no examples, but commas and quotes seem obvious), wasm (use lisp.jsf as inspiration?), markdown (I have no example), sh, ini (perhaps conf.jsf as a starting point, add [section], might also be a basis for a toml syntax), diff/patch.
+- [ ] output and graphics panes as tabs on the right-hand side,
+  mirroring the tab UI of the editor panes.
+- [ ] pop-out windows for output/graphics tabs. Detach a tab into its
+  own browser window. (Separate from the tabbed layout above.)
+- [ ] mobile-friendly layout. Editor on top, output on bottom (vertical
+  stack). Tap-to-switch between full-screen editor and full-screen
+  output modes. Drag-to-select uses native platform cut/paste.
+- [ ] add syntax definitions for: C/H, CSV, JSON, WAT (WASM text
+  format, use lisp.jsf as inspiration), markdown.
