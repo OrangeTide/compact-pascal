@@ -22,6 +22,7 @@ const
   MaxSyms    = 1024;
   MaxScopes  = 32;
   MaxFuncs   = 256;   { max user-defined functions }
+  MaxIfdefDepth = 8;  { max nested IFDEF levels }
 
   { WASM section IDs }
   SecIdType   = 1;
@@ -420,6 +421,17 @@ var
   needsCheckedAdd: boolean;      { __checked_add helper needed }
   needsCheckedSub: boolean;      { __checked_sub helper needed }
   needsCheckedMul: boolean;      { __checked_mul helper needed }
+  needsSetUnion: boolean;        { __set_union helper needed }
+  needsSetIntersect: boolean;    { __set_intersect helper needed }
+  needsSetDiff: boolean;         { __set_diff helper needed }
+  needsSetEq: boolean;           { __set_eq helper needed }
+  needsSetSubset: boolean;       { __set_subset helper needed }
+  needsIntToStr: boolean;        { __int_to_str helper needed }
+  addrSetTemp: longint;          { 32-byte temp for large set arithmetic results }
+  needsSetTemp: boolean;         { whether set temp was allocated }
+  addrSetTemp2: longint;         { second 32-byte temp for compound set expressions }
+  setTempFlip: boolean;          { toggle between addrSetTemp and addrSetTemp2 }
+  addrSetZero: longint;          { static 32-byte zero block for [] with large sets }
   addrCopyTemp: longint;         { 256-byte temp for copy() result }
   needsCopyTemp: boolean;        { whether copy temp was allocated }
   concatPieces: longint;         { compile-time count of saved concat pieces }
@@ -452,6 +464,10 @@ var
   hasPendingExport: boolean;
   pendingExportName: string[63];
 
+  { Conditional compilation state }
+  ifdefActive: array[0..MaxIfdefDepth-1] of boolean; { was the IF branch taken? }
+  ifdefDepth: longint;                                { current nesting depth }
+
   (* User-defined exports from EXPORT directives *)
   userExports: array[0..31] of TExportEntry;
   numUserExports: longint;
@@ -466,8 +482,10 @@ var
   withFieldOfs: array[0..7] of longint;   (* extra field offset when baseWith >= 0 *)
   numWiths: longint;
 
+  {$IFDEF FPC}
   { Output file for binary WASM }
   outFile: file;
+  {$ENDIF}
 
   { Temp buffer for LEB128 etc }
   tmpBuf: array[0..15] of byte;
@@ -481,9 +499,36 @@ procedure ParseProcDecl; forward;
 
 { ---- Error handling ---- }
 
-procedure Error(msg: string);
+{$IFDEF FPC}
+procedure WriteError(s: string);
 begin
-  writeln(stderr, 'Error: [', srcLine, ':', srcCol, '] ', msg);
+  write(stderr, s);
+end;
+
+procedure WriteErrorLn(s: string);
+begin
+  writeln(stderr, s);
+end;
+{$ELSE}
+procedure WriteError(s: string);
+var i: longint;
+begin
+  { WASI fd_write to fd 2 (stderr) — implemented for self-hosted build }
+end;
+
+procedure WriteErrorLn(s: string);
+begin
+  WriteError(s);
+  WriteError(#10);
+end;
+{$ENDIF}
+
+procedure Error(msg: string);
+var lineStr, colStr: string[11];
+begin
+  str(srcLine, lineStr);
+  str(srcCol, colStr);
+  WriteErrorLn('Error: [' + lineStr + ':' + colStr + '] ' + msg);
   halt(1);
 end;
 
@@ -547,6 +592,88 @@ begin
     ReadCh;
 end;
 
+function SkipInactiveBlock: boolean;
+(* Skip source text in an inactive IFDEF/ELSE branch.
+   Scans characters looking for ELSE or ENDIF at nesting depth 0,
+   counting nested IFDEF/IFNDEF/ENDIF pairs.
+   Returns true if stopped at ELSE, false if stopped at ENDIF.
+   On exit, ch = character after the closing brace of the ELSE or ENDIF. *)
+var
+  depth: longint;
+  dir: string;
+begin
+  depth := 0;
+  while not atEof do begin
+    if ch = '{' then begin
+      ReadCh;
+      if ch = '$' then begin
+        ReadCh;
+        dir := '';
+        while (not atEof) and (ch <> '}') and
+              ((ch in ['A'..'Z']) or (ch in ['a'..'z']) or (ch = '_')) do begin
+          if ch in ['a'..'z'] then
+            dir := dir + chr(ord(ch) - 32)
+          else
+            dir := dir + ch;
+          ReadCh;
+        end;
+        if (dir = 'IFDEF') or (dir = 'IFNDEF') then begin
+          inc(depth);
+          while (not atEof) and (ch <> '}') do ReadCh;
+          if ch = '}' then ReadCh;
+        end else if dir = 'ENDIF' then begin
+          if depth = 0 then begin
+            while (not atEof) and (ch <> '}') do ReadCh;
+            if ch = '}' then ReadCh;
+            SkipInactiveBlock := false;
+            exit;
+          end;
+          dec(depth);
+          while (not atEof) and (ch <> '}') do ReadCh;
+          if ch = '}' then ReadCh;
+        end else if dir = 'ELSE' then begin
+          if depth = 0 then begin
+            while (not atEof) and (ch <> '}') do ReadCh;
+            if ch = '}' then ReadCh;
+            SkipInactiveBlock := true;
+            exit;
+          end;
+          while (not atEof) and (ch <> '}') do ReadCh;
+          if ch = '}' then ReadCh;
+        end else begin
+          { other directive in inactive block - skip }
+          while (not atEof) and (ch <> '}') do ReadCh;
+          if ch = '}' then ReadCh;
+        end;
+      end else begin
+        { regular brace comment in inactive block }
+        while (not atEof) and (ch <> '}') do ReadCh;
+        if ch = '}' then ReadCh;
+      end;
+    end else if ch = '(' then begin
+      ReadCh;
+      if ch = '*' then begin
+        ReadCh;
+        while not atEof do begin
+          if ch = '*' then begin
+            ReadCh;
+            if ch = ')' then begin ReadCh; break; end;
+          end else
+            ReadCh;
+        end;
+      end;
+    end else if ch = '''' then begin
+      { skip string literal so braces inside strings are ignored }
+      ReadCh;
+      while (not atEof) and (ch <> '''') do ReadCh;
+      if ch = '''' then ReadCh;
+    end else
+      ReadCh;
+  end;
+  Error('unterminated {$IFDEF}');
+  SkipInactiveBlock := false;
+end;
+
 procedure SkipBraceComment;
 (* Parse brace comment or compiler directive.
    On entry, ch = opening brace. On exit, ch = character after closing brace. *)
@@ -559,6 +686,9 @@ var
   intVal: longint;
   switchOn: boolean;
   i: longint;
+  symName: string[63];
+  condTrue: boolean;
+  foundElse: boolean;
 
   procedure SkipDirectiveSpaces;
   begin
@@ -710,6 +840,52 @@ begin
       { Recognized but not yet implemented }
       while (not atEof) and (ch <> '}') do
         ReadCh;
+    end else if (directive = 'IFDEF') or (directive = 'IFNDEF') then begin
+      SkipDirectiveSpaces;
+      symName := '';
+      while (not atEof) and (ch <> '}') and (ch > ' ') do begin
+        if ch in ['a'..'z'] then
+          symName := symName + chr(ord(ch) - 32)
+        else
+          symName := symName + ch;
+        ReadCh;
+      end;
+      if directive = 'IFDEF' then
+        condTrue := (symName = 'FPC')
+      else
+        condTrue := (symName <> 'FPC');
+      if ifdefDepth >= MaxIfdefDepth then
+        Error('too many nested {$IFDEF}');
+      ifdefActive[ifdefDepth] := condTrue;
+      inc(ifdefDepth);
+      { consume closing brace }
+      while (not atEof) and (ch <> '}') do ReadCh;
+      if ch = '}' then ReadCh;
+      if not condTrue then begin
+        foundElse := SkipInactiveBlock;
+        if not foundElse then
+          dec(ifdefDepth); { ENDIF already consumed }
+      end;
+      exit;
+    end else if directive = 'ELSE' then begin
+      if ifdefDepth = 0 then
+        Error('{$ELSE} without {$IFDEF}');
+      if ifdefActive[ifdefDepth - 1] then begin
+        { IF branch was taken — skip ELSE branch to ENDIF }
+        while (not atEof) and (ch <> '}') do ReadCh;
+        if ch = '}' then ReadCh;
+        foundElse := SkipInactiveBlock;
+        if foundElse then
+          Error('duplicate {$ELSE}');
+        dec(ifdefDepth);
+        exit;
+      end;
+      { IF branch was skipped — ELSE is active (shouldn't reach here normally,
+        SkipInactiveBlock returns to after the ELSE closing brace) }
+    end else if directive = 'ENDIF' then begin
+      if ifdefDepth = 0 then
+        Error('{$ENDIF} without {$IFDEF}');
+      dec(ifdefDepth);
     end else begin
       { Unknown directive - skip rest as comment }
       while (not atEof) and (ch <> '}') do
@@ -2346,6 +2522,65 @@ begin
   EnsureCheckedMul := numImports + 15;
 end;
 
+procedure EnsureSetTemp;
+{** Allocate two 32-byte temp buffers for large set arithmetic results,
+  plus a static 32-byte zero block for empty set compatibility. }
+var j: longint;
+begin
+  if not needsSetTemp then begin
+    needsSetTemp := true;
+    addrSetTemp := AllocDataAligned(32, 4);
+    for j := 1 to 32 do DataBufEmit(secData, 0);
+    addrSetTemp2 := AllocDataAligned(32, 4);
+    for j := 1 to 32 do DataBufEmit(secData, 0);
+    addrSetZero := AllocDataAligned(32, 4);
+    for j := 1 to 32 do DataBufEmit(secData, 0);
+  end;
+end;
+
+function EnsureSetUnion: longint;
+{** __set_union(dst, a, b): byte-wise OR, 32 bytes. Slot 16. }
+begin
+  needsSetUnion := true;
+  EnsureSetUnion := numImports + 16;
+end;
+
+function EnsureSetIntersect: longint;
+{** __set_intersect(dst, a, b): byte-wise AND, 32 bytes. Slot 17. }
+begin
+  needsSetIntersect := true;
+  EnsureSetIntersect := numImports + 17;
+end;
+
+function EnsureSetDiff: longint;
+{** __set_diff(dst, a, b): byte-wise A AND NOT B, 32 bytes. Slot 18. }
+begin
+  needsSetDiff := true;
+  EnsureSetDiff := numImports + 18;
+end;
+
+function EnsureSetEq: longint;
+{** __set_eq(a, b) -> i32: compare 32 bytes, return 1 if equal. Slot 19. }
+begin
+  needsSetEq := true;
+  EnsureSetEq := numImports + 19;
+end;
+
+function EnsureSetSubset: longint;
+{** __set_subset(a, b) -> i32: return 1 if a is subset of b. Slot 20. }
+begin
+  needsSetSubset := true;
+  EnsureSetSubset := numImports + 20;
+end;
+
+function EnsureIntToStrHelper: longint;
+{** __int_to_str(value, dest): convert i32 to Pascal string at dest. Slot 21. }
+begin
+  EnsureIntToStr;
+  needsIntToStr := true;
+  EnsureIntToStrHelper := numImports + 21;
+end;
+
 procedure EmitWriteInt;
 {** Emit a call to the __write_int helper function.
   The integer value is already on the WASM operand stack. }
@@ -2381,8 +2616,10 @@ var
   tmpOfs: longint;
   castTyp: longint;
   castName: string;
+  leftSetSize: longint;
 begin
   withFound := false;
+  leftSetSize := 4;
   { Prefix }
   case tokKind of
     tkInteger: begin
@@ -3112,6 +3349,8 @@ begin
       break;
 
     leftType := exprType;
+    if leftType = tySet then
+      leftSetSize := exprSetSize;
 
     { For string +: save left operand to scratch BEFORE parsing right }
     if (leftType = tyString) and (op = tkPlus) then begin
@@ -3242,43 +3481,120 @@ begin
     end
     else if (leftType = tySet) and (op in [tkPlus, tkMinus, tkStar,
         tkEqual, tkNotEqual, tkLessEq, tkGreaterEq]) then begin
-      { Set operations — both operands are i32 bitmaps on stack }
-      case op of
-        tkPlus:  EmitOp(OpI32Or);    { union }
-        tkStar:  EmitOp(OpI32And);   { intersection }
-        tkMinus: begin               { difference: A AND NOT B }
-          EmitI32Const(-1);
-          EmitOp(OpI32Xor);          { NOT B }
-          EmitOp(OpI32And);
+      if (leftSetSize > 4) or (exprSetSize > 4) then begin
+        { Large set operations — both operands are addresses on stack.
+          Handle mismatch when one side is [] (small i32 = 0):
+          replace with address of static 32-byte zero block. }
+        EnsureSetTemp;
+        if (exprSetSize <= 4) then begin
+          { Right operand is small (e.g. []) — stack: ..., left_addr, right_i32.
+            Drop i32, push addrSetZero. }
+          EmitOp(OpDrop);
+          EmitI32Const(addrSetZero);
         end;
-        tkEqual:    EmitOp(OpI32Eq);
-        tkNotEqual: EmitOp(OpI32Ne);
-        tkLessEq: begin              { subset: A AND NOT B = 0 }
-          EmitI32Const(-1);
-          EmitOp(OpI32Xor);          { NOT B }
-          EmitOp(OpI32And);          { A AND NOT B }
-          EmitI32Const(0);
-          EmitOp(OpI32Eq);
-        end;
-        tkGreaterEq: begin           { superset: B AND NOT A = 0 }
-          { Stack: A, B. Need B AND NOT A.
-            Save B, NOT A, AND B. }
+        if (leftSetSize <= 4) then begin
+          { Left operand is small — stack: ..., left_i32, right_addr.
+            Save right, drop left i32, push addrSetZero, restore right. }
           curFuncNeedsCaseTemp := true;
           EmitOp(OpLocalSet);
-          EmitULEB128(startCode, curCaseTempIdx);  { save B }
-          EmitI32Const(-1);
-          EmitOp(OpI32Xor);          { NOT A }
+          EmitULEB128(startCode, curCaseTempIdx);
+          EmitOp(OpDrop);
+          EmitI32Const(addrSetZero);
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, curCaseTempIdx);
-          EmitOp(OpI32And);          { B AND NOT A }
-          EmitI32Const(0);
-          EmitOp(OpI32Eq);
         end;
+        curFuncNeedsCaseTemp := true;
+        curFuncNeedsStringTemp := true;
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curCaseTempIdx);    { save b_addr }
+        EmitOp(OpLocalSet);
+        EmitULEB128(startCode, curStringTempIdx);  { save a_addr }
+        if op in [tkPlus, tkMinus, tkStar] then begin
+          { Arithmetic: call helper(dst, a, b), push dst addr }
+          EnsureSetTemp;
+          if setTempFlip then fi := addrSetTemp2
+          else fi := addrSetTemp;
+          setTempFlip := not setTempFlip;
+          EmitI32Const(fi);                        { dst }
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, curStringTempIdx); { a }
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, curCaseTempIdx);   { b }
+          case op of
+            tkPlus:  EmitCall(EnsureSetUnion);
+            tkStar:  EmitCall(EnsureSetIntersect);
+            tkMinus: EmitCall(EnsureSetDiff);
+          end;
+          EmitI32Const(fi);  { push result address }
+          exprType := tySet;
+        end else begin
+          { Comparison: call helper(a, b) -> i32 }
+          case op of
+            tkEqual, tkNotEqual: begin
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curStringTempIdx);
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitCall(EnsureSetEq);
+              if op = tkNotEqual then
+                EmitOp(OpI32Eqz);
+            end;
+            tkLessEq: begin              { subset: a <= b }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curStringTempIdx);
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curCaseTempIdx);
+              EmitCall(EnsureSetSubset);
+            end;
+            tkGreaterEq: begin           { superset: a >= b means b <= a }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curCaseTempIdx);   { b first }
+              EmitOp(OpLocalGet);
+              EmitULEB128(startCode, curStringTempIdx);  { a second }
+              EmitCall(EnsureSetSubset);
+            end;
+          end;
+          exprType := tyBoolean;
+        end;
+      end else begin
+        { Small set operations — both operands are i32 bitmaps on stack }
+        case op of
+          tkPlus:  EmitOp(OpI32Or);    { union }
+          tkStar:  EmitOp(OpI32And);   { intersection }
+          tkMinus: begin               { difference: A AND NOT B }
+            EmitI32Const(-1);
+            EmitOp(OpI32Xor);          { NOT B }
+            EmitOp(OpI32And);
+          end;
+          tkEqual:    EmitOp(OpI32Eq);
+          tkNotEqual: EmitOp(OpI32Ne);
+          tkLessEq: begin              { subset: A AND NOT B = 0 }
+            EmitI32Const(-1);
+            EmitOp(OpI32Xor);          { NOT B }
+            EmitOp(OpI32And);          { A AND NOT B }
+            EmitI32Const(0);
+            EmitOp(OpI32Eq);
+          end;
+          tkGreaterEq: begin           { superset: B AND NOT A = 0 }
+            { Stack: A, B. Need B AND NOT A.
+              Save B, NOT A, AND B. }
+            curFuncNeedsCaseTemp := true;
+            EmitOp(OpLocalSet);
+            EmitULEB128(startCode, curCaseTempIdx);  { save B }
+            EmitI32Const(-1);
+            EmitOp(OpI32Xor);          { NOT A }
+            EmitOp(OpLocalGet);
+            EmitULEB128(startCode, curCaseTempIdx);
+            EmitOp(OpI32And);          { B AND NOT A }
+            EmitI32Const(0);
+            EmitOp(OpI32Eq);
+          end;
+        end;
+        if op in [tkPlus, tkMinus, tkStar] then
+          exprType := tySet
+        else
+          exprType := tyBoolean;
       end;
-      if op in [tkPlus, tkMinus, tkStar] then
-        exprType := tySet
-      else
-        exprType := tyBoolean;
     end else begin
       case op of
         tkPlus:      if optOverflowChecks then EmitCall(EnsureCheckedAdd)
@@ -4003,6 +4319,41 @@ begin
         end;
         Expect(tkRParen);
       end
+      else if name = 'STR' then begin
+        { str(intExpr, stringVar) — convert integer to Pascal string }
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('str() first argument must be integer');
+        Expect(tkComma);
+        if tokKind <> tkIdent then
+          Error('str() second argument must be a string variable');
+        sym := LookupSym(tokStr);
+        if sym < 0 then
+          Error('undeclared identifier: ' + tokStr);
+        if syms[sym].typ <> tyString then
+          Error('str() second argument must be a string variable');
+        if syms[sym].kind <> skVar then
+          Error('str() second argument must be a variable');
+        if syms[sym].isConstParam then
+          Error('cannot modify const parameter');
+        { Push dest address }
+        if syms[sym].isVarParam then begin
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+        end else if syms[sym].offset < 0 then begin
+          EmitOp(OpLocalGet);
+          EmitULEB128(startCode, -(syms[sym].offset + 1));
+        end else begin
+          EmitFramePtr(syms[sym].level);
+          EmitI32Const(syms[sym].offset);
+          EmitOp(OpI32Add);
+        end;
+        EmitCall(EnsureIntToStrHelper);
+        NextToken;
+        Expect(tkRParen);
+      end
       else begin
       sym := LookupSym(name);
       withFound := false;
@@ -4103,6 +4454,12 @@ begin
         end else if (desTyp = tyRecord) or (desTyp = tyArray)
             or ((desTyp = tySet) and (desTypeIdx >= 0) and (types[desTypeIdx].size > 4)) then begin
           ParseExpression(PrecNone);
+          if (desTyp = tySet) and (exprSetSize <= 4) then begin
+            { RHS is small (e.g. []) but dest is large — drop i32, use zero block }
+            EnsureSetTemp;
+            EmitOp(OpDrop);
+            EmitI32Const(addrSetZero);
+          end;
           EmitI32Const(types[desTypeIdx].size);
           EmitMemoryCopy;
         end else begin
@@ -4289,6 +4646,12 @@ begin
           end;
           { dst addr is on stack; parse src expr (leaves src addr) }
           ParseExpression(PrecNone);
+          if (desTyp = tySet) and (exprSetSize <= 4) then begin
+            { RHS is small (e.g. []) but dest is large — drop i32, use zero block }
+            EnsureSetTemp;
+            EmitOp(OpDrop);
+            EmitI32Const(addrSetZero);
+          end;
           EmitI32Const(types[desTypeIdx].size);
           EmitMemoryCopy;
         end
@@ -5343,14 +5706,11 @@ end;
 
 procedure WriteOutputBytes(var buf; count: longint);
 var
-  p: ^byte;
+  b: array[0..0] of byte absolute buf;
   i: longint;
 begin
-  p := @buf;
-  for i := 0 to count - 1 do begin
-    WriteOutputByte(p^);
-    p := pointer(ptrint(p) + 1);
-  end;
+  for i := 0 to count - 1 do
+    WriteOutputByte(b[i]);
 end;
 
 procedure WriteOutputULEB128(value: longint);
@@ -5460,7 +5820,19 @@ begin
   SmallEmitULEB128(secFunc, TypeI32x2I32);
   { Slot 15: __checked_mul uses type i32,i32 -> i32 (always present) }
   SmallEmitULEB128(secFunc, TypeI32x2I32);
-  { Slots 16+: User-defined functions (skip imports) }
+  { Slot 16: __set_union uses type i32,i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x3Void);
+  { Slot 17: __set_intersect uses type i32,i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x3Void);
+  { Slot 18: __set_diff uses type i32,i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x3Void);
+  { Slot 19: __set_eq uses type i32,i32 -> i32 (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x2I32);
+  { Slot 20: __set_subset uses type i32,i32 -> i32 (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x2I32);
+  { Slot 21: __int_to_str uses type i32,i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32x2Void);
+  { Slots 22+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
     if funcs[i].bodyStart <> -2 then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
@@ -5685,6 +6057,121 @@ begin
   EmitHelperI32Const(addrNwritten);
   EmitHelperCall(idxFdWrite);
   EmitHelper(OpDrop);
+end;
+
+procedure BuildIntToStrHelper;
+(* Build __int_to_str(value: i32, dest: i32) function body into helperCode.
+   Converts an i32 to decimal ASCII in intBuf scratch area, then copies
+   the result as a Pascal string (length byte + chars) to dest.
+
+   Uses 3 WASM locals (+ 2 params = 5 total):
+     param 0 = value
+     param 1 = dest address
+     local 2 = pos (i32) - current write position in intBuf
+     local 3 = neg_flag (i32)
+     local 4 = len (i32) - computed string length
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* pos = intbuf + 19 *)
+  EmitHelperI32Const(addrIntBuf + 19);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+  (* neg_flag = 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+
+  (* if value < 0 *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelperI32Const(0);
+  EmitHelper(OpI32LtS);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    (* value = 0 - value *)
+    EmitHelperI32Const(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpI32Sub);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(0);
+    (* neg_flag = 1 *)
+    EmitHelperI32Const(1);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+  EmitHelper(OpEnd);
+
+  (* if value == 0: special case *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+  EmitHelper(OpI32Eqz);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(ord('0'));
+    EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Sub);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+  EmitHelper(OpElse);
+    (* loop: extract digits right to left *)
+    EmitHelper(OpLoop); EmitHelper(WasmVoid);
+      EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+      EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+      EmitHelperI32Const(10);
+      EmitHelper(OpI32RemS);
+      EmitHelperI32Const(ord('0'));
+      EmitHelper(OpI32Add);
+      EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+      EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+      EmitHelperI32Const(10);
+      EmitHelper(OpI32DivS);
+      EmitHelper(OpLocalSet); EmitHelperULEB128(0);
+
+      EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Sub);
+      EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+      EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+      EmitHelperI32Const(0);
+      EmitHelper(OpI32Ne);
+      EmitHelper(OpBrIf); EmitHelperULEB128(0);
+    EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* if negative: store '-' *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(ord('-'));
+    EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Sub);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+  EmitHelper(OpEnd);
+
+  (* pos++ to point to first character *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelperI32Const(1);
+  EmitHelper(OpI32Add);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+  (* len = intbuf + 20 - pos *)
+  EmitHelperI32Const(addrIntBuf + 20);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelper(OpI32Sub);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(4);
+
+  (* store length byte at dest *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+  EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+  (* memory.copy dest+1, pos, len *)
+  EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+  EmitHelperI32Const(1);
+  EmitHelper(OpI32Add);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+  EmitHelper(OpLocalGet); EmitHelperULEB128(4);
+  EmitHelper($FC); EmitHelper($0A); EmitHelper($00); EmitHelper($00); { memory.copy 0 0 }
 end;
 
 procedure BuildReadIntHelper;
@@ -6795,6 +7282,187 @@ begin
   EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
 end;
 
+procedure BuildSetBinOpHelper(opKind: longint);
+(** Build a large set binary operation helper into helperCode.
+  opKind: 0 = union (OR), 1 = intersect (AND), 2 = diff (AND NOT).
+  Parameters: local 0 = dst, local 1 = a, local 2 = b.
+  Extra locals: local 3 = counter (i32).
+  Loops over 8 i32 words. *)
+begin
+  CodeBufInit(helperCode);
+
+  (* counter := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);
+
+    (* dst + counter*4 — store address *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+
+    (* a[counter]: load i32 at a + counter*4 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* b[counter]: load i32 at b + counter*4 *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* apply operator *)
+    case opKind of
+      0: EmitHelper(OpI32Or);              { union: a[i] OR b[i] }
+      1: EmitHelper(OpI32And);             { intersect: a[i] AND b[i] }
+      2: begin                             { diff: a[i] AND NOT b[i] }
+           EmitHelperI32Const(-1);
+           EmitHelper(OpI32Xor);
+           EmitHelper(OpI32And);
+         end;
+    end;
+
+    (* store result *)
+    EmitHelper(OpI32Store); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* counter++; if counter < 8 then loop *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(3);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(3);
+    EmitHelperI32Const(8);
+    EmitHelper(OpI32LtU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(0);
+
+  EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+end;
+
+procedure BuildSetEqHelper;
+(** Build __set_eq(a, b) -> i32 helper into helperCode.
+  Returns 1 if equal, 0 if not.
+  Parameters: local 0 = a, local 1 = b.
+  Extra locals: local 2 = counter (i32).
+  Loops over 8 i32 words. *)
+begin
+  CodeBufInit(helperCode);
+
+  (* counter := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);
+
+    (* a[counter] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* b[counter] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* if a[i] <> b[i] then return 0 *)
+    EmitHelper(OpI32Ne);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperI32Const(0);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+
+    (* counter++; if counter < 8 then loop *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(8);
+    EmitHelper(OpI32LtU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(0);
+
+  EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* all words equal *)
+  EmitHelperI32Const(1);
+end;
+
+procedure BuildSetSubsetHelper;
+(** Build __set_subset(a, b) -> i32 helper into helperCode.
+  Returns 1 if a is a subset of b (a AND NOT b = 0 for all words).
+  Parameters: local 0 = a, local 1 = b.
+  Extra locals: local 2 = counter (i32).
+  Loops over 8 i32 words. *)
+begin
+  CodeBufInit(helperCode);
+
+  (* counter := 0 *)
+  EmitHelperI32Const(0);
+  EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);
+  EmitHelper(OpLoop); EmitHelper(WasmVoid);
+
+    (* a[counter] *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(0);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+
+    (* b[counter] — then NOT *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(1);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(2);
+    EmitHelper(OpI32Shl);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelperI32Const(-1);
+    EmitHelper(OpI32Xor);     { NOT b[i] }
+    EmitHelper(OpI32And);     { a[i] AND NOT b[i] }
+
+    (* if nonzero then return 0 — not a subset *)
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperI32Const(0);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+
+    (* counter++; if counter < 8 then loop *)
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpLocalSet); EmitHelperULEB128(2);
+    EmitHelper(OpLocalGet); EmitHelperULEB128(2);
+    EmitHelperI32Const(8);
+    EmitHelper(OpI32LtU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(0);
+
+  EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* all words pass — a is subset of b *)
+  EmitHelperI32Const(1);
+end;
+
 procedure CopyBufToCode(var src: TCodeBuf);
 var i: longint;
 begin
@@ -6808,7 +7476,7 @@ procedure AssembleCodeSectionFixed;
   slot 3 = __str_assign, slot 4 = __write_str, slot 5 = __str_compare,
   slot 6 = __read_str, slot 7 = __str_append, slot 8 = __str_copy,
   slot 9 = __str_pos, slot 10 = __str_delete, slot 11 = __str_insert,
-  slots 12+ = user funcs. }
+  slot 21 = __int_to_str, slots 22+ = user funcs. }
 var
   bodyLen: longint;
   i, j: longint;
@@ -7175,7 +7843,109 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 16+: User-defined function bodies (skip imports) }
+  { Slot 16: __set_union body — always present (empty stub if unused) }
+  if needsSetUnion then begin
+    BuildSetBinOpHelper(0); { 0 = union }
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 1);      { 1 local (counter) }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 17: __set_intersect body — always present (empty stub if unused) }
+  if needsSetIntersect then begin
+    BuildSetBinOpHelper(1); { 1 = intersect }
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 18: __set_diff body — always present (empty stub if unused) }
+  if needsSetDiff then begin
+    BuildSetBinOpHelper(2); { 2 = diff }
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 19: __set_eq body — always present (empty stub if unused) }
+  if needsSetEq then begin
+    BuildSetEqHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 20: __set_subset body — always present (empty stub if unused) }
+  if needsSetSubset then begin
+    BuildSetSubsetHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 21: __int_to_str body — always present (empty stub if unused) }
+  if needsIntToStr then begin
+    BuildIntToStrHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);      { 1 local declaration block }
+    CodeBufEmit(secCode, 3);      { 3 locals (pos, neg_flag, len) }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 22+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
@@ -7269,6 +8039,7 @@ begin
   ReadSLEB128 := result_val;
 end;
 
+{$IFDEF FPC}
 procedure DumpBytes(var buf: TCodeBuf; startPos, endPos: longint);
 {** Disassemble WASM bytecodes from buf[startPos..endPos-1] to stderr. }
 var
@@ -7386,9 +8157,21 @@ begin
           writeln(stderr, '  ;; __checked_sub')
         else if val = numImports + 15 then
           writeln(stderr, '  ;; __checked_mul')
+        else if val = numImports + 16 then
+          writeln(stderr, '  ;; __set_union')
+        else if val = numImports + 17 then
+          writeln(stderr, '  ;; __set_intersect')
+        else if val = numImports + 18 then
+          writeln(stderr, '  ;; __set_diff')
+        else if val = numImports + 19 then
+          writeln(stderr, '  ;; __set_eq')
+        else if val = numImports + 20 then
+          writeln(stderr, '  ;; __set_subset')
+        else if val = numImports + 21 then
+          writeln(stderr, '  ;; __int_to_str')
         else begin
           { User function }
-          i := val - numImports - 16;
+          i := val - numImports - 22;
           if (i >= 0) and (i < numFuncs) then
             writeln(stderr, '  ;; ', funcs[i].name)
           else
@@ -7564,7 +8347,7 @@ begin
   writeln(stderr);
 
   { Helper slots — list active ones }
-  for i := 1 to 15 do begin
+  for i := 1 to 20 do begin
     case i of
       1: if needsWriteInt then slotName := '__write_int' else continue;
       2: if needsReadInt then slotName := '__read_int' else continue;
@@ -7581,6 +8364,12 @@ begin
       13: if needsCheckedAdd then slotName := '__checked_add' else continue;
       14: if needsCheckedSub then slotName := '__checked_sub' else continue;
       15: if needsCheckedMul then slotName := '__checked_mul' else continue;
+      16: if needsSetUnion then slotName := '__set_union' else continue;
+      17: if needsSetIntersect then slotName := '__set_intersect' else continue;
+      18: if needsSetDiff then slotName := '__set_diff' else continue;
+      19: if needsSetEq then slotName := '__set_eq' else continue;
+      20: if needsSetSubset then slotName := '__set_subset' else continue;
+      21: if needsIntToStr then slotName := '__int_to_str' else continue;
     end;
     writeln(stderr, 'func[', numImports + i, '] ', slotName, '  (helper, code in code section)');
   end;
@@ -7589,11 +8378,11 @@ begin
   { User-defined functions }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then begin
-      writeln(stderr, 'func[', numImports + 16 + i, '] ', funcs[i].name,
+      writeln(stderr, 'func[', numImports + 22 + i, '] ', funcs[i].name,
               '  (import)');
       continue;
     end;
-    writeln(stderr, 'func[', numImports + 16 + i, '] ', funcs[i].name,
+    writeln(stderr, 'func[', numImports + 22 + i, '] ', funcs[i].name,
             '  params=', funcs[i].nparams,
             '  locals=', funcs[i].nlocals,
             '  bytes=', funcs[i].bodyLen);
@@ -7609,6 +8398,7 @@ begin
   writeln(stderr, 'Stack size: ', optStackSize, ' bytes');
   writeln(stderr);
 end;
+{$ENDIF}
 
 procedure WriteModule;
 begin
@@ -7665,11 +8455,15 @@ begin
     WriteOutputBytes(optDescription[1], length(optDescription)); { payload }
   end;
 
-  { Flush to file }
+  { Flush output to stdout }
+  {$IFDEF FPC}
   Assign(outFile, '/dev/stdout');
   Rewrite(outFile, 1);
   BlockWrite(outFile, outBuf.data, outBuf.len);
   Close(outFile);
+  {$ELSE}
+  { Self-hosted: WASI fd_write to fd 1 }
+  {$ENDIF}
 end;
 
 { ---- Main ---- }
@@ -7705,7 +8499,7 @@ begin
   numStructCopies := 0;
   numVarInits := 0;
   numImports := 0;
-  numDefinedFuncs := 16; { slots 0-15: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul }
+  numDefinedFuncs := 22; { slots 0-21: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str }
   numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
@@ -7741,6 +8535,17 @@ begin
   needsCheckedAdd := false;
   needsCheckedSub := false;
   needsCheckedMul := false;
+  needsSetUnion := false;
+  needsSetIntersect := false;
+  needsSetDiff := false;
+  needsSetEq := false;
+  needsSetSubset := false;
+  needsIntToStr := false;
+  addrSetTemp := -1;
+  needsSetTemp := false;
+  addrSetTemp2 := -1;
+  setTempFlip := false;
+  addrSetZero := -1;
   addrCopyTemp := -1;
   needsCopyTemp := false;
   concatPieces := 0;
@@ -7768,15 +8573,17 @@ begin
   optExtLiterals := false;
   optDump := false;
 
+  {$IFDEF FPC}
   { Parse command-line arguments (fpc native binary uses ParamCount/ParamStr) }
   for i := 1 to ParamCount do begin
     if ParamStr(i) = '-dump' then
       optDump := true
     else begin
-      writeln(stderr, 'Unknown option: ', ParamStr(i));
+      WriteErrorLn('Unknown option: ' + ParamStr(i));
       halt(1);
     end;
   end;
+  {$ENDIF}
 
   { Pre-register all WASI imports so numImports is stable before
     any code emission. WASI hosts always provide these functions. }
@@ -7829,7 +8636,9 @@ begin
   { Assemble and write WASM module }
   WriteModule;
 
+  {$IFDEF FPC}
   { Dump instructions if -dump flag was given }
   if optDump then
     DumpModule;
+  {$ENDIF}
 end.
