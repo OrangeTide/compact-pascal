@@ -729,7 +729,7 @@ function renderTabs() {
     tab.onclick = function() { switchTab(buf.id); };
 
     var label = document.createElement('span');
-    label.textContent = buf.name;
+    label.textContent = (isBufferModified(buf) ? '\u2022 ' : '') + buf.name;
     tab.appendChild(label);
 
     var close = document.createElement('span');
@@ -747,7 +747,20 @@ function renderTabs() {
 function onEditorInput() {
   updateGutter();
   var buf = findBuffer(activeTab);
-  if (buf) { buf.content = editor.value; }
+  if (buf) {
+    buf.content = editor.value;
+    updateTabLabel(buf);
+  }
+}
+
+function updateTabLabel(buf) {
+  var tabs = tabBar.querySelectorAll('.tab');
+  for (var i = 0; i < tabs.length; i++) {
+    if (buffers[i] && buffers[i].id === buf.id) {
+      tabs[i].querySelector('span').textContent = (isBufferModified(buf) ? '\u2022 ' : '') + buf.name;
+      break;
+    }
+  }
 }
 
 function onEditorKey(ev) {
