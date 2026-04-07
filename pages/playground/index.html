@@ -22,6 +22,12 @@
       --sans: 'IBM Plex Sans Condensed', -apple-system, BlinkMacSystemFont, sans-serif;
       --gutter-bg: #ebe5da;
       --gutter-fg: #999;
+      --syn-comment: #6a9955;
+      --syn-constant: #b5632f;
+      --syn-keyword: #a0522d;
+      --syn-type: #2e7d6e;
+      --syn-operator: #2c2420;
+      --syn-function: #6f4e37;
     }
 
     html, body { height: 100%; }
@@ -190,6 +196,27 @@
 
     .gutter-inner { padding-right: 0.5rem; white-space: pre; }
 
+    #highlight {
+      position: absolute;
+      top: 0;
+      left: 3.5rem;
+      right: 0;
+      bottom: 0;
+      margin: 0;
+      border: none;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      line-height: 1.45;
+      padding: 0.5rem;
+      tab-size: 2;
+      white-space: pre;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 1;
+      background: var(--tab-active);
+      color: var(--fg);
+    }
+
     #editor {
       flex: 1;
       font-family: var(--mono);
@@ -199,12 +226,22 @@
       border: none;
       outline: none;
       resize: none;
-      background: var(--tab-active);
-      color: var(--fg);
+      background: transparent;
+      color: transparent;
+      caret-color: var(--fg);
       tab-size: 2;
       white-space: pre;
       overflow: auto;
+      position: relative;
+      z-index: 2;
     }
+
+    .syn-comment  { color: var(--syn-comment); }
+    .syn-constant { color: var(--syn-constant); }
+    .syn-keyword  { color: var(--syn-keyword); font-weight: 600; }
+    .syn-type     { color: var(--syn-type); font-weight: 600; }
+    .syn-operator { color: var(--syn-operator); font-weight: 600; }
+    .syn-function { color: var(--syn-function); font-weight: 600; }
 
     /* --- Splitter --- */
     .splitter {
@@ -418,6 +455,12 @@
       --output-fg: #d4d4d4;
       --gutter-bg: #252525;
       --gutter-fg: #666;
+      --syn-comment: #6a9955;
+      --syn-constant: #ce9178;
+      --syn-keyword: #d4845a;
+      --syn-type: #4ec9b0;
+      --syn-operator: #d4d4d4;
+      --syn-function: #dcdcaa;
     }
 
     body.dark .top-bar button {
@@ -506,6 +549,7 @@
     <div class="editor-pane">
       <div class="editor-wrap">
         <div class="gutter"><div class="gutter-inner" id="gutter"></div></div>
+        <pre id="highlight" aria-hidden="true"></pre>
         <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
       </div>
       <div class="empty-state">
@@ -557,8 +601,205 @@ var runningWorker = null;
 
 var editor = document.getElementById('editor');
 var gutter = document.getElementById('gutter');
+var highlight = document.getElementById('highlight');
 var tabBar = document.getElementById('tabBar');
 var output = document.getElementById('output');
+
+// --- Syntax highlighting ---
+var syntaxDef = null;
+var charClassCache = {};
+
+function matchCharClass(ch, classStr) {
+  if (classStr === '\n') return ch === '\n';
+  var fn = charClassCache[classStr];
+  if (!fn) {
+    // Build a test function from the class string
+    // Ranges like "a-zA-Z0-9" and single chars like "(" "{" "*" "+"
+    var parts = [];
+    var i = 0;
+    while (i < classStr.length) {
+      if (i + 2 < classStr.length && classStr[i + 1] === '-') {
+        parts.push(classStr[i] + '-' + classStr[i + 2]);
+        i += 3;
+      } else {
+        // Escape regex-special characters
+        var c = classStr[i];
+        parts.push(c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        i++;
+      }
+    }
+    var re = new RegExp('^[' + parts.join('') + ']$');
+    fn = function(c) { return re.test(c); };
+    charClassCache[classStr] = fn;
+  }
+  return fn(ch);
+}
+
+function normalizeSyntax(def) {
+  var states = def.states;
+  for (var name in states) {
+    var st = states[name];
+    if (st.style === undefined) st.style = (name in def.styles) ? name : 'idle';
+    if (!st.rules) st.rules = [];
+    if (st.default && typeof st.default === 'object') {
+      var d = st.default;
+      if (d.noeat) st.defaultNoeat = true;
+      if (d.recolor) st.defaultRecolor = d.recolor;
+      st.default = d.next;
+    }
+    if (st.strings) {
+      for (var key in st.strings) {
+        if (typeof st.strings[key] === 'string') st.strings[key] = { next: st.strings[key] };
+      }
+    }
+  }
+  return def;
+}
+
+function tokenize(text, def) {
+  var states = def.states;
+  var styleMap = def.styles;
+  var styles = new Array(text.length);
+  var state = def.startState;
+  var pos = 0;
+  var bufStart = -1;
+
+  while (pos < text.length) {
+    var ch = text[pos];
+    var st = states[state];
+    var rule = null;
+
+    // Find matching rule
+    for (var r = 0; r < st.rules.length; r++) {
+      if (matchCharClass(ch, st.rules[r].match)) {
+        rule = st.rules[r];
+        break;
+      }
+    }
+
+    if (rule) {
+      var nextState = rule.next;
+      var targetStyle = states[nextState].style;
+
+      // Buffer start for keyword tracking
+      if (rule.buffer && bufStart < 0) bufStart = pos;
+
+      // Assign current char's style first
+      styles[pos] = st.style;
+
+      // Recolor: repaint previous N chars with target state's style (overwrites above)
+      if (rule.recolor) {
+        for (var k = Math.max(0, pos - rule.recolor + 1); k <= pos; k++) {
+          styles[k] = targetStyle;
+        }
+      }
+
+      if (rule.noeat) {
+        state = nextState;
+        // don't advance pos
+      } else {
+        state = nextState;
+        pos++;
+      }
+    } else {
+      // Default transition
+      styles[pos] = st.style;
+
+      if (st.defaultRecolor) {
+        var drs = states[st.default].style;
+        for (var k = Math.max(0, pos - st.defaultRecolor + 1); k <= pos; k++) styles[k] = drs;
+      }
+
+      if (st.defaultNoeat) {
+        // Keyword lookup when leaving via default
+        if (st.keywords && bufStart >= 0) {
+          var word = text.slice(bufStart, pos).toLowerCase();
+          var kwStyle = st.keywords[word] || 'idle';
+          for (var k = bufStart; k < pos; k++) styles[k] = kwStyle;
+          bufStart = -1;
+        }
+        state = st.default;
+      } else {
+        // Multi-char string matching
+        if (st.strings && bufStart >= 0) {
+          var buf = text.slice(bufStart, pos + 1);
+          var sm = st.strings[buf];
+          if (sm) {
+            var sms = states[sm.next].style;
+            if (sm.recolor) {
+              for (var k = Math.max(0, pos - sm.recolor + 1); k <= pos; k++) styles[k] = sms;
+            }
+            state = sm.next;
+            bufStart = -1;
+            pos++;
+            continue;
+          }
+        }
+        state = st.default;
+        pos++;
+      }
+    }
+  }
+
+  // Handle EOF inside ident
+  if (bufStart >= 0) {
+    var identState = states['ident'];
+    if (identState && identState.keywords) {
+      var word = text.slice(bufStart, text.length).toLowerCase();
+      var kwStyle = identState.keywords[word] || 'idle';
+      for (var k = bufStart; k < text.length; k++) styles[k] = kwStyle;
+    }
+  }
+
+  return styles;
+}
+
+function renderHighlight(text, styles, def) {
+  if (!text) return '\n';
+  var styleMap = def.styles;
+  var parts = [];
+  var runStyle = styles[0] || 'idle';
+  var runStart = 0;
+
+  for (var i = 1; i <= text.length; i++) {
+    var s = (i < text.length) ? (styles[i] || 'idle') : null;
+    if (s !== runStyle) {
+      var chunk = text.slice(runStart, i);
+      // HTML-escape
+      chunk = chunk.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      var cls = styleMap[runStyle];
+      if (cls) {
+        parts.push('<span class="' + cls + '">' + chunk + '</span>');
+      } else {
+        parts.push(chunk);
+      }
+      runStyle = s;
+      runStart = i;
+    }
+  }
+
+  // Ensure trailing newline so pre height matches textarea
+  var result = parts.join('');
+  if (result[result.length - 1] !== '\n') result += '\n';
+  return result;
+}
+
+function updateHighlight() {
+  var text = editor.value;
+  if (syntaxDef) {
+    var styles = tokenize(text, syntaxDef);
+    highlight.innerHTML = renderHighlight(text, styles, syntaxDef);
+  } else {
+    // No syntax def — show plain text so editor is readable
+    highlight.textContent = text || '\n';
+  }
+  syncHighlight();
+}
+
+function syncHighlight() {
+  highlight.scrollTop = editor.scrollTop;
+  highlight.scrollLeft = editor.scrollLeft;
+}
 
 // --- Initialize ---
 (function init() {
@@ -567,11 +808,18 @@ var output = document.getElementById('output');
     newTab('hello.pas', "program hello;\nbegin\n  writeln('Hello, world!')\nend.\n");
   }
   editor.addEventListener('input', onEditorInput);
-  editor.addEventListener('scroll', syncGutter);
+  editor.addEventListener('scroll', function() { syncGutter(); syncHighlight(); });
   editor.addEventListener('keydown', onEditorKey);
   editor.addEventListener('click', updateCursorPos);
   editor.addEventListener('keyup', updateCursorPos);
   updateGutter();
+  updateHighlight();
+
+  // Load syntax definition
+  fetch('syntax/pascal.json')
+    .then(function(r) { return r.json(); })
+    .then(function(def) { syntaxDef = normalizeSyntax(def); updateHighlight(); })
+    .catch(function(e) { console.warn('Syntax highlighting unavailable:', e); });
 
   // Load compiler on page load
   initCompiler().catch(function(err) {
@@ -670,6 +918,7 @@ function replaceBuffer(buf, name, content) {
   if (buf.id === activeTab) {
     editor.value = content;
     updateGutter();
+    updateHighlight();
     updateCursorPos();
   }
   renderTabs();
@@ -682,6 +931,7 @@ function switchTab(id) {
   if (buf) {
     editor.value = buf.content;
     updateGutter();
+    updateHighlight();
     updateCursorPos();
     editor.focus();
   }
@@ -746,6 +996,7 @@ function renderTabs() {
 // --- Editor ---
 function onEditorInput() {
   updateGutter();
+  updateHighlight();
   var buf = findBuffer(activeTab);
   if (buf) {
     buf.content = editor.value;

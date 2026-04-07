@@ -210,101 +210,83 @@ Error: [LINE:COL] message
 The output pane can pattern-match `\[(\d+):(\d+)\]` to make errors
 clickable — clicking jumps the editor cursor to that line and column.
 
-## Syntax Highlighting (Stretch Goal)
+## Syntax Highlighting
 
-Syntax highlighting uses a state-machine engine driven by JSON syntax
-definition files. The format is inspired by the Joe/Jupp `.jsf` format.
+Syntax highlighting uses a state-machine tokenizer driven by JSON syntax
+definition files. The format is derived from Joe/Jupp `.jsf` files,
+translated to JSON for easy editing.
 
 ### How it works
 
 The editor remains a `<textarea>` for input handling. Behind it, a
-`<pre>` element mirrors the text with `<span class="...">` wrappers for
-each token. The textarea is transparent; the pre provides the visible
-colored text. Both scroll in sync.
+`<pre id="highlight">` element mirrors the text with `<span class="...">`
+wrappers for each token. The textarea has transparent text and background;
+the pre provides the visible colored text underneath. The textarea's caret
+remains visible via `caret-color`. Both elements scroll in sync.
+
+The tokenizer runs on every keystroke (no debounce). It produces a
+per-character style array in O(n) time. For playground-sized programs this
+is fast enough.
 
 ### Syntax definition format
 
-A syntax file defines states. Each state has:
-- A `default` transition (for unmatched characters).
-- Character-class transitions (regex-like patterns).
-- An optional `keywords` map for identifier classification.
-- An optional `recolor` count to repaint previous characters.
+A syntax file is a JSON object with three top-level fields:
 
-Example (`pascal.json`, derived from `pascal.jsf`):
+| Field | Purpose |
+|-------|---------|
+| `name` | Display name (e.g. "Pascal") |
+| `startState` | Initial state name |
+| `styles` | Map of logical style names to CSS class names |
 
-```json
-{
-  "name": "Pascal",
-  "extensions": [".pas", ".pp", ".p"],
-  "styles": {
-    "idle": "",
-    "comment": "syn-comment",
-    "constant": "syn-constant",
-    "keyword": "syn-keyword",
-    "type": "syn-type",
-    "operator": "syn-operator",
-    "function": "syn-function"
-  },
-  "states": {
-    "idle": {
-      "default": "idle",
-      "rules": [
-        { "match": "[a-zA-Z]", "next": "ident", "buffer": true },
-        { "match": "(", "next": "maybe_comment" },
-        { "match": "{", "next": "comment", "style": "comment", "recolor": 1 },
-        { "match": "'", "next": "string", "style": "constant", "recolor": 1 },
-        { "match": "[0-9]", "next": "number", "style": "constant", "recolor": 1 }
-      ]
-    },
-    "comment": {
-      "style": "comment",
-      "default": "comment",
-      "rules": [
-        { "match": "*", "next": "maybe_end_comment" },
-        { "match": "}", "next": "idle" }
-      ]
-    },
-    "ident": {
-      "default": { "next": "idle", "noeat": true },
-      "rules": [
-        { "match": "[a-zA-Z0-9_]", "next": "ident" }
-      ],
-      "keywords": {
-        "keyword": ["and", "array", "begin", "case", "const", "div", "do",
-          "downto", "else", "end", "file", "for", "function", "goto", "if",
-          "in", "label", "mod", "nil", "not", "of", "or", "packed",
-          "procedure", "program", "record", "repeat", "set", "then", "to",
-          "type", "until", "var", "while", "with"],
-        "type": ["integer", "boolean", "real", "char", "string", "text",
-          "byte", "word", "shortint", "longint", "shortstring"],
-        "function": ["abs", "arctan", "chr", "concat", "copy", "cos",
-          "eof", "eoln", "exp", "halt", "hi", "length", "lo", "ln",
-          "odd", "ord", "pred", "round", "sin", "sqr", "sqrt", "succ",
-          "trunc", "upcase", "val", "write", "writeln", "read", "readln",
-          "inc", "dec", "new", "dispose", "delete", "insert", "str",
-          "fillchar", "move", "sizeof", "high", "low"]
-      }
-    }
-  }
-}
-```
+Each state has:
 
-The engine is ~100 lines of JS. It processes the full editor text on each
-keystroke (debounced to ~50ms). For the size of programs people write in a
-playground, this is fast enough.
+| Field | Purpose |
+|-------|---------|
+| `style` | Style applied to characters consumed in this state. If omitted and the state name matches a key in `styles`, that style is inferred. Otherwise defaults to `idle`. |
+| `default` | Next state for unmatched characters. Can be a string (`"idle"`) or an object (`{"next": "idle", "noeat": true, "recolor": 1}`). |
+| `rules` | Ordered list of character-class transitions. First match wins. |
+| `keywords` | Map of lowercase identifiers to style names (on ident-like states only). Applied retroactively when leaving the state via a `noeat` default. |
+| `strings` | Map of literal strings to `{"next": "state", "recolor": N}`. Matches accumulated buffer content on each default-eat transition. Used for multi-character lookahead (e.g. `<!--`, `<![CDATA[`). |
+
+Each rule has:
+
+| Field | Purpose |
+|-------|---------|
+| `match` | Character class. Ranges like `a-zA-Z0-9`, single chars like `(`, `{`, special `\n`. A `-` at the end of the string is literal. |
+| `next` | Target state. |
+| `recolor` | Retroactively restyle the previous N characters (including current) with the target state's style. |
+| `noeat` | Don't consume the character; re-process it in the target state. |
+| `buffer` | Start accumulating characters for keyword or string lookup. |
+
+The `normalizeSyntax()` preprocessor expands shorthand (style inference,
+object-form defaults) into the canonical form the tokenizer expects. This
+keeps syntax files concise while maintaining backward compatibility with
+the original explicit format.
+
+### Available definitions
+
+| File | Source | States | Notes |
+|------|--------|--------|-------|
+| `pascal.json` | `pascal.jsf` | 13 | Keywords, `{}` and `(* *)` comments, `''` strings, numbers with exponents |
+| `html.json` | `html.jsf` | 15 | Tag/attribute keywords, entity refs, comments |
+| `xml.json` | `xml.jsf` | 34 | Strict validation, entity refs, `<!-- -->`, `<![CDATA[]]>`, `<?...?>`, uses `strings` for multi-char matching |
 
 ### CSS classes
 
-```css
-.syn-comment  { color: #6a9955; }  /* green */
-.syn-constant { color: #569cd6; }  /* blue */
-.syn-keyword  { font-weight: 600; }
-.syn-type     { font-weight: 600; color: #4ec9b0; }
-.syn-operator { font-weight: 600; }
-.syn-function { font-weight: 600; color: #dcdcaa; }
-```
+Syntax colors use CSS custom properties, with separate values for light
+and dark themes:
 
-Colors will be tuned to match the playground's warm palette.
+| Class | Light | Dark | Used for |
+|-------|-------|------|----------|
+| `.syn-comment` | `#6a9955` | `#6a9955` | Comments |
+| `.syn-constant` | `#b5632f` | `#ce9178` | Strings, numbers, CDATA |
+| `.syn-keyword` | `#a0522d` | `#d4845a` | Keywords, tag names |
+| `.syn-type` | `#2e7d6e` | `#4ec9b0` | Type names |
+| `.syn-operator` | `#2c2420` | `#d4d4d4` | Operators |
+| `.syn-function` | `#6f4e37` | `#dcdcaa` | Built-in functions, PIs |
+| `.syn-entity` | `#6f4e37` | `#dcdcaa` | Entity references |
+| `.syn-attr` | `#2e7d6e` | `#4ec9b0` | Attributes, declarations |
+| `.syn-error` | `#dc3545` | `#f44747` | Malformed markup |
 
 ## Future Extras
 
@@ -337,7 +319,9 @@ pages/playground/
     fibonacci.pas
     ...
   syntax/
-    pascal.json      — syntax definition (stretch goal)
+    pascal.json      — Pascal syntax definition
+    html.json        — HTML syntax definition
+    xml.json         — XML syntax definition (uses strings for multi-char matching)
 ```
 
 ## Dependencies

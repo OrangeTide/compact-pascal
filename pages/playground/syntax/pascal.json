@@ -1,0 +1,222 @@
+{
+  "name": "Pascal",
+  "startState": "idle",
+  "styles": {
+    "idle": "",
+    "comment": "syn-comment",
+    "constant": "syn-constant",
+    "keyword": "syn-keyword",
+    "type": "syn-type",
+    "operator": "syn-operator",
+    "function": "syn-function"
+  },
+  "states": {
+    "idle": {
+      "style": "idle",
+      "default": "idle",
+      "rules": [
+        { "match": "a-zA-Z_", "next": "ident", "buffer": true },
+        { "match": "(", "next": "maybe_comment" },
+        { "match": "{", "next": "comment", "recolor": 1 },
+        { "match": "'", "next": "string", "recolor": 1 },
+        { "match": "0-9", "next": "number", "recolor": 1 },
+        { "match": "$", "next": "hex", "recolor": 1 }
+      ]
+    },
+    "ident": {
+      "style": "idle",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "a-zA-Z0-9_", "next": "ident" }
+      ],
+      "keywords": {
+        "and": "operator",
+        "array": "type",
+        "begin": "keyword",
+        "case": "keyword",
+        "const": "keyword",
+        "div": "operator",
+        "do": "keyword",
+        "downto": "keyword",
+        "else": "keyword",
+        "end": "keyword",
+        "file": "keyword",
+        "for": "keyword",
+        "forward": "keyword",
+        "function": "keyword",
+        "goto": "keyword",
+        "if": "keyword",
+        "in": "keyword",
+        "label": "keyword",
+        "mod": "operator",
+        "nil": "constant",
+        "not": "operator",
+        "of": "keyword",
+        "or": "operator",
+        "packed": "keyword",
+        "procedure": "keyword",
+        "program": "keyword",
+        "record": "keyword",
+        "repeat": "keyword",
+        "set": "keyword",
+        "shl": "operator",
+        "shr": "operator",
+        "then": "keyword",
+        "to": "keyword",
+        "type": "keyword",
+        "until": "keyword",
+        "var": "keyword",
+        "while": "keyword",
+        "with": "keyword",
+        "xor": "operator",
+        "integer": "type",
+        "boolean": "type",
+        "real": "type",
+        "char": "type",
+        "string": "type",
+        "text": "type",
+        "byte": "type",
+        "word": "type",
+        "shortint": "type",
+        "longint": "type",
+        "shortstring": "type",
+        "true": "constant",
+        "false": "constant",
+        "maxint": "constant",
+        "abs": "function",
+        "arctan": "function",
+        "chr": "function",
+        "concat": "function",
+        "copy": "function",
+        "cos": "function",
+        "dec": "function",
+        "delete": "function",
+        "eof": "function",
+        "eoln": "function",
+        "exp": "function",
+        "fillchar": "function",
+        "halt": "function",
+        "hi": "function",
+        "high": "function",
+        "inc": "function",
+        "insert": "function",
+        "length": "function",
+        "ln": "function",
+        "lo": "function",
+        "low": "function",
+        "move": "function",
+        "new": "function",
+        "dispose": "function",
+        "odd": "function",
+        "ord": "function",
+        "pred": "function",
+        "read": "function",
+        "readln": "function",
+        "round": "function",
+        "sin": "function",
+        "sizeof": "function",
+        "sqr": "function",
+        "sqrt": "function",
+        "str": "function",
+        "succ": "function",
+        "trunc": "function",
+        "upcase": "function",
+        "val": "function",
+        "write": "function",
+        "writeln": "function"
+      }
+    },
+    "maybe_comment": {
+      "style": "idle",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "*", "next": "comment", "recolor": 2 }
+      ]
+    },
+    "comment": {
+      "style": "comment",
+      "default": "comment",
+      "rules": [
+        { "match": "*", "next": "maybe_end_comment" },
+        { "match": "}", "next": "idle" }
+      ]
+    },
+    "maybe_end_comment": {
+      "style": "comment",
+      "default": "comment",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": ")", "next": "idle" }
+      ]
+    },
+    "string": {
+      "style": "constant",
+      "default": "string",
+      "rules": [
+        { "match": "\n", "next": "idle" },
+        { "match": "'", "next": "maybe_end_string" }
+      ]
+    },
+    "maybe_end_string": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "'", "next": "string" }
+      ]
+    },
+    "number": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "0-9", "next": "number" },
+        { "match": "eE", "next": "epart" },
+        { "match": ".", "next": "dot" }
+      ]
+    },
+    "hex": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "0-9a-fA-F", "next": "hex" }
+      ]
+    },
+    "dot": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "0-9", "next": "float" }
+      ]
+    },
+    "float": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "0-9", "next": "float" },
+        { "match": "eE", "next": "epart" }
+      ]
+    },
+    "epart": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "0-9+-", "next": "enum" }
+      ]
+    },
+    "enum": {
+      "style": "constant",
+      "default": "idle",
+      "defaultNoeat": true,
+      "rules": [
+        { "match": "0-9", "next": "enum" }
+      ]
+    }
+  }
+}

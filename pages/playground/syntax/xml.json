@@ -1,0 +1,297 @@
+{
+  "name": "XML",
+  "startState": "content",
+  "styles": {
+    "idle": "",
+    "error": "syn-error",
+    "tag": "syn-keyword",
+    "attr": "syn-attr",
+    "constant": "syn-constant",
+    "entity": "syn-entity",
+    "decl": "syn-attr",
+    "comment": "syn-comment",
+    "pi": "syn-function",
+    "cdata": "syn-constant"
+  },
+  "states": {
+    "content": {
+      "style": "idle",
+      "default": "content",
+      "rules": [
+        { "match": "<", "next": "tag", "recolor": 1 },
+        { "match": ">", "next": "error", "recolor": 1 },
+        { "match": "&", "next": "entityref", "recolor": 1 }
+      ]
+    },
+
+    "error": {
+      "style": "error",
+      "default": { "next": "error_visible", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": " \t\n", "next": "error" }
+      ]
+    },
+    "error_visible": {
+      "style": "error",
+      "default": "content"
+    },
+
+    "entityref": {
+      "style": "entity",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z0-9._:-", "next": "entityref" },
+        { "match": "#", "next": "entityref" },
+        { "match": ";", "next": "content" }
+      ]
+    },
+
+    "tag": {
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "/", "next": "end_tag" },
+        { "match": "A-Za-z_:", "next": "start_or_empty_tag" },
+        { "match": "?", "next": "pi_start", "recolor": 2 },
+        { "match": "!", "next": "decl", "recolor": 2, "buffer": true }
+      ]
+    },
+
+    "end_tag": {
+      "style": "tag",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z_:", "next": "end_tag2" }
+      ]
+    },
+    "end_tag2": {
+      "style": "tag",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z0-9._:-", "next": "end_tag2" },
+        { "match": " \t\n", "next": "end_tag3" },
+        { "match": ">", "next": "content" }
+      ]
+    },
+    "end_tag3": {
+      "style": "tag",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": " \t\n", "next": "end_tag3" },
+        { "match": ">", "next": "content" }
+      ]
+    },
+
+    "start_or_empty_tag": {
+      "style": "tag",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z0-9._:-", "next": "start_or_empty_tag" },
+        { "match": "/", "next": "empty_tag" },
+        { "match": " \t\n", "next": "tag_space" },
+        { "match": ">", "next": "content" }
+      ]
+    },
+
+    "empty_tag": {
+      "style": "tag",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": ">", "next": "content" }
+      ]
+    },
+
+    "tag_space": {
+      "style": "attr",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": " \t\n", "next": "tag_space" },
+        { "match": "A-Za-z_:", "next": "attr_name" },
+        { "match": "/", "next": "empty_tag", "recolor": 1 },
+        { "match": ">", "next": "close_tag", "recolor": 1 }
+      ]
+    },
+
+    "attr_name": {
+      "style": "attr",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z0-9._:-", "next": "attr_name" },
+        { "match": "=", "next": "attr_eq" }
+      ]
+    },
+
+    "attr_eq": {
+      "style": "attr",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "\"", "next": "astring", "recolor": 1 },
+        { "match": "'", "next": "bstring", "recolor": 1 }
+      ]
+    },
+
+    "astring": {
+      "style": "constant",
+      "default": "astring",
+      "rules": [
+        { "match": "<>", "next": "error", "recolor": 1 },
+        { "match": "&", "next": "achar", "recolor": 1 },
+        { "match": "\"", "next": "endstring" }
+      ]
+    },
+    "bstring": {
+      "style": "constant",
+      "default": "bstring",
+      "rules": [
+        { "match": "<>", "next": "error", "recolor": 1 },
+        { "match": "&", "next": "bchar", "recolor": 1 },
+        { "match": "'", "next": "endstring" }
+      ]
+    },
+
+    "achar": {
+      "style": "entity",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z0-9._:-", "next": "achar" },
+        { "match": "#", "next": "achar" },
+        { "match": ";", "next": "astring" }
+      ]
+    },
+    "bchar": {
+      "style": "entity",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": "A-Za-z0-9._:-", "next": "bchar" },
+        { "match": "#", "next": "bchar" },
+        { "match": ";", "next": "bstring" }
+      ]
+    },
+
+    "endstring": {
+      "style": "attr",
+      "default": { "next": "error", "noeat": true, "recolor": 1 },
+      "rules": [
+        { "match": " \t\n", "next": "tag_space" },
+        { "match": "/", "next": "empty_tag", "recolor": 1 },
+        { "match": ">", "next": "close_tag", "recolor": 1 }
+      ]
+    },
+
+    "close_tag": {
+      "style": "tag",
+      "default": { "next": "content", "noeat": true }
+    },
+
+    "pi_start": {
+      "style": "pi",
+      "default": { "next": "pi", "noeat": true, "recolor": 1 }
+    },
+    "pi": {
+      "style": "pi",
+      "default": "pi",
+      "rules": [
+        { "match": "?", "next": "pi2" }
+      ]
+    },
+    "pi2": {
+      "style": "pi",
+      "default": "pi",
+      "rules": [
+        { "match": ">", "next": "pi_end", "recolor": 2 }
+      ]
+    },
+    "pi_end": {
+      "style": "pi",
+      "default": { "next": "content", "noeat": true, "recolor": 1 }
+    },
+
+    "decl": {
+      "style": "decl",
+      "default": "decl",
+      "rules": [
+        { "match": "<", "next": "decl_nest" },
+        { "match": ">", "next": "content" }
+      ],
+      "strings": {
+        "!--": { "next": "comment_start", "recolor": 4 },
+        "![CDATA[": { "next": "cdata_start", "recolor": 9 }
+      }
+    },
+    "decl_nest": {
+      "style": "decl",
+      "default": "decl_nest",
+      "rules": [
+        { "match": ">", "next": "decl" }
+      ]
+    },
+
+    "comment_start": {
+      "style": "comment",
+      "default": { "next": "comment_body", "noeat": true }
+    },
+    "comment_body": {
+      "style": "comment",
+      "default": "comment_body",
+      "rules": [
+        { "match": "-", "next": "comment2" }
+      ]
+    },
+    "comment2": {
+      "style": "comment",
+      "default": "comment_body",
+      "rules": [
+        { "match": "-", "next": "comment3" }
+      ]
+    },
+    "comment3": {
+      "style": "comment",
+      "default": { "next": "comment_error", "noeat": true, "recolor": 3 },
+      "rules": [
+        { "match": ">", "next": "comment_end", "recolor": 3 }
+      ]
+    },
+    "comment_end": {
+      "style": "comment",
+      "default": { "next": "content", "noeat": true, "recolor": 1 }
+    },
+
+    "comment_error": {
+      "style": "error",
+      "default": "comment_body",
+      "rules": [
+        { "match": "-", "next": "comment_error" },
+        { "match": ">", "next": "comment_end", "recolor": 3 }
+      ]
+    },
+
+    "cdata_start": {
+      "style": "cdata",
+      "default": { "next": "cdata_body", "noeat": true }
+    },
+    "cdata_body": {
+      "style": "cdata",
+      "default": "cdata_body",
+      "rules": [
+        { "match": "]", "next": "cdata2" }
+      ]
+    },
+    "cdata2": {
+      "style": "cdata",
+      "default": "cdata_body",
+      "rules": [
+        { "match": "]", "next": "cdata3" }
+      ]
+    },
+    "cdata3": {
+      "style": "cdata",
+      "default": "cdata_body",
+      "rules": [
+        { "match": ">", "next": "cdata_end", "recolor": 3 }
+      ]
+    },
+    "cdata_end": {
+      "style": "cdata",
+      "default": { "next": "content", "noeat": true, "recolor": 1 }
+    }
+  }
+}
