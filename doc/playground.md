@@ -141,6 +141,7 @@ Saves the current buffer as a file via `Blob` + `URL.createObjectURL`.
 All open buffers are persisted to `localStorage` on every edit. The
 session is restored on page load. Restored buffers are marked with a
 `fromStorage` flag so that Open Sample does not silently overwrite them.
+This is transparent to the user — they pick up where they left off.
 
 ### Navigation Guard
 
@@ -209,7 +210,7 @@ byte arrays.
 | `fd_read`           | Reads from a pre-loaded byte array (source text).   |
 | `fd_write`          | Appends to a byte array (stdout=WASM, stderr=errors). |
 | `proc_exit`         | Throws `WasiExit` to halt.                          |
-| `args_get`          | Returns 0 args.                                     |
+| `args_get`          | Returns 0 args (no command-line arguments).          |
 | `args_sizes_get`    | Returns argc=0, buf_size=0.                          |
 
 ### Program WASI shim (Web Worker)
@@ -224,7 +225,7 @@ supports interactive stdin, file I/O, and an fd table.
 | `fd_close`          | Closes an fd, frees the table slot.                  |
 | `path_open`         | Opens a file backed by an editor buffer.             |
 | `proc_exit`         | Throws `WasiExit` to halt.                          |
-| `args_get`          | Returns 0 args.                                     |
+| `args_get`          | Returns 0 args (no command-line arguments).          |
 | `args_sizes_get`    | Returns argc=0, buf_size=0.                          |
 
 The iovec layout follows WASI spec: each iovec is 8 bytes
