@@ -37,7 +37,6 @@
     .top-bar {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       padding: 0.5rem 1rem;
       background: var(--menu-bg);
       border-bottom: 1px solid var(--border);
@@ -315,7 +314,7 @@
       user-select: none;
     }
 
-    body.no-tabs .editor-pane { display: none; }
+    body.no-tabs .editor-wrap { display: none; }
     body.no-tabs .empty-state { display: flex; }
 
     /* --- File picker modal --- */
@@ -405,6 +404,52 @@
       color: #999;
     }
 
+    /* --- Dark mode --- */
+    body.dark {
+      --bg: #1a1a1a;
+      --fg: #d4d4d4;
+      --border: #444;
+      --accent: #d4845a;
+      --accent-hover: #c0714a;
+      --tab-bg: #252525;
+      --tab-active: #2d2d2d;
+      --menu-bg: #222;
+      --output-bg: #111;
+      --output-fg: #d4d4d4;
+      --gutter-bg: #252525;
+      --gutter-fg: #666;
+    }
+
+    body.dark .top-bar button {
+      background: #333;
+      color: #d4d4d4;
+      border-color: #555;
+    }
+
+    body.dark .top-bar button:hover {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    body.dark .top-bar button:disabled {
+      opacity: 0.4;
+    }
+
+    body.dark .tab .close { color: #666; }
+    body.dark .tab .close:hover { background: #444; color: #ccc; }
+
+    body.dark .output-header button {
+      background: #1a1a1a;
+      border-color: #444;
+    }
+
+    body.dark .output-header button:hover {
+      background: #2a2a2a;
+    }
+
+    body.dark .file-picker-item:hover { background: #222; }
+
     /* --- Responsive: stack on narrow screens --- */
     @media (max-width: 700px) {
       .content-area {
@@ -434,16 +479,19 @@
   <!-- Top bar -->
   <div class="top-bar">
     <div class="top-bar-left">
-      <a href="../" class="title">Compact Pascal</a>
+      <a href="../" class="title" onclick="return confirmLeave()">Compact Pascal</a>
     </div>
     <div class="top-bar-buttons">
-      <button id="openBtn" onclick="showFilePicker()" title="Open sample">Open</button>
-      <button onclick="doUpload()" title="Upload .pas file">Upload</button>
-      <button onclick="doDownload()" title="Download current buffer">Download</button>
+      <button id="openBtn" onclick="showFilePicker()" title="Open sample program">&#x1F4C2; Open Sample</button>
+      <button onclick="doUpload()" title="Upload .pas file">&#x1F4E4; Upload</button>
+      <button onclick="doDownload()" title="Download current buffer">&#x1F4E5; Download</button>
       <div class="button-sep"></div>
-      <button id="compileBtn" onclick="doCompile()" title="Compile (Ctrl+S)">Compile</button>
-      <button id="runBtn" onclick="doRun()" title="Run (Ctrl+Enter)">Run</button>
-      <button id="stopBtn" onclick="doStop()" title="Stop program" disabled>Stop</button>
+      <button id="compileBtn" onclick="doCompile()" title="Compile (Ctrl+S)">&#x1F527; Compile</button>
+      <button id="runBtn" onclick="doRun()" title="Run (Ctrl+Enter)" style="color:#228b22">&#x25B6;&#xFE0F; Run</button>
+      <button id="stopBtn" onclick="doStop()" title="Stop program" disabled style="color:#cc3333">&#x23F9;&#xFE0F; Stop</button>
+    </div>
+    <div style="margin-left:auto">
+      <button onclick="toggleDarkMode()" id="darkModeBtn" title="Toggle dark mode">&#x1F319; Dark</button>
     </div>
   </div>
 
@@ -461,7 +509,7 @@
         <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
       </div>
       <div class="empty-state">
-        <p>No open buffers.<br>Click <strong>+</strong> to create one,<br>or click <strong>Open</strong> to load a sample.</p>
+        <p>No open buffers.<br>Click <strong>+</strong> to create one,<br>or click <strong>Open Sample</strong> to load an example.</p>
       </div>
     </div>
 
@@ -797,7 +845,8 @@ function openSampleFile(file, displayName) {
     .then(function(text) {
       saveCurrentBuffer();
       var buf = findBuffer(activeTab);
-      if (buf && !isBufferModified(buf)) {
+      // Only replace if the current tab is unmodified AND was not restored from localStorage
+      if (buf && !isBufferModified(buf) && !buf.fromStorage) {
         replaceBuffer(buf, displayName, text);
       } else {
         newTab(displayName, text);
@@ -861,7 +910,7 @@ function restoreSession() {
     if (!Array.isArray(data) || data.length === 0) return;
     data.forEach(function(d) {
       var id = nextId++;
-      buffers.push({ id: id, name: d.name, content: d.content, initContent: d.content, compiled: null });
+      buffers.push({ id: id, name: d.name, content: d.content, initContent: d.content, compiled: null, fromStorage: true });
     });
     renderTabs();
     switchTab(buffers[0].id);
@@ -1149,6 +1198,29 @@ function htmlEscape(str) {
 function setStatus(msg) {
   document.getElementById('statusLeft').textContent = msg;
 }
+
+// --- Navigation guard ---
+function confirmLeave() {
+  var hasModified = buffers.some(function(b) { return isBufferModified(b); });
+  if (hasModified) {
+    return confirm('You have unsaved changes. Leave the playground?');
+  }
+  return true;
+}
+
+// --- Dark mode ---
+function toggleDarkMode() {
+  var isDark = document.body.classList.toggle('dark');
+  localStorage.setItem('cpas-dark-mode', isDark ? '1' : '0');
+  document.getElementById('darkModeBtn').textContent = isDark ? '\u2600\uFE0F Light' : '\uD83C\uDF19 Dark';
+}
+
+(function restoreDarkMode() {
+  if (localStorage.getItem('cpas-dark-mode') === '1') {
+    document.body.classList.add('dark');
+    document.getElementById('darkModeBtn').textContent = '\u2600\uFE0F Light';
+  }
+})();
 </script>
 </body>
 </html>
