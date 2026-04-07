@@ -15,23 +15,24 @@ directory and providing a compiler snapshot.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  Browser                                                       │
+│  Browser (main thread)                                         │
 │                                                                │
 │  ┌─────────────┐    stdin    ┌──────────────┐                  │
 │  │  Editor     │───(source)──▶  Compiler    │                  │
 │  │  (textarea) │             │  (WASM)      │                  │
-│  └─────────────┘             └──────┬───────┘                  │
-│                                     │ stdout (compiled .wasm)  │
-│                                     ▼                          │
-│                              ┌──────────────┐                  │
-│                              │  Web Worker  │                  │
-│                              │  (runs prog) │                  │
-│                              └──────┬───────┘                  │
-│                                     │ postMessage              │
-│                                     ▼                          │
-│                              ┌──────────────┐                  │
-│                              │  Output Pane │                  │
-│                              └──────────────┘                  │
+│  └─────┬───────┘             └──────┬───────┘                  │
+│        │ read/write files           │ stdout (compiled .wasm)  │
+│        │ (SharedArrayBuffer)        ▼                          │
+│        │                     ┌──────────────┐                  │
+│        ├─────────────────────│  Web Worker  │                  │
+│        │   stdin input ──────│  (runs prog) │                  │
+│        │ (SharedArrayBuffer) └──────┬───────┘                  │
+│        │                            │ postMessage              │
+│        ▼                            ▼                          │
+│  ┌─────────────┐             ┌──────────────┐                  │
+│  │ Editor Tabs │             │  Output Pane │                  │
+│  │ (file I/O)  │             │  + stdin bar │                  │
+│  └─────────────┘             └──────────────┘                  │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -167,13 +168,21 @@ pre-compiled `WebAssembly.Module` to get clean memory state.
 ### Run
 
 1. If no compiled bytes on current buffer, compile first.
-2. Create a Web Worker from `run-worker.js`.
-3. Post the compiled WASM bytes to the worker.
-4. Worker instantiates with WASI shim and calls `_start`.
-5. Worker posts `{type: 'stdout', data: '...'}` and
-   `{type: 'stderr', data: '...'}` messages back.
-6. Worker posts `{type: 'exit', code: N}` on completion.
-7. Main thread appends output to the output pane.
+2. Allocate a `SharedArrayBuffer` for stdin and file I/O (see
+   "Interactive Stdin" below).
+3. Create a Web Worker from `run-worker.js`.
+4. Post the compiled WASM bytes and shared buffer to the worker.
+5. Worker instantiates with WASI shim and calls `_start`.
+6. Worker posts messages back to the main thread:
+   - `{type: 'stdout', data: '...'}` — program output
+   - `{type: 'stderr', data: '...'}` — error output
+   - `{type: 'waiting_input'}` — program blocked on `fd_read`
+   - `{type: 'file_write', name, data}` — write to editor tab
+   - `{type: 'file_read_request', name}` — request editor tab content
+   - `{type: 'file_close', name}` — file closed
+   - `{type: 'exit', code: N}` — program finished
+7. Main thread appends output to the output pane and handles file I/O
+   requests (see "Editor-as-Filesystem" below).
 
 Only one program runs at a time. The Run button is disabled while a
 program is active. The active worker reference is stored globally.
@@ -185,19 +194,222 @@ in the output pane. Re-enables the Run button.
 
 ## WASI Shim
 
-Both the compiler and the running program use WASI preview 1. The shim
-implements five imports:
+Both the compiler and the running program use WASI preview 1. The two
+contexts have different shim implementations because they have different
+needs.
+
+### Compiler WASI shim (main thread)
+
+The compiler runs on the main thread. Its I/O is non-interactive: stdin
+is pre-loaded with the source text and stdout/stderr are collected into
+byte arrays.
 
 | Import              | Behavior                                            |
 |---------------------|-----------------------------------------------------|
-| `fd_read`           | Reads from a byte array (stdin). Returns 0 at EOF.  |
-| `fd_write`          | Appends to a byte array (stdout/stderr per fd).     |
-| `proc_exit`         | Throws `WasiExit` exception to halt execution.      |
-| `args_get`          | Returns 0 args (no command-line arguments).          |
+| `fd_read`           | Reads from a pre-loaded byte array (source text).   |
+| `fd_write`          | Appends to a byte array (stdout=WASM, stderr=errors). |
+| `proc_exit`         | Throws `WasiExit` to halt.                          |
+| `args_get`          | Returns 0 args.                                     |
+| `args_sizes_get`    | Returns argc=0, buf_size=0.                          |
+
+### Program WASI shim (Web Worker)
+
+Running programs execute in a Web Worker with a richer WASI shim that
+supports interactive stdin, file I/O, and an fd table.
+
+| Import              | Behavior                                            |
+|---------------------|-----------------------------------------------------|
+| `fd_read`           | Reads via fd table. fd 0 blocks on SharedArrayBuffer. |
+| `fd_write`          | Writes via fd table. Flushes to main thread per call. |
+| `fd_close`          | Closes an fd, frees the table slot.                  |
+| `path_open`         | Opens a file backed by an editor buffer.             |
+| `proc_exit`         | Throws `WasiExit` to halt.                          |
+| `args_get`          | Returns 0 args.                                     |
 | `args_sizes_get`    | Returns argc=0, buf_size=0.                          |
 
 The iovec layout follows WASI spec: each iovec is 8 bytes
 (4-byte `buf` pointer + 4-byte `buf_len`), little-endian.
+
+### File descriptor table
+
+The worker maintains an fd table (array of `file_ops` objects). Each
+entry has:
+
+| Field   | Type       | Purpose                                      |
+|---------|------------|----------------------------------------------|
+| `read`  | function   | Read callback, null if not readable.          |
+| `write` | function   | Write callback, null if not writable.         |
+| `close` | function   | Cleanup callback.                             |
+| `flags` | number     | `O_RDONLY`, `O_WRONLY`, etc.                  |
+
+Initial state: fd 0 = stdin, fd 1 = stdout, fd 2 = stderr. fd 3 is
+the pre-opened editor root directory (used as `fd_dir` for `path_open`).
+
+`fd_read` and `fd_write` look up `fdTable[fd]` and dispatch to the
+appropriate callback. Invalid fds return `ERRNO_BADF` (8). Closing
+fd 0/1/2 is allowed (programs sometimes close stdin after reading).
+
+## Interactive Stdin
+
+WASM execution is synchronous. When a program calls `readln`, the
+worker's `fd_read` must return data immediately — but the user hasn't
+typed it yet. Web Workers cannot block on `postMessage`, but they can
+block using `SharedArrayBuffer` + `Atomics.wait()`.
+
+### Shared buffer protocol
+
+The main thread allocates a 4 KB `SharedArrayBuffer` and passes it to
+the worker with the `run` message. The buffer has a simple protocol:
+
+```
+Byte offset   Size    Field
+0             4       status: 0=empty, 1=data ready, 2=EOF
+4             4       length: number of bytes in payload
+8             ~4080   payload: UTF-8 input bytes
+```
+
+### Blocking read sequence
+
+```
+         Worker                           Main Thread
+           │                                   │
+           │  fd_read(fd=0) called              │
+           │                                   │
+           ├─ check status word                │
+           │  status == 0 (empty)              │
+           │                                   │
+           ├─ postMessage({type:               │
+           │   'waiting_input'})               │
+           │                                   ├─ show input prompt
+           ├─ Atomics.wait(status, 0)          │   indicator in
+           │  (thread blocks)                  │   output pane
+           │                                   │
+           │                                   │  user types "42"
+           │                                   │  and presses Enter
+           │                                   │
+           │                                   ├─ encode "42\n" as
+           │                                   │  UTF-8 into shared
+           │                                   │  buffer payload
+           │                                   ├─ set length = 3
+           │                                   ├─ Atomics.store
+           │                                   │  (status, 1)
+           │                                   ├─ Atomics.notify
+           │                                   │  (status)
+           │                                   │
+           ├─ (wakes up)                       │
+           ├─ copy payload into                │
+           │  WASM memory iovecs               │
+           ├─ set status = 0                   │
+           ├─ Atomics.notify(status)           │
+           │  (signals main thread             │
+           │   can accept more input)          │
+           ├─ return bytes read                │
+           │                                   │
+           │  program continues...             │
+```
+
+### EOF handling
+
+The "EOF" button (or Ctrl+D) sets status to 2. The worker's `fd_read`
+returns 0 bytes (EOF), which the Pascal runtime interprets as `eof`
+returning `true`.
+
+### COOP/COEP headers
+
+`SharedArrayBuffer` requires two HTTP headers:
+
+- `Cross-Origin-Opener-Policy: same-origin`
+- `Cross-Origin-Embedder-Policy: require-corp`
+
+GitHub Pages does not support custom headers. The playground uses the
+`coi-serviceworker` pattern: a service worker intercepts responses and
+injects the required headers. The service worker script is loaded from
+`index.html` before any other scripts.
+
+### Input field UI
+
+A text input appears in the output pane footer while a program is
+running. It is styled distinctly (monospace, slight background tint) to
+distinguish it from editor UI. A prompt indicator appears when the
+program is blocked on input. The field is hidden when the program exits
+or is stopped.
+
+## Editor-as-Filesystem
+
+Programs can open, read, and write files. In the playground, "files"
+are editor buffers — opening a file for writing creates (or updates) an
+editor tab; opening for reading fetches the content of an existing tab.
+
+### How it works
+
+The compiler emits `path_open` and `fd_close` WASI calls for Pascal's
+`assign`/`reset`/`rewrite`/`close` built-ins. The playground's WASI
+shim intercepts these calls and maps them to editor buffers.
+
+### Directory roots
+
+The WASM side maintains 26 directory root globals (`fd_dir_A` through
+`fd_dir_Z`), analogous to drive letters. All are initialized to -1
+except `fd_dir_A` which is fd 3 — the pre-opened editor root. Programs
+pass `fd_dir_A` as the first argument to `path_open`.
+
+The playground runtime pre-opens fd 3 as a virtual directory whose
+"files" are editor buffers. Only A: is used initially. The other 25
+slots are reserved (e.g., B: for a read-only samples directory).
+
+### path_open flow
+
+1. Worker reads the path string from WASM linear memory.
+2. Validates `fd_dir` is a valid pre-opened directory (fd 3).
+3. Checks `oflags`: `O_CREAT` (1), `O_EXCL` (4), `O_TRUNC` (8).
+4. Allocates the next free fd table slot.
+5. Creates a `file_ops` object with read/write callbacks backed by
+   a byte buffer.
+6. Stores the allocated fd at the output pointer in WASM memory.
+7. Returns 0 (success) or an errno (`ENOENT`=44, `EBADF`=8, etc.).
+
+### Writing files
+
+Each `fd_write` call to a file-backed fd posts a
+`{type: 'file_write', name, data}` message to the main thread
+immediately (flush per write). The main thread decodes the data as
+UTF-8 and creates or updates an editor tab with that filename.
+
+On `fd_close`, the worker posts `{type: 'file_close', name}` as a
+final notification.
+
+### Reading files
+
+When a program opens a file for reading, the worker uses the same
+`SharedArrayBuffer` blocking pattern as stdin:
+
+1. Worker posts `{type: 'file_read_request', name}` to main thread.
+2. Worker blocks on `Atomics.wait()`.
+3. Main thread looks up the editor buffer by filename.
+4. If found: encodes content as UTF-8, writes it into the shared
+   buffer, sets status to 1, notifies.
+5. If not found: writes `ENOENT` errno into status, notifies.
+6. Worker wakes, copies content into a local read buffer.
+7. Subsequent `fd_read` calls consume from this buffer.
+
+### Result: programs create editor tabs
+
+The end result is that Pascal programs can create new editor tabs and
+read/write text. For example:
+
+```pascal
+var f: text;
+begin
+  assign(f, 'output.txt');
+  rewrite(f);
+  writeln(f, 'Generated by program');
+  close(f);
+end.
+```
+
+This creates a new editor tab named `output.txt` containing
+"Generated by program". The tab appears alongside any user-created
+tabs and can be edited, saved, or downloaded.
 
 ## Compiler Error Format
 
