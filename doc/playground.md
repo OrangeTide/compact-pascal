@@ -336,10 +336,11 @@ and `localStorage` APIs.
 
 ## Hosting
 
-Copy `pages/playground/` and `snapshot/compiler.wasm` to any static file
-server. The playground fetches the compiler snapshot from
-`../snapshot/compiler.wasm` (relative path). Override this by setting
-`window.CPAS_COMPILER_URL` before the script runs.
+Copy `pages/playground/` to any static file server with `compiler.wasm`
+in the same directory. The playground looks for `compiler.wasm` in its
+own directory first, then falls back to `../snapshot/compiler.wasm` for
+local development. Override the path by setting `window.CPAS_COMPILER_URL`
+before the script runs.
 
 For local development without the snapshot, the playground shows
 "Compiler unavailable" in the output pane but all editing features work.

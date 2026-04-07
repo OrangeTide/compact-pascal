@@ -1415,10 +1415,17 @@ function initCompiler() {
 
   setStatus('Loading compiler...');
 
-  return fetch('../snapshot/compiler.wasm')
+  var compilerUrl = window.CPAS_COMPILER_URL || 'compiler.wasm';
+
+  return fetch(compilerUrl)
     .then(function(response) {
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      return response.arrayBuffer();
+      if (response.ok) return response.arrayBuffer();
+      if (compilerUrl !== 'compiler.wasm') throw new Error('HTTP ' + response.status);
+      // fall back to snapshot/ path for local development
+      return fetch('../snapshot/compiler.wasm').then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      });
     })
     .then(function(bytes) {
       var currentInstance = null;

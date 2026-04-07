@@ -27,7 +27,9 @@ The playground consists of:
 
 ### Compiler Integration
 
-The playground expects the Compact Pascal compiler as a WASM module at `../snapshot/compiler.wasm`.
+The playground looks for `compiler.wasm` in its own directory first, then
+falls back to `../snapshot/compiler.wasm` for local development. Set
+`window.CPAS_COMPILER_URL` to override the path.
 
 The compiler is invoked by:
 
