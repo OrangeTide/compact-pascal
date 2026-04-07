@@ -13,35 +13,35 @@ end;
 {$ENDIF}
 
 begin
-  { IFDEF true branch }
+  { IFDEF false branch (FPC is not defined in this compiler) }
   {$IFDEF FPC}
-  write('y');
-  {$ELSE}
-  write('n');
-  {$ENDIF}
-
-  { IFNDEF false branch (FPC is defined) }
-  {$IFNDEF FPC}
   write('n');
   {$ELSE}
   write('y');
   {$ENDIF}
 
-  { IFDEF without ELSE }
-  {$IFDEF FPC}
+  { IFNDEF true branch (FPC is not defined) }
+  {$IFNDEF FPC}
   write('y');
+  {$ELSE}
+  write('n');
   {$ENDIF}
 
-  { IFNDEF without ELSE — skipped entirely }
-  {$IFNDEF FPC}
+  { IFDEF without ELSE — skipped entirely }
+  {$IFDEF FPC}
   write('BUG');
+  {$ENDIF}
+
+  { IFNDEF without ELSE }
+  {$IFNDEF FPC}
+  write('y');
   {$ENDIF}
 
   writeln;
 
-  { Nested IFDEF }
-  {$IFDEF FPC}
-    {$IFDEF FPC}
+  { Nested IFNDEF }
+  {$IFNDEF FPC}
+    {$IFNDEF FPC}
     write('nested');
     {$ENDIF}
   {$ENDIF}
