@@ -101,6 +101,19 @@
       cursor: not-allowed;
     }
 
+    .top-bar-link {
+      font-family: var(--sans);
+      font-size: 0.8rem;
+      padding: 0.3rem 0.7rem;
+      color: var(--fg);
+      text-decoration: none;
+    }
+
+    .top-bar-link:hover {
+      text-decoration: underline;
+      color: var(--accent);
+    }
+
     .button-sep {
       width: 1px;
       height: 1.2rem;
@@ -597,6 +610,7 @@
       <button id="stopBtn" onclick="doStop()" title="Stop program" disabled style="color:#cc3333">&#x23F9;&#xFE0F; Stop</button>
     </div>
     <div style="margin-left:auto">
+      <a href="https://github.com/OrangeTide/compact-pascal" target="_blank" rel="noopener" class="top-bar-link" title="Source on GitHub">GitHub</a>
       <button onclick="toggleDarkMode()" id="darkModeBtn" title="Toggle dark mode">&#x1F319; Dark</button>
     </div>
   </div>
