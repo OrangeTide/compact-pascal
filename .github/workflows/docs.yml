@@ -7,6 +7,7 @@ on:
       - 'PLAN.md'
       - 'doc/**'
       - 'pages/**'
+      - 'compiler/**'
       - '.github/workflows/docs.yml'
       - 'Makefile'
   workflow_dispatch:
@@ -54,6 +55,10 @@ jobs:
           cp doc/compact-pascal-tutorial.md _site/
           # Playground
           cp -r pages/playground _site/
+          cp compiler/cpas.pas _site/playground/samples/cpas.pas
+          jq '. | if any(.file == "cpas.pas") then . else . + [{"name":"Compiler Source","file":"cpas.pas","description":"The Compact Pascal compiler itself"}] end' \
+            _site/playground/files.json > _site/playground/files.json.tmp
+          mv _site/playground/files.json.tmp _site/playground/files.json
           # Technical Notes (wildcard picks up all current and future TNs)
           cp build/compact-pascal-tn*.pdf _site/ 2>/dev/null || true
           cp pages/compact-pascal-tn*.html _site/ 2>/dev/null || true

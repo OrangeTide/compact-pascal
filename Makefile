@@ -215,7 +215,11 @@ test: $(CPAS_BIN)
 
 deploy-playground: $(SNAPSHOT)
 	cp $(SNAPSHOT) pages/playground/compiler.wasm
-	@echo "pages/playground/compiler.wasm: updated"
+	cp $(CPAS_SRC) pages/playground/samples/cpas.pas
+	jq '. | if any(.file == "cpas.pas") then . else . + [{"name":"Compiler Source","file":"cpas.pas","description":"The Compact Pascal compiler itself"}] end' \
+		pages/playground/files.json > pages/playground/files.json.tmp
+	mv pages/playground/files.json.tmp pages/playground/files.json
+	@echo "pages/playground/: updated"
 
 # ── Cleanup ──────────────────────────────────────────────────────
 
