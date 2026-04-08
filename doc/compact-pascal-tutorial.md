@@ -967,20 +967,25 @@ EmitI32Store(2, 0);  { ;; WAT: i32.store align=4 offset=0 }
 
 The WASM `i32.store` instruction pops two values: the address and the value to store, in that order. The address must be computed *before* the expression, which is why the compiler emits the address calculation first.
 
+All scalar types — `integer`, `char`, `boolean` — use `i32.store` (4 bytes) for writes. Even though `char` and `boolean` are logically 1-byte types, each variable occupies a full 4-byte frame slot. The distinction matters on *reads*, where `char` and `boolean` must use `i32.load8_u` (see below).
+
 ### Loading Variables in Expressions
 
 When an identifier appears in an expression and resolves to a variable, the compiler emits code to load its value:
 
 ```pascal
-{ ;; WAT: global.get $sp
-  ;;      i32.const <offset>
-  ;;      i32.add
-  ;;      i32.load align=4 offset=0 }
 EmitOp(OpGlobalGet); EmitULEB128(startCode, 0);
 EmitI32Const(syms[sym].offset);
 EmitOp(OpI32Add);
-EmitI32Load(2, 0);
+if (syms[sym].typ = tyChar) or (syms[sym].typ = tyBoolean) then
+  EmitI32Load8u(0, 0)   { ;; i32.load8_u — 1-byte zero-extended load }
+else
+  EmitI32Load(2, 0);    { ;; i32.load align=4 — 4-byte load }
 ```
+
+All scalar variables occupy 4 bytes in the frame, but `char` and `boolean` are logically 1-byte types. Using `i32.load` (4 bytes) on a char would read the target byte *plus three adjacent bytes*, producing values far outside 0..255.
+
+> **Watch Out:** This distinction matters most for string indexing. The expression `s[i]` computes an address into the string's character data. If the final load uses `i32.load` instead of `i32.load8_u`, it reads 4 bytes from the middle of a string, producing garbage values. This manifests as "set element out of range" errors when the result is used in set membership tests like `ch in ['A'..'Z']` — because the loaded value exceeds 255. The bug is silent for programs that only use integer variables.
 
 ### Writing String Literals
 
@@ -1385,10 +1390,13 @@ EmitOp(OpI32Add);                    { address on stack }
 { Callee: load through pointer }
 EmitOp(OpLocalGet);
 EmitULEB128(startCode, localIdx);    { get the pointer }
-EmitI32Load(2, 0);                   { dereference }
+if (syms[sym].typ = tyChar) or (syms[sym].typ = tyBoolean) then
+  EmitI32Load8u(0, 0)               { 1-byte zero-extended load }
+else
+  EmitI32Load(2, 0);                { 4-byte load }
 ```
 
-When writing to a `var` parameter, the callee stores through the pointer:
+When writing to a `var` parameter, the callee stores through the pointer. Use a full `i32.store` even for `char` and `boolean` types, because the target variable occupies a 4-byte frame slot:
 
 ```pascal
 EmitOp(OpLocalGet);
@@ -1398,6 +1406,8 @@ EmitI32Store(2, 0);                  { store through pointer }
 ```
 
 This is the classic pass-by-reference implementation: the caller and callee share the same memory location.
+
+> **Watch Out:** The load width must match the type, not the frame slot size. A `var ch: char` parameter's pointer dereference must use `i32.load8_u` (1 byte, zero-extended) for reads but `i32.store` (4 bytes) for writes. Using `i32.load` to read a char would pull in adjacent memory bytes. Using `i32.store8` to write would leave the upper 3 bytes of the slot as garbage — which causes corruption when the value is later loaded with `i32.load` by code that does not know the type.
 
 #### `const` Parameters
 
@@ -1450,16 +1460,54 @@ end;
 
 The `forward` declaration allocates a function slot and registers the symbol, but does not compile a body. When the body appears later, the compiler looks up the existing symbol and fills in the body. Compact Pascal requires the full header to be restated at the body — parameter list, types, and return type must all be present. This differs from Turbo Pascal (which omits the parameter list at the body site) but keeps the signature visible at the definition, which is friendlier to readers.
 
+Both the `forward` declaration and the normal declaration path must populate `funcs[].varParams[]` and `funcs[].constParams[]` when the function slot is created. The `forward` path does this at declaration time; the normal path must do it before compiling the body (see "Procedure Calls" below for why this matters for recursion).
+
 ### The `exit` Intrinsic
 
-`exit` compiles to the WASM `return` instruction. In a procedure, it returns immediately. In a function, the current value of the hidden return-value local is pushed onto the stack before returning:
+`exit` cannot compile to the WASM `return` instruction. A naive `return` would skip the frame epilogue — the code that restores the display globals and deallocates `$sp`. If the epilogue does not run, `$sp` is off by the callee's frame size, and every subsequent variable access in the caller reads from the wrong memory address (typically uninitialized zeros).
+
+The fix is to wrap the procedure body in a WASM `block` and compile `exit` as a `br` (branch) to the end of that block, falling through to the epilogue:
+
+```pascal
+{ In ParseBlock, before the statement part: }
+EmitOp(OpBlock);
+EmitOp(WasmVoid);     { block type: void }
+exitDepth := 0;
+
+{ Parse statement part... }
+
+{ After the statement part: }
+EmitOp(OpEnd);        { end of exit block }
+{ Frame epilogue runs here — restore display, deallocate $sp }
+```
+
+The `exit` statement itself emits `br exitDepth`:
 
 ```pascal
 tkExit: begin
   NextToken;
-  EmitOp(OpReturn);
+  if exitDepth < 0 then
+    Error('exit outside of procedure/function');
+  EmitOp(OpBr);
+  EmitULEB128(startCode, exitDepth);
 end;
 ```
+
+The `exitDepth` variable tracks how many enclosing blocks/loops stand between the current code position and the exit block. Every control flow construct that adds a WASM block or loop must increment `exitDepth` on entry and decrement it on exit:
+
+```pascal
+{ In while: block + loop = +2 }
+exitDepth := exitDepth + 2;
+ParseStatement;   { body }
+exitDepth := exitDepth - 2;
+
+{ In if: +1 for the WASM if block }
+inc(exitDepth);
+ParseStatement;   { then branch }
+dec(exitDepth);
+```
+
+> **Watch Out:** This is an especially tricky bug to diagnose. The symptom — global variables reading as zero — looks like a memory layout problem. But it only manifests when a procedure has local variables *and* uses `exit` (directly or via an if-branch). The compiler itself uses `exit` extensively in `ReadCh`'s pushback path, so during self-hosting this bug appeared as "initialization clobbers globals" when the real cause was "ReadCh's exit skips the epilogue."
 
 ### External Declarations and WASM Imports
 
@@ -1502,6 +1550,20 @@ while tokKind <> tkRParen do begin
 end;
 EmitCall(syms[sym].offset);
 ```
+
+This code looks up `funcs[funcIdx].varParams[argIdx]` to decide whether to pass an address or a value. The `funcs[]` entry must be populated *before* the procedure body is compiled — not after. This matters for recursion: a procedure can call itself inside its own body, and that recursive call site needs the `varParams` array to be correct.
+
+```pascal
+{ In ParseProcDecl, BEFORE compiling the body: }
+funcs[numFuncs].nparams := np;
+for i := 0 to np - 1 do begin
+  funcs[numFuncs].varParams[i] := paramIsVar[i];
+  funcs[numFuncs].constParams[i] := paramIsConst[i];
+end;
+numFuncs := numFuncs + 1;
+```
+
+> **Watch Out:** If `varParams` is not initialized before body compilation, recursive calls within the procedure will see all parameters as value parameters. The caller will emit `ParseExpression` (loading the value) instead of computing the address, so the callee receives a value where it expects a pointer and dereferences it — reading from an arbitrary memory address. The symptom is that `var` parameters silently return wrong values (often zero) from recursive calls, while non-recursive calls work correctly.
 
 When a function is called as a statement (its return value discarded), the compiler emits `drop` after the call:
 
@@ -1575,6 +1637,42 @@ Output:
 ```
 
 The caller passes the addresses of `x` and `y`. The `Swap` procedure dereferences those addresses to read and write the caller's variables directly.
+
+It is worth adding a recursive var parameter test as well, since this exercises the `varParams` initialization path discussed above:
+
+```pascal
+program TestVarParamRecurse;
+
+procedure Foo(var x: integer);
+var local: integer;
+begin
+  if x = 99 then begin
+    local := 0;
+    x := 0;
+    Foo(local);
+    writeln(local);
+    x := local;
+  end else begin
+    x := 42;
+  end;
+end;
+
+var r: integer;
+begin
+  r := 99;
+  Foo(r);
+  writeln(r);
+end.
+```
+
+Output:
+
+```
+42
+42
+```
+
+The first call `Foo(r)` sees `x = 99`, sets `local := 0`, and calls `Foo(local)` recursively. The recursive call sees `x = 0` (the else branch), and assigns `x := 42` — writing through the pointer to `local` in the caller's frame. When the recursive call returns, the outer `Foo` prints `local` (now 42) and copies it back to `x`. If `varParams` were not initialized before body compilation, the recursive call would pass `local` by value, the assignment `x := 42` would modify only the callee's copy, and both outputs would be 0.
 
 \newpage
 
