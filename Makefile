@@ -215,7 +215,7 @@ test: $(CPAS_BIN)
 
 # ── Deploy ───────────────────────────────────────────────────────
 
-deploy-playground: $(SNAPSHOT)
+deploy-playground:
 	cp $(SNAPSHOT) pages/playground/compiler.wasm
 	cp $(CPAS_SRC) pages/playground/samples/cpas.pas
 	jq '. | if any(.file == "cpas.pas") then . else . + [{"name":"Compiler Source","file":"cpas.pas","description":"The Compact Pascal compiler itself"}] end' \

@@ -39,7 +39,9 @@ jobs:
         run: make pdf html
 
       - name: Deploy playground assets
-        run: make deploy-playground
+        run: |
+          touch snapshot/compiler.wasm
+          make deploy-playground
 
       - name: Assemble site
         run: |
