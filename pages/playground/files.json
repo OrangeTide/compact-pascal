@@ -13,5 +13,10 @@
     "name": "Fibonacci",
     "file": "fibonacci.pas",
     "description": "Recursive function demo"
+  },
+  {
+    "name": "Compiler Source",
+    "file": "cpas.pas",
+    "description": "The Compact Pascal compiler itself"
   }
 ]
