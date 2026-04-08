@@ -1137,8 +1137,8 @@ document.addEventListener('click', function(ev) {
 });
 
 function doRenameTab() {
-  hideTabContextMenu();
   var buf = findBuffer(contextMenuTabId || activeTab);
+  hideTabContextMenu();
   if (!buf) return;
   var name = prompt('Rename file:', buf.name);
   if (name && name !== buf.name) {
@@ -1149,8 +1149,8 @@ function doRenameTab() {
 }
 
 function doDuplicateTab() {
-  hideTabContextMenu();
   var buf = findBuffer(contextMenuTabId || activeTab);
+  hideTabContextMenu();
   if (!buf) return;
   saveCurrentBuffer();
   var ext = fileExt(buf.name);
@@ -1165,8 +1165,8 @@ function doSaveTab() {
 }
 
 function doDeleteTab() {
-  hideTabContextMenu();
   var id = contextMenuTabId || activeTab;
+  hideTabContextMenu();
   var buf = findBuffer(id);
   if (!buf) return;
   if (!confirm('Delete "' + buf.name + '" from browser storage?')) return;
@@ -1175,8 +1175,8 @@ function doDeleteTab() {
 }
 
 function doSetStdin() {
-  hideTabContextMenu();
   var id = contextMenuTabId || activeTab;
+  hideTabContextMenu();
   stdinTabId = (stdinTabId === id) ? null : id;
   renderTabs();
   if (stdinTabId) {
