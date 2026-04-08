@@ -16,3 +16,4 @@ compiler/*.ppu
 
 # Deploy artifacts
 pages/playground/compiler.wasm
+pages/playground/samples/cpas.pas
