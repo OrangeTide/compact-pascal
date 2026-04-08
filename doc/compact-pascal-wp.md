@@ -542,14 +542,17 @@ WithStmt         = 'with' Designator { ',' Designator } 'do' Statement .
 ### Expressions
 
 ```ebnf
-Expression       = SimpleExpr [ RelOp SimpleExpr ] .
+Expression       = OrElseExpr .
+OrElseExpr       = AndThenExpr { 'or' 'else' AndThenExpr } .
+AndThenExpr      = Comparison { 'and' 'then' Comparison } .
+Comparison       = SimpleExpr [ RelOp SimpleExpr ] .
 RelOp            = '=' | '<>' | '<' | '>' | '<=' | '>=' | 'in' .
 
 SimpleExpr       = [ '+' | '-' ] Term { AddOp Term } .
-AddOp            = '+' | '-' | 'or' | 'or' 'else' .
+AddOp            = '+' | '-' | 'or' .
 
 Term             = Factor { MulOp Factor } .
-MulOp            = '*' | 'div' | 'mod' | 'and' | 'and' 'then' .
+MulOp            = '*' | 'div' | 'mod' | 'and' | 'shl' | 'shr' .
 
 Factor           = INTEGER_LITERAL
                  | REAL_LITERAL

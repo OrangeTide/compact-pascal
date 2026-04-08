@@ -216,13 +216,13 @@ const
   skField     = 6;
 
   { Operator precedences for Pratt parser }
-  PrecNone    = 0;
-  PrecOr      = 1;  { or, or else }
-  PrecAnd     = 2;  { and, and then }
-  PrecCompare = 3;  { = <> < > <= >= in }
-  PrecAdd     = 4;  { + - }
-  PrecMul     = 5;  { * div mod }
-  PrecUnary   = 6;  { not, unary +/- }
+  PrecNone      = 0;
+  PrecOrElse    = 1;  { or else }
+  PrecAndThen   = 2;  { and then }
+  PrecCompare   = 3;  { = <> < > <= >= in }
+  PrecAdd       = 4;  { + - or }
+  PrecMul       = 5;  { * div mod and shl shr }
+  PrecUnary     = 6;  { not, unary +/- }
 
 { ---- Types ---- }
 
@@ -3555,15 +3555,15 @@ begin
     case op of
       tkPlus:      prec := PrecAdd;
       tkMinus:     prec := PrecAdd;
-      tkOr:        prec := PrecOr;
-      tkOrElse:    prec := PrecOr;
+      tkOr:        prec := PrecAdd;
+      tkOrElse:    prec := PrecOrElse;
       tkStar:      prec := PrecMul;
       tkDiv:       prec := PrecMul;
       tkMod:       prec := PrecMul;
       tkShl:       prec := PrecMul;
       tkShr:       prec := PrecMul;
-      tkAnd:       prec := PrecAnd;
-      tkAndThen:   prec := PrecAnd;
+      tkAnd:       prec := PrecMul;
+      tkAndThen:   prec := PrecAndThen;
       tkEqual:     prec := PrecCompare;
       tkNotEqual:  prec := PrecCompare;
       tkLess:      prec := PrecCompare;
@@ -4372,15 +4372,15 @@ var
       case op of
         tkPlus:      prec := PrecAdd;
         tkMinus:     prec := PrecAdd;
-        tkOr:        prec := PrecOr;
-        tkOrElse:    prec := PrecOr;
+        tkOr:        prec := PrecAdd;
+        tkOrElse:    prec := PrecOrElse;
         tkStar:      prec := PrecMul;
         tkDiv:       prec := PrecMul;
         tkMod:       prec := PrecMul;
         tkShl:       prec := PrecMul;
         tkShr:       prec := PrecMul;
-        tkAnd:       prec := PrecAnd;
-        tkAndThen:   prec := PrecAnd;
+        tkAnd:       prec := PrecMul;
+        tkAndThen:   prec := PrecAndThen;
         tkEqual:     prec := PrecCompare;
         tkNotEqual:  prec := PrecCompare;
         tkLess:      prec := PrecCompare;

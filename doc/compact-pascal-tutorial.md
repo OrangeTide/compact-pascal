@@ -685,11 +685,11 @@ Here is the precedence table:
 
 | Precedence | Operators |
 |---|---|
-| 1 (lowest) | `or`, `or else` |
-| 2 | `and`, `and then` |
+| 1 (lowest) | `or else` |
+| 2 | `and then` |
 | 3 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` |
-| 4 | `+`, `-` |
-| 5 | `*`, `div`, `mod` |
+| 4 | `+`, `-`, `or` |
+| 5 | `*`, `div`, `mod`, `and`, `shl`, `shr` |
 | 6 (highest) | `not`, unary `+`/`-` |
 
 And the implementation:
@@ -741,8 +741,8 @@ begin
       tkStar:      prec := PrecMul;
       tkDiv:       prec := PrecMul;
       tkMod:       prec := PrecMul;
-      tkAnd:       prec := PrecAnd;
-      tkOr:        prec := PrecOr;
+      tkAnd:       prec := PrecMul;
+      tkOr:        prec := PrecAdd;
       tkEqual:     prec := PrecCompare;
       { ... other operators ... }
     else

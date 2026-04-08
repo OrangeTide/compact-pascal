@@ -1025,14 +1025,17 @@ WithStmt         = 'with' Designator { ',' Designator } 'do' Statement .
 ### Expressions
 
 ```ebnf
-Expression       = SimpleExpr [ RelOp SimpleExpr ] .
+Expression       = OrElseExpr .
+OrElseExpr       = AndThenExpr { 'or' 'else' AndThenExpr } .
+AndThenExpr      = Comparison { 'and' 'then' Comparison } .
+Comparison       = SimpleExpr [ RelOp SimpleExpr ] .
 RelOp            = '=' | '<>' | '<' | '>' | '<=' | '>=' | 'in' .
 
 SimpleExpr       = [ '+' | '-' ] Term { AddOp Term } .
-AddOp            = '+' | '-' | 'or' | 'or' 'else' .
+AddOp            = '+' | '-' | 'or' .
 
 Term             = Factor { MulOp Factor } .
-MulOp            = '*' | 'div' | 'mod' | 'and' | 'and' 'then' .
+MulOp            = '*' | 'div' | 'mod' | 'and' | 'shl' | 'shr' .
 
 Factor           = INTEGER_LITERAL
                  | REAL_LITERAL
@@ -1113,9 +1116,13 @@ The language is **case-insensitive** — reserved words and identifiers are matc
 | Precedence | Operators | Associativity |
 |---|---|---|
 | 1 (highest) | `not`, unary `+`/`-` | Right |
-| 2 | `*`, `div`, `mod`, `and`, `and then` | Left |
-| 3 | `+`, `-`, `or`, `or else` | Left |
-| 4 (lowest) | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
+| 2 | `*`, `div`, `mod`, `and`, `shl`, `shr` | Left |
+| 3 | `+`, `-`, `or` | Left |
+| 4 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
+| 5 | `and then` | Left |
+| 6 (lowest) | `or else` | Left |
+
+> **Deviation from ISO 10206.** ISO Extended Pascal places `and then` with the multiplying-operators and `or else` with the adding-operators. Compact Pascal gives them their own levels below comparisons, matching the precedence of C's `&&` and `||`. This allows `x < 2 * y and then z - 1 < w` to parse as `(x < 2 * y) and then (z - 1 < w)` without parentheses. The eager operators `and` and `or` retain their standard Pascal precedence.
 
 ### Comments and Compiler Directives
 
