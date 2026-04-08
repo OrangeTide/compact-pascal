@@ -1604,7 +1604,7 @@ function doRun() {
   setStatus('Running...');
   appendOutput('<span class="out-info">>> Running...</span>\n');
 
-  runningWorker = new Worker('run-worker.js');
+  runningWorker = new Worker('run-worker.js?v=' + Date.now());
 
   runningWorker.onmessage = function(ev) {
     var msg = ev.data;
