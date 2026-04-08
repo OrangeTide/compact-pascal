@@ -6,8 +6,8 @@ var isRunning = false;
 // WASI context for the running program
 var WasiContext = {
   fdState: {
-    0: { data: null, pos: 0 },  // stdin (empty in initial version)
-    1: { data: [], pos: 0 },    // stdout
+    0: { data: null, pos: 0 },  // stdin
+    1: { data: [], pos: 0 },    // stdout (raw bytes)
     2: { data: [], pos: 0 }     // stderr
   },
 
@@ -23,14 +23,14 @@ var WasiContext = {
 
       var chunk = view.slice(bufPtr, bufPtr + bufLen);
 
-      // Decode and send to main thread
-      var text = new TextDecoder().decode(chunk);
-      if (fd === 1) {
-        // stdout
-        self.postMessage({ type: 'stdout', data: text });
-      } else if (fd === 2) {
-        // stderr
-        self.postMessage({ type: 'stderr', data: text });
+      if (fd === 2) {
+        // stderr — always text, send immediately
+        self.postMessage({ type: 'stderr', data: new TextDecoder().decode(chunk) });
+      } else if (fd === 1) {
+        // stdout — accumulate raw bytes
+        for (var j = 0; j < chunk.length; j++) {
+          this.fdState[1].data.push(chunk[j]);
+        }
       }
 
       written += bufLen;
@@ -41,15 +41,44 @@ var WasiContext = {
   },
 
   fdRead: function(fd, iovsPtr, iovsLen, nreadPtr, memory) {
-    // In initial version, no stdin support. Return EOF immediately.
     var dataView = new DataView(memory.buffer);
-    dataView.setUint32(nreadPtr, 0, true);
+    var view = new Uint8Array(memory.buffer);
+
+    if (fd !== 0 || !this.fdState[0].data) {
+      dataView.setUint32(nreadPtr, 0, true);
+      return 0;
+    }
+
+    var src = this.fdState[0].data;
+    var srcPos = this.fdState[0].pos;
+    var nread = 0;
+
+    for (var i = 0; i < iovsLen; i++) {
+      var iovPtr = iovsPtr + (i * 8);
+      var bufPtr = dataView.getUint32(iovPtr, true);
+      var bufLen = dataView.getUint32(iovPtr + 4, true);
+
+      var remaining = src.length - srcPos;
+      var toRead = Math.min(bufLen, remaining);
+
+      for (var j = 0; j < toRead; j++) {
+        view[bufPtr + j] = src[srcPos + j];
+      }
+
+      srcPos += toRead;
+      nread += toRead;
+
+      if (toRead < bufLen) break;  // EOF reached
+    }
+
+    this.fdState[0].pos = srcPos;
+    dataView.setUint32(nreadPtr, nread, true);
     return 0;
   },
 
   reset: function() {
     this.fdState[0].pos = 0;
-    this.fdState[0].data = new Uint8Array(0);
+    this.fdState[0].data = null;
     this.fdState[1].data = [];
     this.fdState[2].data = [];
   }
@@ -64,16 +93,19 @@ function WasiExit(code) {
 self.onmessage = function(ev) {
   var msg = ev.data;
   if (msg.type === 'run') {
-    runProgram(msg.wasmBytes);
+    runProgram(msg.wasmBytes, msg.stdinData || null);
   }
 };
 
-function runProgram(wasmBytes) {
+function runProgram(wasmBytes, stdinData) {
   if (isRunning) return;
   isRunning = true;
 
   try {
     WasiContext.reset();
+    if (stdinData) {
+      WasiContext.fdState[0].data = stdinData;
+    }
 
     // Create WASI imports
     var wasmImports = {
@@ -103,18 +135,34 @@ function runProgram(wasmBytes) {
     var module = new WebAssembly.Module(wasmBytes);
     currentInstance = new WebAssembly.Instance(module, wasmImports);
 
+    var exitCode = 0;
     try {
       currentInstance.exports._start();
     } catch (e) {
       if (!(e instanceof WasiExit)) throw e;
-      // Exit via proc_exit
-      self.postMessage({ type: 'exit', code: e.code });
-      isRunning = false;
-      return;
+      exitCode = e.code;
     }
 
-    // If no exception, assume success
-    self.postMessage({ type: 'exit', code: 0 });
+    // Send stdout results
+    var rawBytes = new Uint8Array(WasiContext.fdState[1].data);
+    if (rawBytes.length > 0) {
+      // Check if output looks like text (all bytes are printable ASCII/UTF-8)
+      var isText = true;
+      for (var i = 0; i < Math.min(rawBytes.length, 256); i++) {
+        var b = rawBytes[i];
+        if (b < 0x09 || (b > 0x0d && b < 0x20 && b !== 0x1b)) {
+          isText = false;
+          break;
+        }
+      }
+      if (isText) {
+        self.postMessage({ type: 'stdout', data: new TextDecoder().decode(rawBytes) });
+      } else {
+        self.postMessage({ type: 'stdout-binary', size: rawBytes.length, data: rawBytes.buffer }, [rawBytes.buffer]);
+      }
+    }
+
+    self.postMessage({ type: 'exit', code: exitCode });
     isRunning = false;
   } catch (e) {
     self.postMessage({ type: 'error', message: String(e) });

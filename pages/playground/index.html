@@ -621,6 +621,7 @@
   <div class="tab-context-menu" id="tabContextMenu">
     <button onclick="doRenameTab()">Rename</button>
     <button onclick="doDuplicateTab()">Duplicate</button>
+    <button onclick="doSetStdin()">Use as stdin</button>
     <button onclick="doSaveTab()">Save</button>
     <button onclick="doDeleteTab()">Delete</button>
   </div>
@@ -680,6 +681,7 @@ var buffers = [];      // { id, name, content, initContent, compiled }
 var activeTab = null;  // buffer id
 var nextId = 1;
 var runningWorker = null;
+var stdinTabId = null;
 
 var editor = document.getElementById('editor');
 var gutter = document.getElementById('gutter');
@@ -1054,6 +1056,7 @@ function closeTab(id, ev) {
   if (ev) { ev.stopPropagation(); }
   var idx = buffers.findIndex(function(b) { return b.id === id; });
   if (idx < 0) return;
+  if (stdinTabId === id) stdinTabId = null;
   buffers.splice(idx, 1);
   if (buffers.length === 0) {
     activeTab = null;
@@ -1091,7 +1094,8 @@ function renderTabs() {
     tab.onclick = function() { switchTab(buf.id); };
 
     var label = document.createElement('span');
-    label.textContent = (isBufferModified(buf) ? '\u2022 ' : '') + buf.name;
+    var prefix = (buf.id === stdinTabId ? '\u23CE ' : '') + (isBufferModified(buf) ? '\u2022 ' : '');
+    label.textContent = prefix + buf.name;
     tab.appendChild(label);
 
     var menu = document.createElement('span');
@@ -1170,6 +1174,19 @@ function doDeleteTab() {
   doSave();
 }
 
+function doSetStdin() {
+  hideTabContextMenu();
+  var id = contextMenuTabId || activeTab;
+  stdinTabId = (stdinTabId === id) ? null : id;
+  renderTabs();
+  if (stdinTabId) {
+    var buf = findBuffer(stdinTabId);
+    setStatus('stdin: ' + (buf ? buf.name : '?'));
+  } else {
+    setStatus('stdin cleared');
+  }
+}
+
 // --- Editor ---
 function onEditorInput() {
   updateGutter();
@@ -1185,7 +1202,8 @@ function updateTabLabel(buf) {
   var tabs = tabBar.querySelectorAll('.tab');
   for (var i = 0; i < tabs.length; i++) {
     if (buffers[i] && buffers[i].id === buf.id) {
-      tabs[i].querySelector('span').textContent = (isBufferModified(buf) ? '\u2022 ' : '') + buf.name;
+      var prefix = (buf.id === stdinTabId ? '\u23CE ' : '') + (isBufferModified(buf) ? '\u2022 ' : '');
+      tabs[i].querySelector('span').textContent = prefix + buf.name;
       break;
     }
   }
@@ -1592,6 +1610,11 @@ function doRun() {
     var msg = ev.data;
     if (msg.type === 'stdout') {
       appendOutput('<span class="out-stdout">' + htmlEscape(msg.data) + '</span>');
+    } else if (msg.type === 'stdout-binary') {
+      var blob = new Blob([msg.data], { type: 'application/octet-stream' });
+      var url = URL.createObjectURL(blob);
+      appendOutput('<span class="out-info">stdout: ' + msg.size + ' bytes (binary) </span>' +
+        '<a href="' + url + '" download="output.wasm" style="color:#5dade2;text-decoration:underline">Download</a>\n');
     } else if (msg.type === 'stderr') {
       appendOutput('<span class="out-stderr">' + htmlEscape(msg.data) + '</span>');
     } else if (msg.type === 'exit') {
@@ -1614,9 +1637,20 @@ function doRun() {
   document.getElementById('runBtn').disabled = true;
   document.getElementById('stopBtn').disabled = false;
 
+  var stdinData = null;
+  if (stdinTabId) {
+    var stdinBuf = findBuffer(stdinTabId);
+    if (stdinBuf) {
+      saveCurrentBuffer();
+      stdinData = new TextEncoder().encode(stdinBuf.content);
+      appendOutput('<span class="out-info">   stdin: ' + htmlEscape(stdinBuf.name) + ' (' + stdinData.length + ' bytes)</span>\n');
+    }
+  }
+
   runningWorker.postMessage({
     type: 'run',
-    wasmBytes: buf.compiled
+    wasmBytes: buf.compiled,
+    stdinData: stdinData
   });
 }
 
