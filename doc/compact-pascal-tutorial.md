@@ -850,6 +850,18 @@ $ wasmtime run math.wasm; echo $?
 
 The expression `(10 + 20) * 3 - 48 div 2` evaluates to `30 * 3 - 24 = 66`. The compiler correctly handles operator precedence, parentheses, and all integer arithmetic operations.
 
+::: aside
+If you tried `/` instead of `div`, the compiler rejected it. In Pascal,
+`/` is the *real* division operator — it returns a floating-point result,
+even when both operands are integers. Integer division uses `div`, which
+truncates toward zero, and `mod` gives the remainder. This differs from C
+and most modern languages, where `/` performs integer division when both
+sides are integers. The distinction exists because mathematically, dividing
+two integers doesn't always produce an integer — `7 / 2` is `3.5`, not `3`.
+Pascal makes you say what you mean: `div` for the truncated quotient, `/`
+for the real result.
+:::
+
 \newpage
 
 ## Chapter 4: Variables and I/O
