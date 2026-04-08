@@ -404,6 +404,13 @@ These functions and procedures are compiler intrinsics, always available without
 | `concat(s1, s2, ...)` | `string × ... → string` | Concatenation of strings. Equivalent to `s1 + s2 + ...`. |
 | `delete(s, i, n)` | `var string × integer × integer` | Remove `n` characters from `s` starting at position `i`. |
 | `insert(src, s, i)` | `string × var string × integer` | Insert `src` into `s` at position `i`. |
+| `str(x, s)` | `integer × var string` | Convert integer `x` to its decimal string representation and store in `s`. |
+
+### I/O Functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `eof` | `→ boolean` | Returns `true` when the last `read` encountered end-of-file, `false` otherwise. Reads from standard input (fd 0). |
 
 ### Control Procedures
 
@@ -1116,7 +1123,7 @@ var       while     with
 
 The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.
 
-`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
+`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
 
 ### Operator Precedence (Highest to Lowest)
 

@@ -117,7 +117,7 @@ The embedding libraries provide helper functions to convert between host strings
 
 ### Standard Functions and Procedures
 
-Compact Pascal includes standard functions and procedures as compiler intrinsics: `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, and string operations (`copy`, `pos`, `concat`, `delete`, `insert`). TP-compatible numeric types (`byte`, `word`, `shortint`, `longint`) are also supported. These additions maximize backward compatibility with existing Pascal code and ensure the compiler source compiles naturally on both fpc and Compact Pascal.
+Compact Pascal includes standard functions and procedures as compiler intrinsics: `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, string operations (`copy`, `pos`, `concat`, `delete`, `insert`, `str`), and `eof`. TP-compatible numeric types (`byte`, `word`, `shortint`, `longint`) are also supported. These additions maximize backward compatibility with existing Pascal code and ensure the compiler source compiles naturally on both fpc and Compact Pascal.
 
 ### Language Extensions
 
@@ -631,7 +631,7 @@ var       while     with
 
 The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.
 
-Note: `self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `new`, `dispose`) are also built-in identifiers. `implement` and `interface` are reserved to support core features and future extensions. `external` is reserved for declaring imported procedures. `string`, `set`, `in`, and `with` are reserved as language keywords. The reserved words `and then` and `or else` form two-word operators for short-circuit boolean evaluation (ISO 10206). WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
+Note: `self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `new`, `dispose`) are also built-in identifiers. `implement` and `interface` are reserved to support core features and future extensions. `external` is reserved for declaring imported procedures. `string`, `set`, `in`, and `with` are reserved as language keywords. The reserved words `and then` and `or else` form two-word operators for short-circuit boolean evaluation (ISO 10206). WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
 
 ### Operator Precedence (Highest to Lowest)
 
