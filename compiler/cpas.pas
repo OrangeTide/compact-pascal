@@ -1,6 +1,6 @@
 {$MODE TP}
 {$IFNDEF FPC}
-{$MEMORY 64}
+{$MEMORY 160}
 {$MAXMEMORY 256}
 {$ENDIF}
 program cpas;
@@ -362,6 +362,11 @@ var
   structCopySize: array[0..15] of longint;     { byte size to copy }
   numStructCopies: longint;
 
+  { Var/const parameter spill list (pointer spilled to frame for nested access) }
+  varParamSpillLocal: array[0..15] of longint;    { WASM local index }
+  varParamSpillFrameOff: array[0..15] of longint; { frame offset for stored pointer }
+  numVarParamSpills: longint;
+
   { Pending variable initializers (deferred until after frame prologue) }
   varInitOffset: array[0..15] of longint;   { frame offset of the variable }
   varInitVal: array[0..15] of longint;      { scalar: constant value; string: data addr }
@@ -410,6 +415,10 @@ var
 
   { Start function code - accumulated separately, then wrapped }
   startCode: TCodeBuf;
+
+  { Save stack for startCode during nested ParseProcDecl calls }
+  savedCodeStack: array[0..7] of TCodeBuf;
+  savedCodeStackTop: longint;
 
   { Helper function code buffer (for __write_int etc.) }
   helperCode: TCodeBuf;
@@ -461,6 +470,8 @@ var
   breakDepth: longint;           { br depth for break (-1 = not in loop) }
   continueDepth: longint;        { br depth for continue (-1 = not in loop) }
   exitDepth: longint;            { br depth for exit (-1 = not in function/program body) }
+  forLimitDepth: longint;        { current for-loop nesting depth }
+  addrForLimit: array[0..15] of longint; { per-depth for-limit scratch addresses }
 
   { Expression type tracking }
   exprType: longint;  { type of last parsed expression (tyInteger, tyString, etc.) }
@@ -585,7 +596,22 @@ end;
 {$ELSE}
 procedure ReadCh;
 begin
-  ch := chr(88);
+  if hasPushback then begin
+    ch := pushbackCh;
+    hasPushback := false;
+    exit;
+  end;
+  read(ch);
+  if eof then begin
+    ch := #0;
+    atEof := true;
+  end else begin
+    if ch = #10 then begin
+      srcLine := srcLine + 1;
+      srcCol := 0;
+    end else
+      srcCol := srcCol + 1;
+  end;
 end;
 {$ENDIF}
 
@@ -2269,6 +2295,16 @@ begin
   end;
 end;
 
+procedure EmitVarParamPtr(sym: longint);
+(* Emit code to push the pointer stored in a var/const param.
+   The pointer is stored in the frame at syms[sym].offset. *)
+begin
+  EmitFramePtr(syms[sym].level);
+  EmitI32Const(syms[sym].offset);
+  EmitOp(OpI32Add);
+  EmitI32Load(2, 0);
+end;
+
 { ---- Write/Writeln code generation ---- }
 
 procedure EmitWriteStringFd(fd, addr, len: longint);
@@ -2340,6 +2376,18 @@ begin
     DataBufEmit(secData, 0); DataBufEmit(secData, 0);
     DataBufEmit(secData, 0); DataBufEmit(secData, 0);
   end;
+end;
+
+function EnsureForLimit(depth: longint): longint;
+{** Allocate a 4-byte for-limit scratch at the given nesting depth.
+  Returns its data segment address. }
+begin
+  if addrForLimit[depth] < 0 then begin
+    addrForLimit[depth] := AllocDataAligned(4, 4);
+    DataBufEmit(secData, 0); DataBufEmit(secData, 0);
+    DataBufEmit(secData, 0); DataBufEmit(secData, 0);
+  end;
+  EnsureForLimit := addrForLimit[depth];
 end;
 
 function EnsureWriteInt: longint;
@@ -2984,9 +3032,8 @@ begin
           exprStrMax := syms[sym].strMax;
 
           if syms[sym].isVarParam then begin
-            { var/const param: local holds pointer }
-            EmitOp(OpLocalGet);
-            EmitULEB128(startCode, -(syms[sym].offset + 1));
+            { var/const param: pointer stored in frame }
+            EmitVarParamPtr(sym);
             hasAddr := true;
           end else if syms[sym].offset < 0 then begin
             { Value parameter (WASM local) }
@@ -3078,7 +3125,10 @@ begin
           if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
              and (exprType <> tyArray)
              and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then begin
-            EmitI32Load(2, 0);
+            if (exprType = tyChar) or (exprType = tyBoolean) then
+              EmitI32Load8u(0, 0)
+            else
+              EmitI32Load(2, 0);
           end;
           if (exprType = tySet) and (exprTypeIdx >= 0) then
             exprSetSize := types[exprTypeIdx].size
@@ -3142,8 +3192,7 @@ begin
                     Error('variable expected for var parameter');
                   if syms[argSym].isVarParam then begin
                     { Already a pointer — pass it through }
-                    EmitOp(OpLocalGet);
-                    EmitULEB128(startCode, -(syms[argSym].offset + 1));
+                    EmitVarParamPtr(argSym);
                   end
                   else if (syms[argSym].offset < 0) and
                      ((syms[argSym].typ = tyRecord) or (syms[argSym].typ = tyArray)
@@ -3893,7 +3942,17 @@ begin
           EmitWriteChar(fd);
         end else begin
           { Integer/boolean/enum expression }
-          EmitWriteInt;
+          if fd = 1 then
+            EmitWriteInt
+          else begin
+            { For stderr: convert to string via __int_to_str, then write string }
+            EnsureIntToStr;
+            EmitI32Const(addrIntBuf);
+            EmitCall(EnsureIntToStrHelper);
+            EmitI32Const(addrIntBuf);
+            curFuncNeedsStringTemp := true;
+            EmitInlineWriteStr(fd, curStringTempIdx);
+          end;
         end;
       end;
       if tokKind = tkComma then
@@ -3988,8 +4047,7 @@ begin
       if syms[sym].typ = tyString then begin
         { String variable: call __read_str(addr, max_len) }
         if syms[sym].isVarParam then begin
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitVarParamPtr(sym);
         end else begin
           EmitFramePtr(syms[sym].level);
           EmitI32Const(syms[sym].offset);
@@ -4020,21 +4078,21 @@ begin
         EmitI32Load8u(0, 0);
         { Store to variable }
         if syms[sym].isVarParam then begin
-          { var param: store byte through pointer }
+          { var param: store through pointer as i32 (char uses 4-byte slots) }
           curFuncNeedsStringTemp := true;
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, curStringTempIdx);
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitVarParamPtr(sym);
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, curStringTempIdx);
-          EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          EmitI32Store(2, 0);
         end else if syms[sym].offset < 0 then begin
           { WASM local }
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
         end else begin
-          { Stack frame variable: push address, swap, store byte }
+          { Stack frame variable: push address, swap, store as i32
+            (char occupies 4 bytes in frame — must zero upper bytes) }
           curFuncNeedsStringTemp := true;
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, curStringTempIdx);
@@ -4043,16 +4101,12 @@ begin
           EmitOp(OpI32Add);
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, curStringTempIdx);
-          EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          EmitI32Store(2, 0);
         end;
       end
       else if syms[sym].isVarParam then begin
         { var param: push pointer, call __read_int, i32.store }
-        { ;; WAT: local.get <param>   ;; pointer to target }
-        { ;;      call $__read_int    ;; parsed value }
-        { ;;      i32.store           ;; store through pointer }
-        EmitOp(OpLocalGet);
-        EmitULEB128(startCode, -(syms[sym].offset + 1));
+        EmitVarParamPtr(sym);
         EmitCall(ridx);
         EmitI32Store(2, 0);
       end
@@ -4458,6 +4512,7 @@ var
   tmpOfs: longint;
   savedBreak: longint;
   savedContinue: longint;
+  limitAddr: longint;
   concatSPAllocs: longint;
 begin
   concatSPAllocs := 0;
@@ -4489,8 +4544,7 @@ begin
           Error('delete() first argument must be a string variable');
         { Push string address }
         if syms[sym].isVarParam then begin
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitVarParamPtr(sym);
         end else begin
           EmitFramePtr(syms[sym].level);
           EmitI32Const(syms[sym].offset);
@@ -4525,8 +4579,7 @@ begin
           Error('insert() second argument must be a string variable');
         { Push dst string address }
         if syms[sym].isVarParam then begin
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitVarParamPtr(sym);
         end else begin
           EmitFramePtr(syms[sym].level);
           EmitI32Const(syms[sym].offset);
@@ -4556,11 +4609,9 @@ begin
           Error(name + '() requires ordinal type');
         NextToken;
         if syms[sym].isVarParam then begin
-          (* var param: local holds pointer, read-modify-write through memory *)
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          (* var param: pointer in frame, read-modify-write through memory *)
+          EmitVarParamPtr(sym);
+          EmitVarParamPtr(sym);
           EmitI32Load(2, 0);
           if tokKind = tkComma then begin
             NextToken;
@@ -4632,8 +4683,7 @@ begin
           Error('cannot modify const parameter');
         { Push dest address }
         if syms[sym].isVarParam then begin
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitVarParamPtr(sym);
         end else if syms[sym].offset < 0 then begin
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
@@ -4787,8 +4837,7 @@ begin
         if (tokKind = tkDot) or (tokKind = tkLBrack) then begin
           { Need to compute base address for selector chain }
           if syms[sym].isVarParam then begin
-            EmitOp(OpLocalGet);
-            EmitULEB128(startCode, -(syms[sym].offset + 1));
+            EmitVarParamPtr(sym);
           end else if syms[sym].offset < 0 then begin
             EmitOp(OpLocalGet);
             EmitULEB128(startCode, -(syms[sym].offset + 1));
@@ -4882,8 +4931,7 @@ begin
             EmitCall(EnsureStrAppend);
             { Assign temp to destination: __str_assign(dst, max, src) }
             if syms[sym].isVarParam and not desHasAddr then begin
-              EmitOp(OpLocalGet);
-              EmitULEB128(startCode, -(syms[sym].offset + 1));
+              EmitVarParamPtr(sym);
             end else if not desHasAddr then begin
               EmitFramePtr(syms[sym].level);
               EmitI32Const(syms[sym].offset);
@@ -4904,8 +4952,7 @@ begin
                 this path won't be hit (desHasAddr=true only with selectors). }
             end;
             if syms[sym].isVarParam and not desHasAddr then begin
-              EmitOp(OpLocalGet);
-              EmitULEB128(startCode, -(syms[sym].offset + 1));
+              EmitVarParamPtr(sym);
             end else if not desHasAddr then begin
               EmitFramePtr(syms[sym].level);
               EmitI32Const(syms[sym].offset);
@@ -4923,8 +4970,7 @@ begin
           if not desHasAddr then begin
             { Compute dst address }
             if syms[sym].isVarParam then begin
-              EmitOp(OpLocalGet);
-              EmitULEB128(startCode, -(syms[sym].offset + 1));
+              EmitVarParamPtr(sym);
             end else if syms[sym].offset < 0 then begin
               EmitOp(OpLocalGet);
               EmitULEB128(startCode, -(syms[sym].offset + 1));
@@ -4955,8 +5001,7 @@ begin
           EmitI32Store(2, 0);
         end
         else if syms[sym].isVarParam then begin
-          EmitOp(OpLocalGet);
-          EmitULEB128(startCode, -(syms[sym].offset + 1));
+          EmitVarParamPtr(sym);
           ParseExpression(PrecNone);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
@@ -5050,8 +5095,7 @@ begin
                   Error('variable expected for var parameter');
                 if syms[argSym].isVarParam then begin
                   { Already a pointer — pass it through }
-                  EmitOp(OpLocalGet);
-                  EmitULEB128(startCode, -(syms[argSym].offset + 1));
+                  EmitVarParamPtr(argSym);
                 end
                 else if (syms[argSym].offset < 0) and
                    ((syms[argSym].typ = tyRecord) or (syms[argSym].typ = tyArray)
@@ -5238,15 +5282,11 @@ begin
 
       if tokKind = tkTo then begin
         NextToken;
-        { Parse limit - we need to store it somewhere. Use data segment scratch. }
-        { For simplicity, use a data segment location }
-        { Actually, the limit is evaluated once. We'll use the stack frame. }
-        { For now: emit limit to a scratch location in data segment }
-        { TODO: proper local variable for limit }
-
-        { Simple approach: evaluate limit, store to intbuf temp area }
-        EnsureIntToStr; { ensures addrIntBuf is allocated }
-        EmitI32Const(addrIntBuf);
+        { Each nesting level gets its own limit scratch address }
+        if forLimitDepth > 15 then
+          Error('for loops nested too deeply');
+        limitAddr := EnsureForLimit(forLimitDepth);
+        EmitI32Const(limitAddr);
         ParseExpression(PrecNone);
         EmitI32Store(2, 0);
 
@@ -5272,7 +5312,7 @@ begin
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
-        EmitI32Const(addrIntBuf);
+        EmitI32Const(limitAddr);
         EmitI32Load(2, 0);
         EmitOp(OpI32GtS);
         EmitOp(OpBrIf);
@@ -5282,7 +5322,9 @@ begin
         savedBreak := breakDepth; savedContinue := continueDepth;
         breakDepth := 1; continueDepth := 0;
         if exitDepth >= 0 then exitDepth := exitDepth + 2;
+        forLimitDepth := forLimitDepth + 1;
         ParseStatement;
+        forLimitDepth := forLimitDepth - 1;
         if exitDepth >= 0 then exitDepth := exitDepth - 2;
         breakDepth := savedBreak; continueDepth := savedContinue;
 
@@ -5305,8 +5347,10 @@ begin
       end else begin
         { downto }
         NextToken;
-        EnsureIntToStr;
-        EmitI32Const(addrIntBuf);
+        if forLimitDepth > 15 then
+          Error('for loops nested too deeply');
+        limitAddr := EnsureForLimit(forLimitDepth);
+        EmitI32Const(limitAddr);
         ParseExpression(PrecNone);
         EmitI32Store(2, 0);
         Expect(tkDo);
@@ -5321,7 +5365,7 @@ begin
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
-        EmitI32Const(addrIntBuf);
+        EmitI32Const(limitAddr);
         EmitI32Load(2, 0);
         EmitOp(OpI32LtS);
         EmitOp(OpBrIf);
@@ -5330,7 +5374,9 @@ begin
         savedBreak := breakDepth; savedContinue := continueDepth;
         breakDepth := 1; continueDepth := 0;
         if exitDepth >= 0 then exitDepth := exitDepth + 2;
+        forLimitDepth := forLimitDepth + 1;
         ParseStatement;
+        forLimitDepth := forLimitDepth - 1;
         if exitDepth >= 0 then exitDepth := exitDepth - 2;
         breakDepth := savedBreak; continueDepth := savedContinue;
 
@@ -5550,7 +5596,6 @@ var
   procSym: longint;
   slot: longint;
   savedFrameSize: longint;
-  savedStartCode: TCodeBuf;
   bodyStart: longint;
   funcIdx: longint;
   retTyp: longint;
@@ -5586,6 +5631,18 @@ var
   savedExitDepth: longint;
   savedBreakDepth: longint;
   savedContinueDepth: longint;
+  savedNumVarParamSpills: longint;
+  savedVarParamSpillLocal: array[0..15] of longint;
+  savedVarParamSpillFrameOff: array[0..15] of longint;
+  savedNumStructCopies: longint;
+  savedStructCopyLocal: array[0..15] of longint;
+  savedStructCopyFrameOff: array[0..15] of longint;
+  savedStructCopySize: array[0..15] of longint;
+  savedNumVarInits: longint;
+  savedVarInitOffset: array[0..15] of longint;
+  savedVarInitVal: array[0..15] of longint;
+  savedVarInitIsStr: array[0..15] of boolean;
+  savedVarInitStrMax: array[0..15] of longint;
 begin
   isFunc := tokKind = tkFunction;
   NextToken; { consume 'procedure' or 'function' }
@@ -5826,6 +5883,10 @@ begin
     funcs[numFuncs].bodyLen := 0;
     funcs[numFuncs].nlocals := 0;
     funcs[numFuncs].nparams := np;
+    for i := 0 to np - 1 do begin
+      funcs[numFuncs].varParams[i] := paramIsVar[i];
+      funcs[numFuncs].constParams[i] := paramIsConst[i];
+    end;
     numFuncs := numFuncs + 1;
 
     { Add symbol }
@@ -5839,7 +5900,10 @@ begin
   end;
 
   { Save and reset code emission state }
-  savedStartCode := startCode;
+  if savedCodeStackTop > 7 then
+    Error('procedure nesting too deep for code buffer stack');
+  savedCodeStack[savedCodeStackTop] := startCode;
+  savedCodeStackTop := savedCodeStackTop + 1;
   CodeBufInit(startCode);
   savedFrameSize := curFrameSize;
   curFrameSize := 0;
@@ -5880,26 +5944,56 @@ begin
   { Enter scope for procedure body }
   EnterScope;
 
+  { Save prologue state that ParseBlock will consume (nested procs would clobber it) }
+  savedNumVarParamSpills := numVarParamSpills;
+  for i := 0 to numVarParamSpills - 1 do begin
+    savedVarParamSpillLocal[i] := varParamSpillLocal[i];
+    savedVarParamSpillFrameOff[i] := varParamSpillFrameOff[i];
+  end;
+  savedNumStructCopies := numStructCopies;
+  for i := 0 to numStructCopies - 1 do begin
+    savedStructCopyLocal[i] := structCopyLocal[i];
+    savedStructCopyFrameOff[i] := structCopyFrameOff[i];
+    savedStructCopySize[i] := structCopySize[i];
+  end;
+  savedNumVarInits := numVarInits;
+  for i := 0 to numVarInits - 1 do begin
+    savedVarInitOffset[i] := varInitOffset[i];
+    savedVarInitVal[i] := varInitVal[i];
+    savedVarInitIsStr[i] := varInitIsStr[i];
+    savedVarInitStrMax[i] := varInitStrMax[i];
+  end;
+
   { Add parameters as locals (WASM params are local 0..np-1) }
   nparams := np;
   numStructCopies := 0;
+  numVarParamSpills := 0;
   numVarInits := 0;
   for i := 0 to np - 1 do begin
     sym := AddSym(paramNames[i], skVar, paramTypes[i]);
-    { Parameters are WASM locals, not stack frame vars.
-      Use negative offset as a flag: -(local_index + 1) }
-    syms[sym].offset := -(i + 1);
     syms[sym].size := 4;
     syms[sym].isVarParam := paramIsVar[i];
     syms[sym].isConstParam := paramIsConst[i];
     syms[sym].typeIdx := paramTypeIdx[i];
     if paramTypes[i] = tyString then
       syms[sym].strMax := 255; { default max length for string params }
+    if paramIsVar[i] or paramIsConst[i] then begin
+      { Var/const params: spill pointer to frame for nested proc access }
+      curFrameSize := (curFrameSize + 3) and (not 3);
+      varParamSpillLocal[numVarParamSpills] := i;
+      varParamSpillFrameOff[numVarParamSpills] := curFrameSize;
+      syms[sym].offset := curFrameSize;  { positive = frame-based }
+      numVarParamSpills := numVarParamSpills + 1;
+      curFrameSize := curFrameSize + 4;
+    end else begin
+      { Value params: WASM locals, negative offset as flag: -(local_index + 1) }
+      syms[sym].offset := -(i + 1);
+    end;
     { Structured value params: callee copies into frame }
     if ((paramTypes[i] = tyRecord) or (paramTypes[i] = tyArray))
        and not paramIsVar[i] and not paramIsConst[i] then begin
       { Pre-allocate frame space for the copy }
-      curFrameSize := (curFrameSize + 3) and (not 3); { align to 4 }
+      curFrameSize := (curFrameSize + 3) and (not 3);
       structCopyLocal[numStructCopies] := i;
       structCopyFrameOff[numStructCopies] := curFrameSize;
       structCopySize[numStructCopies] := paramSize[i];
@@ -5972,6 +6066,26 @@ begin
   curFuncIsFunction := savedFuncIsFunction;
   curFuncReturnIdx := savedFuncReturnIdx;
 
+  { Restore prologue state for enclosing procedure }
+  numVarParamSpills := savedNumVarParamSpills;
+  for i := 0 to savedNumVarParamSpills - 1 do begin
+    varParamSpillLocal[i] := savedVarParamSpillLocal[i];
+    varParamSpillFrameOff[i] := savedVarParamSpillFrameOff[i];
+  end;
+  numStructCopies := savedNumStructCopies;
+  for i := 0 to savedNumStructCopies - 1 do begin
+    structCopyLocal[i] := savedStructCopyLocal[i];
+    structCopyFrameOff[i] := savedStructCopyFrameOff[i];
+    structCopySize[i] := savedStructCopySize[i];
+  end;
+  numVarInits := savedNumVarInits;
+  for i := 0 to savedNumVarInits - 1 do begin
+    varInitOffset[i] := savedVarInitOffset[i];
+    varInitVal[i] := savedVarInitVal[i];
+    varInitIsStr[i] := savedVarInitIsStr[i];
+    varInitStrMax[i] := savedVarInitStrMax[i];
+  end;
+
   { Copy compiled body to funcBodies }
   bodyStart := funcBodies.len;
   for i := 0 to startCode.len - 1 do
@@ -5998,7 +6112,8 @@ begin
   end;
 
   { Restore code emission state }
-  startCode := savedStartCode;
+  savedCodeStackTop := savedCodeStackTop - 1;
+  startCode := savedCodeStack[savedCodeStackTop];
   curFrameSize := savedFrameSize;
 end;
 
@@ -6103,6 +6218,17 @@ begin
     EmitULEB128(startCode, structCopyLocal[ci]);
   end;
   numStructCopies := 0;
+
+  { Spill var/const param pointers to frame for nested proc access }
+  for ci := 0 to numVarParamSpills - 1 do begin
+    EmitFramePtr(curNestLevel);
+    EmitI32Const(varParamSpillFrameOff[ci]);
+    EmitOp(OpI32Add);
+    EmitOp(OpLocalGet);
+    EmitULEB128(startCode, varParamSpillLocal[ci]);
+    EmitI32Store(2, 0);
+  end;
+  numVarParamSpills := 0;
 
   { Emit deferred variable initializers }
   for ci := 0 to numVarInits - 1 do begin
@@ -9075,6 +9201,10 @@ begin
   breakDepth := -1;
   continueDepth := -1;
   exitDepth := -1;
+  forLimitDepth := 0;
+  savedCodeStackTop := 0;
+  for i := 0 to 15 do
+    addrForLimit[i] := -1;
   addrSetTemp := -1;
   needsSetTemp := false;
   addrSetTemp2 := -1;
