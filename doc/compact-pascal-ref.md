@@ -72,6 +72,8 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - `case ... of ... else ... end` — with optional `else` default branch.
 - `with ... do` — open a record's fields for unqualified access.
 - `begin ... end` compound statement.
+- `break` — exit the innermost enclosing loop.
+- `continue` — skip to the next iteration of the innermost enclosing loop.
 
 ### Declarations
 
@@ -1001,7 +1003,12 @@ Statement        = [ AssignOrCallStmt
                    | ForStmt
                    | RepeatStmt
                    | CaseStmt
-                   | WithStmt ] .
+                   | WithStmt
+                   | BreakStmt
+                   | ContinueStmt ] .
+
+BreakStmt        = 'break' .
+ContinueStmt     = 'continue' .
 
 AssignOrCallStmt = Designator [ ':=' Expression ] .
                  (* a bare Designator is a procedure call; includes method calls
@@ -1097,14 +1104,14 @@ CHARACTER        = (* any byte; UTF-8 sequences are preserved verbatim *) .
 ### Reserved Words
 
 ```
-and       array     begin     case      const
-div       do        downto    else      end
-external  for       forward   function  if
-implement in        interface mod       nil
-not       of        or        procedure program
-record    repeat    set       string    then
-to        type      until     var       while
-with
+and       array     begin     break     case
+const     continue  div       do        downto
+else      end       external  for       forward
+function  if        implement in        interface
+mod       nil       not       of        or
+procedure program   record    repeat    set
+string    then      to        type      until
+var       while     with
 ```
 
 The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.

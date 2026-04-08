@@ -37,7 +37,7 @@ include-before:
 
 ## Preface
 
-This book walks you through building a complete Pascal compiler from scratch. The compiler reads Compact Pascal source code and produces WebAssembly (WASM) binaries that run in browsers, on the command line, or embedded in applications. By the end, you will have a working, self-hosting compiler — one that can compile its own source code.
+This book walks you through building a Pascal compiler from scratch. The compiler reads Compact Pascal source code and produces WebAssembly (WASM) binaries that run in browsers, on the command line, or embedded in applications. By the end, you will have a working compiler that handles a substantial subset of the language — enough to understand every technique needed for the full implementation.
 
 The compiler is written in Pascal itself, which means you will learn the language by implementing it. Every design decision — from the lexer's character handling to the stack frame layout — is explained as it arises. No prior compiler experience is assumed, though familiarity with at least one programming language is expected.
 
@@ -66,7 +66,7 @@ Each chapter adds one major capability to the compiler. After every chapter, you
 | 9 | Structured types | Records, arrays, structured parameters |
 | 10 | Constants, enums, and case | `const`, enumerated types, `case` statement |
 
-The book's source code *is* the compiler. Each chapter's code builds on the previous chapter, and the final chapter produces the complete Phase 1 compiler.
+Each chapter's code builds on the previous chapter. The tutorial covers the core techniques — scanning, Pratt parsing, WASM code generation, stack frame layout, nested scopes, strings, structured types, and compile-time evaluation — that the full compiler uses throughout. Features not covered in the tutorial (sets, `with`, `break`/`continue`, `shl`/`shr`, `str`, `eof`, range and overflow checks, extended literals, and variable initializers) apply the same patterns and are straightforward to add. The complete compiler source is available in the repository.
 
 ### Prerequisites
 
@@ -1220,6 +1220,36 @@ EmitOp(OpEnd);
 No outer `block` is needed because the only branch is the backward `br_if` to the loop. When the condition becomes true, execution falls through the `end` naturally.
 
 Notice that `repeat`/`until` allows multiple semicolon-separated statements between `repeat` and `until`, unlike `while` which takes a single statement (use `begin`/`end` for multiple statements).
+
+### `break` and `continue`
+
+`break` exits the innermost loop. `continue` skips to the next iteration. Both compile to a single WASM `br` instruction targeting the appropriate enclosing construct.
+
+::: aside
+Turbo Pascal 7.0 (1992) introduced `break` and `continue`. Neither appears in ISO 7185 or ISO 10206 (Extended Pascal) — they are a Borland extension that Delphi and Free Pascal carried forward.
+:::
+
+The compiler tracks two values: `breakDepth` and `continueDepth`. These record the `br` label index needed to reach the exit block and the loop header, respectively. Outside any loop, both are -1 (and the compiler reports an error if `break` or `continue` is used). When entering a loop, the compiler saves the old depths, sets them for the new loop's block/loop structure, and restores the old values on exit.
+
+For a `while` loop with its `block`/`loop` pair, `break` needs `br breakDepth` (targeting the outer block, which jumps forward past the loop) and `continue` needs `br continueDepth` (targeting the inner loop, which jumps backward to the loop header). When loops are nested inside other WASM blocks (like `if`/`else` or outer loops), the depths increment to account for the additional nesting.
+
+```pascal
+tkBreak: begin
+  NextToken;
+  if breakDepth < 0 then
+    Error('break outside of loop');
+  EmitOp(OpBr);
+  EmitULEB128(startCode, breakDepth);
+end;
+
+tkContinue: begin
+  NextToken;
+  if continueDepth < 0 then
+    Error('continue outside of loop');
+  EmitOp(OpBr);
+  EmitULEB128(startCode, continueDepth);
+end;
+```
 
 ### Compound Statements
 
@@ -3060,7 +3090,7 @@ The compiler reads Pascal from stdin and writes a complete WASM binary to stdout
 
 ## Afterword: Where to Go from Here
 
-The compiler you have built handles a substantial subset of Pascal and produces real WASM binaries. But the language was deliberately kept small to fit in a teachable, single-pass compiler. This afterword sketches several directions for extending the compiler — each one a project in its own right.
+The compiler you have built handles a substantial subset of Pascal and produces real WASM binaries. The full compiler in the repository adds several more features — sets, `with`, `break`/`continue`, `shl`/`shr`, `str`, `eof`, range and overflow checks, extended numeric literals, and variable initializers — all using the same techniques covered in this tutorial. But even the full Phase 1 language was deliberately kept small to fit in a single-pass compiler. This afterword sketches several directions for extending the compiler — each one a project in its own right.
 
 ### Exceptions
 

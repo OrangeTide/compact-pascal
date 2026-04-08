@@ -103,7 +103,7 @@ The system has three layers:
 
 ### Core Language
 
-The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records (including variant records), set types, and pointers; standard control flow (including `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Floating point (`real`) and dynamic allocation (`New`/`Dispose`) are planned for later phases. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
+The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records (including variant records), set types, and pointers; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Floating point (`real`) and dynamic allocation (`New`/`Dispose`) are planned for later phases. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
 
 Source files are UTF-8. The compiler's lexer only acts on ASCII-range bytes (0x00–0x7F); bytes 0x80–0xFF pass through verbatim in string literals and comments. `char` is a byte, not a Unicode codepoint, and `length` returns the byte count — the same model as C and Go's `[]byte`. Legacy source files in CP437 (the code page used by DOS-era Pascal systems) or other encodings must be converted to UTF-8 before compilation using standard tools (`iconv`, `encoding_rs`, etc.).
 
@@ -518,7 +518,12 @@ Statement        = [ AssignOrCallStmt
                    | ForStmt
                    | RepeatStmt
                    | CaseStmt
-                   | WithStmt ] .
+                   | WithStmt
+                   | BreakStmt
+                   | ContinueStmt ] .
+
+BreakStmt        = 'break' .
+ContinueStmt     = 'continue' .
 
 AssignOrCallStmt = Designator [ ':=' Expression ] .
                  (* a bare Designator is a procedure call; includes method calls
@@ -614,14 +619,14 @@ CHARACTER        = (* any byte; UTF-8 sequences are preserved verbatim *) .
 ### Reserved Words
 
 ```
-and       array     begin     case      const
-div       do        downto    else      end
-external  for       forward   function  if
-implement in        interface mod       nil
-not       of        or        procedure program
-record    repeat    set       string    then
-to        type      until     var       while
-with
+and       array     begin     break     case
+const     continue  div       do        downto
+else      end       external  for       forward
+function  if        implement in        interface
+mod       nil       not       of        or
+procedure program   record    repeat    set
+string    then      to        type      until
+var       while     with
 ```
 
 The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.
