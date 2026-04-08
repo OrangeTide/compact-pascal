@@ -961,13 +961,16 @@ EmitI32Const(syms[sym].offset);
 EmitOp(OpI32Add);
 { Evaluate expression — leaves value on stack }
 ParseExpression(PrecNone);
-{ Store }
-EmitI32Store(2, 0);  { ;; WAT: i32.store align=4 offset=0 }
+{ Store — width depends on type }
+if (syms[sym].typ = tyChar) or (syms[sym].typ = tyBoolean) then
+  EmitI32Store8(0, 0)    { ;; i32.store8 — 1 byte }
+else
+  EmitI32Store(2, 0);    { ;; i32.store align=4 — 4 bytes }
 ```
 
 The WASM `i32.store` instruction pops two values: the address and the value to store, in that order. The address must be computed *before* the expression, which is why the compiler emits the address calculation first.
 
-All scalar types — `integer`, `char`, `boolean` — use `i32.store` (4 bytes) for writes. Even though `char` and `boolean` are logically 1-byte types, each variable occupies a full 4-byte frame slot. The distinction matters on *reads*, where `char` and `boolean` must use `i32.load8_u` (see below).
+`integer` variables use `i32.store` (4 bytes). `char` and `boolean` variables in the stack frame use `i32.store8` (1 byte). Each frame slot is still padded to 4 bytes for alignment simplicity, but only the low byte is meaningful. This matches the 8-bit access pattern already used for string character data (`s[i]`) and is required for `array of char` and `array of boolean`, where elements are packed at 1 byte each. Note that when a `char` or `boolean` lives in a WASM local (value parameters, function return values), it is inherently `i32` — WASM has no 8-bit local type — and is accessed with `local.get`/`local.set` without any width concern.
 
 ### Loading Variables in Expressions
 
@@ -1396,18 +1399,21 @@ else
   EmitI32Load(2, 0);                { 4-byte load }
 ```
 
-When writing to a `var` parameter, the callee stores through the pointer. Use a full `i32.store` even for `char` and `boolean` types, because the target variable occupies a 4-byte frame slot:
+When writing to a `var` parameter, the callee stores through the pointer:
 
 ```pascal
 EmitOp(OpLocalGet);
 EmitULEB128(startCode, localIdx);    { get the pointer }
 ParseExpression(PrecNone);           { value to store }
-EmitI32Store(2, 0);                  { store through pointer }
+if (syms[sym].typ = tyChar) or (syms[sym].typ = tyBoolean) then
+  EmitI32Store8(0, 0)                { 1-byte store }
+else
+  EmitI32Store(2, 0);                { 4-byte store }
 ```
 
 This is the classic pass-by-reference implementation: the caller and callee share the same memory location.
 
-> **Watch Out:** The load width must match the type, not the frame slot size. A `var ch: char` parameter's pointer dereference must use `i32.load8_u` (1 byte, zero-extended) for reads but `i32.store` (4 bytes) for writes. Using `i32.load` to read a char would pull in adjacent memory bytes. Using `i32.store8` to write would leave the upper 3 bytes of the slot as garbage — which causes corruption when the value is later loaded with `i32.load` by code that does not know the type.
+> **Watch Out:** Both load and store width must match the type. `char` and `boolean` use `i32.load8_u`/`i32.store8` (1 byte); `integer` uses `i32.load`/`i32.store` (4 bytes). Using `i32.load` on a char pulls in 3 adjacent bytes, producing values far outside 0..255. This is the same 8-bit access pattern used for string characters and `array of char` elements — keep it consistent.
 
 #### `const` Parameters
 
