@@ -1894,6 +1894,23 @@ begin
   EmitULEB128(startCode, offset);
 end;
 
+procedure EmitI32Store8(offset: longint);
+begin
+  CodeBufEmit(startCode, OpI32Store8);
+  EmitULEB128(startCode, 0);
+  EmitULEB128(startCode, offset);
+end;
+
+{ Emit a store appropriate for the given type: i32.store8 for char/boolean,
+  i32.store for integer and other 4-byte types }
+procedure EmitStoreByType(typ: longint);
+begin
+  if (typ = tyChar) or (typ = tyBoolean) then
+    EmitI32Store8(0)
+  else
+    EmitI32Store(2, 0);
+end;
+
 { Emit memory.copy (dst, src, len already on stack) }
 procedure EmitMemoryCopy;
 begin
@@ -4078,21 +4095,20 @@ begin
         EmitI32Load8u(0, 0);
         { Store to variable }
         if syms[sym].isVarParam then begin
-          { var param: store through pointer as i32 (char uses 4-byte slots) }
+          { var param: store byte through pointer }
           curFuncNeedsStringTemp := true;
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, curStringTempIdx);
           EmitVarParamPtr(sym);
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, curStringTempIdx);
-          EmitI32Store(2, 0);
+          EmitI32Store8(0);
         end else if syms[sym].offset < 0 then begin
           { WASM local }
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, -(syms[sym].offset + 1));
         end else begin
-          { Stack frame variable: push address, swap, store as i32
-            (char occupies 4 bytes in frame — must zero upper bytes) }
+          { Stack frame variable: store byte at frame offset }
           curFuncNeedsStringTemp := true;
           EmitOp(OpLocalSet);
           EmitULEB128(startCode, curStringTempIdx);
@@ -4101,7 +4117,7 @@ begin
           EmitOp(OpI32Add);
           EmitOp(OpLocalGet);
           EmitULEB128(startCode, curStringTempIdx);
-          EmitI32Store(2, 0);
+          EmitI32Store8(0);
         end;
       end
       else if syms[sym].isVarParam then begin
@@ -4819,7 +4835,7 @@ begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
           end;
-          EmitI32Store(2, 0);
+          EmitStoreByType(desTyp);
         end;
       end
       else if (sym >= 0) and (syms[sym].kind = skVar) and
@@ -4998,7 +5014,7 @@ begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
           end;
-          EmitI32Store(2, 0);
+          EmitStoreByType(desTyp);
         end
         else if syms[sym].isVarParam then begin
           EmitVarParamPtr(sym);
@@ -5007,7 +5023,7 @@ begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
           end;
-          EmitI32Store(2, 0);
+          EmitStoreByType(desTyp);
         end
         else if syms[sym].offset < 0 then begin
           { WASM local (value parameter or function return value) }
@@ -5028,7 +5044,7 @@ begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
           end;
-          EmitI32Store(2, 0);
+          EmitStoreByType(desTyp);
         end;
       end
       else if (sym >= 0) and (syms[sym].kind = skFunc) and (tokKind = tkAssign) then begin
