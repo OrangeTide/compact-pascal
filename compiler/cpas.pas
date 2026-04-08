@@ -15,9 +15,10 @@ program cpas;
 { ---- Constants ---- }
 
 const
-  Version = '0.1';
-  VersionMajor = 0;
-  VersionMinor = 1;
+  Version = '26.04.0';
+  VersionYear = 26;
+  VersionMonth = 4;
+  VersionPatch = 0;
 
   { Section buffer sizes }
   SmallBufMax = 4095;    { 4 KB for small sections }
@@ -6488,11 +6489,11 @@ begin
     SmallBufEmit(secGlobal, 0);        { init to 0 }
     SmallBufEmit(secGlobal, OpEnd);
   end;
-  { Global 9: __version (immutable, major*256 + minor) }
+  { Global 9: __version (immutable, YY*65536 + MM*256 + patch) }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
   SmallBufEmit(secGlobal, 0);        { immutable }
   SmallBufEmit(secGlobal, OpI32Const);
-  SmallEmitSLEB128(secGlobal, VersionMajor * 256 + VersionMinor);
+  SmallEmitSLEB128(secGlobal, VersionYear * 65536 + VersionMonth * 256 + VersionPatch);
   SmallBufEmit(secGlobal, OpEnd);
 end;
 

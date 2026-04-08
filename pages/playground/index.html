@@ -1494,7 +1494,10 @@ function initCompiler() {
           var ver = probe.exports.__version;
           if (ver !== undefined) {
             var v = (typeof ver.value === 'number') ? ver.value : ver;
-            verStr = ' ' + ((v >> 8) & 0xff) + '.' + (v & 0xff);
+            var yy = (v >> 16) & 0xff;
+            var mm = (v >> 8) & 0xff;
+            var patch = v & 0xff;
+            verStr = ' ' + yy + '.' + (mm < 10 ? '0' : '') + mm + '.' + patch;
           }
         } catch (e) { /* no version export */ }
         setStatus('Compiler ready');
