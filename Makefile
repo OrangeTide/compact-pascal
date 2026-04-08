@@ -76,7 +76,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 # ── Top-level targets ────────────────────────────────────────────
 
 .PHONY: help all all-c all-zig all-rust pdf html clean clean-c clean-zig clean-rust
-.PHONY: bootstrap test deploy-playground
+.PHONY: bootstrap test deploy-playground bump-version
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -89,9 +89,11 @@ help:
 	@echo "  html         Generate HTML documentation"
 	@echo "  clean        Remove build artifacts"
 	@echo ""
-	@echo "  bootstrap        Rebuild snapshot/compiler.wasm from source (requires fpc)"
-	@echo "  test             Run compiler test suite (requires fpc + WASM runtime)"
-	@echo "  deploy-playground  Copy compiler.wasm into pages/playground/"
+	@echo "  bootstrap            Rebuild snapshot/compiler.wasm from source (requires fpc)"
+	@echo "  test                 Run compiler test suite (requires fpc + WASM runtime)"
+	@echo "  deploy-playground    Copy compiler.wasm into pages/playground/"
+	@echo "  bump-version VERSION=YY.MM.PATCH"
+	@echo "                       Update version in compiler and docs, commit"
 
 all: all-c all-zig all-rust
 
@@ -220,6 +222,32 @@ deploy-playground: $(SNAPSHOT)
 		pages/playground/files.json > pages/playground/files.json.tmp
 	mv pages/playground/files.json.tmp pages/playground/files.json
 	@echo "pages/playground/: updated"
+
+# ── Version ──────────────────────────────────────────────────────
+#
+# Usage:  make bump-version VERSION=26.04.1
+# Updates compiler constants and doc CalVer, stages files, and
+# opens git commit with a template message.
+
+bump-version:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make bump-version VERSION=YY.MM.PATCH"; exit 1; fi
+	@YY=$$(echo "$(VERSION)" | cut -d. -f1) && \
+	 MM=$$(echo "$(VERSION)" | cut -d. -f2) && \
+	 PATCH=$$(echo "$(VERSION)" | cut -d. -f3) && \
+	 if [ -z "$$YY" ] || [ -z "$$MM" ] || [ -z "$$PATCH" ]; then \
+	   echo "error: VERSION must be YY.MM.PATCH (e.g., 26.04.0)"; exit 1; \
+	 fi && \
+	 sed -i \
+	   -e "s/Version = '.*'/Version = '$(VERSION)'/" \
+	   -e "s/VersionYear = .*/VersionYear = $$YY;/" \
+	   -e "s/VersionMonth = .*/VersionMonth = $$MM;/" \
+	   -e "s/VersionPatch = .*/VersionPatch = $$PATCH;/" \
+	   $(CPAS_SRC) && \
+	 sed -i \
+	   -e "s/\*\*Version [0-9][0-9]\.[0-9][0-9]*\.[0-9][0-9]*\*\*/**Version $(VERSION)**/" \
+	   doc/compact-pascal-ref.md && \
+	 git add $(CPAS_SRC) doc/compact-pascal-ref.md && \
+	 git commit -e -m "Bump version to $(VERSION)"
 
 # ── Cleanup ──────────────────────────────────────────────────────
 
