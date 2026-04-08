@@ -16,6 +16,8 @@ program cpas;
 
 const
   Version = '0.1';
+  VersionMajor = 0;
+  VersionMinor = 1;
 
   { Section buffer sizes }
   SmallBufMax = 4095;    { 4 KB for small sections }
@@ -6470,7 +6472,7 @@ var
   i: longint;
 begin
   SmallBufInit(secGlobal);
-  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth); { $sp + 8 display globals }
+  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth + 1); { $sp + 8 display + __version }
   { Global 0: $sp (stack pointer) }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
   SmallBufEmit(secGlobal, 1);        { mutable }
@@ -6486,6 +6488,12 @@ begin
     SmallBufEmit(secGlobal, 0);        { init to 0 }
     SmallBufEmit(secGlobal, OpEnd);
   end;
+  { Global 9: __version (immutable, major*256 + minor) }
+  SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
+  SmallBufEmit(secGlobal, 0);        { immutable }
+  SmallBufEmit(secGlobal, OpI32Const);
+  SmallEmitSLEB128(secGlobal, VersionMajor * 256 + VersionMinor);
+  SmallBufEmit(secGlobal, OpEnd);
 end;
 
 procedure AssembleExportSection;
@@ -6493,7 +6501,7 @@ var
   i, j: longint;
 begin
   SmallBufInit(secExport);
-  SmallEmitULEB128(secExport, 2 + numUserExports); { _start + memory + user exports }
+  SmallEmitULEB128(secExport, 3 + numUserExports); { _start + memory + __version + user exports }
   { Export "_start" }
   SmallBufEmit(secExport, 6);  { name length }
   SmallBufEmit(secExport, ord('_'));
@@ -6514,6 +6522,19 @@ begin
   SmallBufEmit(secExport, ord('y'));
   SmallBufEmit(secExport, ExportMem);
   SmallBufEmit(secExport, 0);  { memory index 0 }
+  { Export "__version" — global index 9 (after $sp + 8 display) }
+  SmallBufEmit(secExport, 9);  { name length }
+  SmallBufEmit(secExport, ord('_'));
+  SmallBufEmit(secExport, ord('_'));
+  SmallBufEmit(secExport, ord('v'));
+  SmallBufEmit(secExport, ord('e'));
+  SmallBufEmit(secExport, ord('r'));
+  SmallBufEmit(secExport, ord('s'));
+  SmallBufEmit(secExport, ord('i'));
+  SmallBufEmit(secExport, ord('o'));
+  SmallBufEmit(secExport, ord('n'));
+  SmallBufEmit(secExport, ExportGlobal);
+  SmallBufEmit(secExport, 1 + 8);  { global index 9 }
   (* User-defined exports from EXPORT directives *)
   for i := 0 to numUserExports - 1 do begin
     SmallEmitULEB128(secExport, length(userExports[i].name));

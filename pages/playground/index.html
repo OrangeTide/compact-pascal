@@ -1472,7 +1472,17 @@ function initCompiler() {
           }
         };
         compilerReady = true;
+        var verStr = '';
+        try {
+          var probe = new WebAssembly.Instance(mod, wasmImports);
+          var ver = probe.exports.__version;
+          if (ver !== undefined) {
+            var v = (typeof ver.value === 'number') ? ver.value : ver;
+            verStr = ' ' + ((v >> 8) & 0xff) + '.' + (v & 0xff);
+          }
+        } catch (e) { /* no version export */ }
         setStatus('Compiler ready');
+        appendOutput('<span class="out-info">Compact Pascal' + verStr + '</span>\n');
       });
     })
     .catch(function(err) {
