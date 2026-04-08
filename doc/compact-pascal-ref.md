@@ -1127,9 +1127,10 @@ The language is **case-insensitive** — reserved words and identifiers are matc
 ### Comments and Compiler Directives
 
 ```ebnf
-Comment          = '{' { CHARACTER } '}'
-                 | '(*' { CHARACTER } '*)'
+Comment          = '{' Commentary '}'
+                 | '(*' Commentary '*)'
                  | '//' { CHARACTER } EOL .
+Commentary       = { CHARACTER - '}' - '*)' } .
 
 Directive        = '{' '$' DirectiveName [ DirectiveValue ] '}'
                  | '(*' '$' DirectiveName [ DirectiveValue ] '*)' .
@@ -1139,7 +1140,7 @@ DirectiveValue   = SwitchValue | Identifier | INTEGER_LITERAL | STRING_LITERAL .
 SwitchValue      = '+' | '-' .
 ```
 
-Comments do not nest. They may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line. A `$` immediately after the opening brace marks a compiler directive. Switch directives use `+`/`-` (e.g., `{$R+}`). See [Compiler Directives](#compiler-directives) for the full directive list.
+A comment begins with `{` or `(*` and ends at the first matching `}` or `*)`. The commentary within a brace or parenthesis-star comment must not contain the closing delimiter. Whether comments nest is undefined — an implementation may support nesting or may not. Programs that depend on nested comments are not portable. Comments may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line. A `$` immediately after the opening delimiter marks a compiler directive. Switch directives use `+`/`-` (e.g., `{$R+}`). See [Compiler Directives](#compiler-directives) for the full directive list.
 
 If the first byte of the source is `#`, the remainder of the first line is ignored. This permits Unix-style interpreter directives (e.g., `#!/usr/bin/env cpas`).
 

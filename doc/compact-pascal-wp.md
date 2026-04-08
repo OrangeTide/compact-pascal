@@ -640,9 +640,10 @@ Note: `self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-i
 ### Comments and Compiler Directives
 
 ```ebnf
-Comment          = '{' { CHARACTER } '}'
-                 | '(*' { CHARACTER } '*)'
+Comment          = '{' Commentary '}'
+                 | '(*' Commentary '*)'
                  | '//' { CHARACTER } EOL .
+Commentary       = { CHARACTER - '}' - '*)' } .
 
 Directive        = '{' '$' DirectiveName [ DirectiveValue ] '}'
                  | '(*' '$' DirectiveName [ DirectiveValue ] '*)' .
@@ -652,7 +653,7 @@ DirectiveValue   = SwitchValue | Identifier | INTEGER_LITERAL | STRING_LITERAL .
 SwitchValue      = '+' | '-' .
 ```
 
-Comments do not nest. They may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line.
+A comment begins with `{` or `(*` and ends at the first matching `}` or `*)`. Whether comments nest is undefined. Comments may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line.
 
 If the first byte of the source is `#`, the remainder of the first line is ignored. This permits Unix-style interpreter directives (e.g., `#!/usr/bin/env cpas`).
 
