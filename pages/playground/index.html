@@ -622,6 +622,8 @@
   <div class="tab-context-menu" id="tabContextMenu">
     <button onclick="doRenameTab()">Rename</button>
     <button onclick="doDuplicateTab()">Duplicate</button>
+    <button onclick="doSaveTab()">Save</button>
+    <button onclick="doDeleteTab()">Delete</button>
   </div>
 
   <!-- Content area: editor + output -->
@@ -1154,6 +1156,21 @@ function doDuplicateTab() {
   newTab(copyName, buf.content);
 }
 
+function doSaveTab() {
+  hideTabContextMenu();
+  doSave();
+}
+
+function doDeleteTab() {
+  hideTabContextMenu();
+  var id = contextMenuTabId || activeTab;
+  var buf = findBuffer(id);
+  if (!buf) return;
+  if (!confirm('Delete "' + buf.name + '" from browser storage?')) return;
+  closeTab(id);
+  doSave();
+}
+
 // --- Editor ---
 function onEditorInput() {
   updateGutter();
@@ -1636,12 +1653,14 @@ function setStatus(msg) {
   document.getElementById('statusLeft').textContent = msg;
 }
 
+// --- Auto-save on page unload ---
+window.addEventListener('beforeunload', function() {
+  doSave();
+});
+
 // --- Navigation guard ---
 function confirmLeave() {
-  var hasModified = buffers.some(function(b) { return isBufferModified(b); });
-  if (hasModified) {
-    return confirm('You have unsaved changes. Leave the playground?');
-  }
+  doSave();
   return true;
 }
 
