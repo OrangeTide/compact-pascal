@@ -20,7 +20,7 @@ This is a living document. The version number follows [Calendar Versioning](http
 
 Source files must be encoded in **UTF-8**. The compiler treats source as a sequence of bytes; only ASCII-range bytes (0x00–0x7F) are significant to the lexer. Bytes 0x80–0xFF may appear in string literals and comments and are preserved verbatim. The compiler does not validate, decode, or normalize UTF-8 sequences.
 
-This means `char` is a **byte**, not a Unicode codepoint. `length('café')` returns the byte length (6 in UTF-8, not 4), and `s[i]` indexes by byte. Programs that work with multi-byte characters must account for this, just as in C or Go's `[]byte`. Full Unicode-aware string operations are a library concern, not a language primitive.
+This means `char` is a **byte**, not a Unicode codepoint. `length('café')` returns the byte length (5 in UTF-8, not 4), and `s[i]` indexes by byte. Programs that work with multi-byte characters must account for this, just as in C or Go's `[]byte`. Full Unicode-aware string operations are a library concern, not a language primitive.
 
 Legacy Turbo Pascal source files encoded in CP437 or other 8-bit code pages must be converted to UTF-8 before compilation. This is a one-time conversion performed by standard tools or libraries (e.g., `iconv`, Rust's `encoding_rs` crate, or a simple 128-entry lookup table in Zig).
 
@@ -52,6 +52,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 ### Expressions
 
 - Arithmetic: `+`, `-`, `*`, `div`, `mod`.
+- Bitwise shift: `shl` (shift left), `shr` (shift right). Both operate on `integer` and `longint`. `x shl n` shifts `x` left by `n` bits; `x shr n` shifts right. They have the same precedence as `*`, `div`, and `mod`.
 - Comparison: `=`, `<>`, `<`, `>`, `<=`, `>=`.
 - Logical: `and`, `or`, `not`.
 - Short-circuit logical: `and then`, `or else` (as in ISO 10206).
@@ -95,6 +96,9 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - **TP-style short strings.** Strings use the Turbo Pascal length-byte representation, not ISO 7185 packed arrays of char. See [String Representation](#string-representation).
 - **Type casts.** Turbo Pascal-style type casts (`integer(ch)`) are supported.
 - **32-bit `integer`.** `integer` is 32-bit (WASM `i32`), unlike TP/BP where `integer` is 16-bit. Programs that do not overflow 16-bit values are unaffected.
+- **`break` and `continue`.** Turbo Pascal extensions not in ISO 7185. `break` exits the innermost loop; `continue` skips to its next iteration. See the [Statements](#statements) summary.
+- **`case` with `else` and silent fallthrough.** ISO 7185 treats an unmatched `case` selector as an error. Compact Pascal follows Turbo Pascal: the `else` clause handles unmatched values (extension), and if no branch matches and there is no `else` clause, execution silently continues after `end`. See [Case Statement](#case-statement).
+- **`shl` and `shr`.** Bitwise shift operators not in ISO 7185. They appear at the `MulOp` level (same precedence as `*`, `div`, `mod`). See [Expressions](#expressions) and the [Operator Precedence](#operator-precedence) table.
 
 ## Short-Circuit Evaluation
 
@@ -174,7 +178,7 @@ String literals are enclosed in single quotes. A literal single quote within a s
 'hello'           { 5 bytes }
 ''                { empty string, 0 bytes }
 'it''s'           { 4 bytes: i, t, ', s }
-'café'            { 6 bytes in UTF-8 }
+'café'            { 5 bytes in UTF-8 }
 ```
 
 String literals may contain any bytes, including UTF-8 multi-byte sequences, which are preserved verbatim. See [Source Encoding](#source-encoding).
@@ -211,7 +215,7 @@ A `#u` prefix followed by hexadecimal digits produces a `rune` value — a 32-bi
 #u00E9            { rune é }
 #u20AC            { rune € }
 #u1F600           { rune 😀 }
-'caf' + #u00E9    { string 'café' — rune encoded as UTF-8, 6 bytes }
+'caf' + #u00E9    { string 'café' — rune encoded as UTF-8, 5 bytes }
 ```
 
 Note that `#u` always uses hexadecimal (no `$` prefix needed). `#$41`, `#u41`, and `#u0041` all represent the same codepoint.
@@ -335,7 +339,7 @@ type
   end;
 ```
 
-The tag field (`Kind`) is a normal field accessible at runtime. All variant fields overlap in memory starting at the same offset. The record size is determined by the largest variant. With `{$R+}`, accessing a variant field checks the tag value.
+The tag field (`Kind`) is a normal field accessible at runtime. The tag field name is optional — `case TypeIdentifier of` is legal when you don't need to read the tag at runtime; omitting the name makes the variant anonymous and inaccessible as a field. All variant fields overlap in memory starting at the same offset. The record size is determined by the largest variant. With `{$R+}`, accessing a variant field checks the tag value.
 
 Variant records map directly to WASM linear memory — the variants simply share the same byte offsets. No special WASM support is required.
 
@@ -410,7 +414,7 @@ These functions and procedures are compiler intrinsics, always available without
 
 | Function | Signature | Description |
 |---|---|---|
-| `eof` | `→ boolean` | Returns `true` when the last `read` encountered end-of-file, `false` otherwise. Reads from standard input (fd 0). |
+| `eof` | `→ boolean` | Returns `true` when the last `read` encountered end-of-file, `false` otherwise. Reads from standard input (fd 0). This is a **post-read flag**: `eof` becomes `true` after a `read` hits EOF, not before. This differs from ISO 7185, where `eof` tests whether the *next* read would fail (lookahead). |
 
 ### Control Procedures
 
@@ -423,6 +427,12 @@ These functions and procedures are compiler intrinsics, always available without
 | `exit` | — | Exit the current procedure or function. |
 | `halt` | — | Terminate the program with exit code 0. Compiles to WASI `proc_exit(0)`. |
 | `halt(n)` | `integer` | Terminate the program with exit code `n`. Compiles to WASI `proc_exit(n)`. |
+
+### Memory Procedures
+
+| Procedure | Signature | Description |
+|---|---|---|
+| `fillchar(var x; count, value: integer)` | `var any × integer × integer` | Fill `count` bytes starting at `x` with the byte `value`. Used to zero-initialize records and arrays. |
 
 ### Memory Allocation (Phase 5)
 
@@ -479,7 +489,7 @@ read(input, args...); { explicit file handle — same as default }
 
 As with `write`/`writeln`, the first argument may optionally be a predefined file handle. In practice, `read`/`readln` only make sense with `input` (fd 0), which is already the default.
 
-**Phase 1 subset:** `read`/`readln` support integer and string arguments. Character and real parsing are deferred.
+**Phase 1 subset:** `read`/`readln` support integer and string arguments. Reading into a `char` variable (`read(ch)` where `ch: char`) and real parsing are deferred — `char` is not accepted as an argument type in Phase 1 even though `char` is otherwise available as a type alias for `byte`.
 
 ### Predefined File Handles
 
@@ -500,6 +510,8 @@ When a program uses `write`/`writeln`, `read`/`readln`, or `halt`, the compiler 
 | `fd_read` | `(fd: i32, iovs: i32, iovs_len: i32, nread: i32) → errno: i32` | Program uses `read`/`readln` |
 | `fd_write` | `(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) → errno: i32` | Program uses `write`/`writeln` |
 | `proc_exit` | `(code: i32) → noreturn` | Program uses `halt` |
+
+> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get` (to read its source file path from argv). These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
 
 Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The generated code always passes a single iovec (`iovs_len = 1`).
 
@@ -581,11 +593,38 @@ Local directives may appear anywhere in the source. They take effect from the po
 |---|---|---|---|
 | `{$RANGECHECKS ON/OFF}` | `{$R+/-}` | OFF | Emit runtime range checks for array indexing and subrange assignments. |
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
-| `{$ALIGN n}` | — | 1 | Record field alignment in bytes (1, 2, 4, or 8). |
+| `{$ALIGN n}` | — | 1 | Record field alignment in bytes (1, 2, 4, or 8). **Not yet implemented; deferred.** |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |
 | `{$IMPORT 'module' name}` | — | — | Declare the next procedure or function as a WASM import from `module` with import name `name`. |
 | `{$EXTLITERALS ON/OFF}` | — | OFF | Enable C-style numeric literal prefixes: `0x` (hex), `0o` (octal), `0b` (binary). |
+
+### Conditional Compilation
+
+| Directive | Description |
+|---|---|
+| `{$IFDEF symbol}` | Compile the following block only if `symbol` is defined. |
+| `{$IFNDEF symbol}` | Compile the following block only if `symbol` is **not** defined. |
+| `{$ELSE}` | Alternate block for the preceding `{$IFDEF}` or `{$IFNDEF}`. |
+| `{$ENDIF}` | End of a conditional block. |
+
+Symbol names are case-insensitive and may be up to 255 characters. Nesting is supported up to 8 levels deep.
+
+The compiler currently has no mechanism for the user to define symbols at compile time (`-dSYMBOL` is planned but not yet implemented). As a result, all `{$IFDEF}` tests evaluate to false (symbol undefined) and all `{$IFNDEF}` tests evaluate to true. The compiler's own source uses `{$IFDEF FPC}` to gate fpc-only code: when compiled with fpc, fpc predefines `FPC`; when compiled by the self-hosted cpas compiler, `FPC` is undefined and `{$IFDEF FPC}` blocks are skipped.
+
+```pascal
+{$IFDEF DEBUG}
+  writeln('debug mode');
+{$ELSE}
+  writeln('release mode');
+{$ENDIF}
+
+{$IFDEF FPC}
+  { fpc-only bootstrap code }
+{$ELSE}
+  { self-hosted path }
+{$ENDIF}
+```
 
 ### Examples
 
@@ -1046,17 +1085,17 @@ Comparison       = SimpleExpr [ RelOp SimpleExpr ] .
 RelOp            = '=' | '<>' | '<' | '>' | '<=' | '>=' | 'in' .
 
 SimpleExpr       = [ '+' | '-' ] Term { AddOp Term } .
-AddOp            = '+' | '-' | 'or' .
+AddOp            = '+' | '-' | 'or' .          (* 'or' requires negative lookahead: not followed by 'else' *)
 
 Term             = Factor { MulOp Factor } .
 MulOp            = '*' | 'div' | 'mod' | 'and' | 'shl' | 'shr' .
+                                               (* 'and' requires negative lookahead: not followed by 'then' *)
 
 Factor           = INTEGER_LITERAL
                  | REAL_LITERAL
                  | STRING_LITERAL
-                 | 'true' | 'false'
                  | 'nil'
-                 | Designator
+                 | Designator          (* includes true, false as built-in identifiers *)
                  | '(' Expression ')'
                  | 'not' Factor
                  | SetConstructor .
@@ -1123,7 +1162,7 @@ var       while     with
 
 The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.
 
-`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
+`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `fillchar`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
 
 ### Operator Precedence (Highest to Lowest)
 
@@ -1135,6 +1174,8 @@ The language is **case-insensitive** — reserved words and identifiers are matc
 | 4 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
 | 5 | `and then` | Left |
 | 6 (lowest) | `or else` | Left |
+
+> **Pascal unary sign quirk.** The grammar rule `SimpleExpr = ['+' | '-'] Term { AddOp Term }` means unary `+`/`−` apply to the entire first `Term` — including all `*`, `div`, `mod`, `shl`, `shr` operands in that term. As a result, `−a * b` parses as `−(a * b)`, not `(−a) * b`. The precedence table above reflects the conventional presentation; the grammar is authoritative for actual parse order. This matches ISO 7185 behavior.
 
 > **Deviation from ISO 10206.** ISO Extended Pascal places `and then` with the multiplying-operators and `or else` with the adding-operators. Compact Pascal gives them their own levels below comparisons, matching the precedence of C's `&&` and `||`. This allows `x < 2 * y and then z - 1 < w` to parse as `(x < 2 * y) and then (z - 1 < w)` without parentheses. The eager operators `and` and `or` retain their standard Pascal precedence.
 
