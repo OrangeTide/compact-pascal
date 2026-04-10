@@ -1653,10 +1653,10 @@ end;
 
 ### Forward Declarations
 
-When two procedures need to call each other (mutual recursion), the first one can be declared `forward`:
+When two functions need to call each other (mutual recursion), the first one can be declared `forward`:
 
 ```pascal
-procedure Odd(n: integer): boolean; forward;
+function Odd(n: integer): boolean; forward;
 
 function Even(n: integer): boolean;
 begin
@@ -3307,7 +3307,7 @@ The compiler reads Pascal from stdin and writes a complete WASM binary to stdout
 
 ## Afterword: Where to Go from Here
 
-The compiler you have built handles a substantial subset of Pascal and produces real WASM binaries. The full compiler in the repository adds several more features — sets, `with`, `break`/`continue`, `shl`/`shr`, `str`, `eof`, range and overflow checks, extended numeric literals, and variable initializers — all using the same techniques covered in this tutorial. But even the full Phase 1 language was deliberately kept small to fit in a single-pass compiler. This afterword sketches several directions for extending the compiler — each one a project in its own right.
+The compiler you have built handles a substantial subset of Pascal and produces real WASM binaries. The full compiler in the repository adds several more features — sets, `with`, `str`, `eof`, range and overflow checks, extended numeric literals, and variable initializers — all using the same techniques covered in this tutorial. But even the full Phase 1 language was deliberately kept small to fit in a single-pass compiler. This afterword sketches several directions for extending the compiler — each one a project in its own right.
 
 ### Exceptions
 
