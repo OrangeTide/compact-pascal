@@ -739,6 +739,8 @@ Here is the precedence table:
 | 5 | `and then` |
 | 6 (lowest) | `or else` |
 
+The named constants `PrecUnary`, `PrecMul`, `PrecAdd`, `PrecCompare`, `PrecAndThen`, and `PrecOrElse` correspond to these levels. `PrecNone = 0` is a sentinel below all real precedence levels — passing it to `ParseExpression` means "accept any operator," which is what top-level expression calls use.
+
 And the implementation:
 
 ```pascal
@@ -1127,7 +1129,7 @@ After writing all arguments, `writeln` appends a newline character. The compiler
 
 ### Parsing write/writeln Arguments
 
-`write` and `writeln` accept a variable number of arguments of different types — string literals and integer expressions — separated by commas. The parser dispatches on the current token:
+`write` and `writeln` accept a variable number of arguments of different types — string literals and integer expressions — separated by commas. The parser dispatches on the current token. (The full compiler also handles `char` and `boolean` arguments by checking the expression type after parsing; here we keep it simple with just strings and integers.)
 
 ```pascal
 procedure ParseWriteArgs(withNewline: boolean);
@@ -1336,7 +1338,7 @@ The initial depths differ by loop type:
 | `for` | `block` / `loop` / `block` | 2 | 0 |
 | `repeat` | `loop` only | -1 (unsupported) | 0 |
 
-For `for` loops, `breakDepth` is 2 (skipping the `@continue` block, the `loop`, and targeting the outer `block`), and `continueDepth` is 0 (targeting the inner `@continue` block, which falls through to the increment). For `repeat`, `break` is not supported because there is no outer `block` to target.
+For `for` loops, `breakDepth` is 2 (skipping the `@continue` block, the `loop`, and targeting the outer `block`), and `continueDepth` is 0 (targeting the inner `@continue` block, which falls through to the increment). For `repeat`, this simplified codegen uses a bare `loop` with no outer `block`, so there is no forward-branch target for `break`. The full compiler wraps `repeat` in a `block`/`loop` pair (like `while`) so that `break` works in all loop types, as the language reference requires.
 
 When loops are nested inside other WASM blocks (like `if`/`else` or outer loops), both depths are incremented to account for the additional nesting. Each WASM `if`, `block`, or `loop` entered inside a loop body adds one level to both `breakDepth` and `continueDepth`.
 
