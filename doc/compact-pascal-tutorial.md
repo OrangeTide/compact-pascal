@@ -732,12 +732,12 @@ Here is the precedence table:
 
 | Precedence | Operators |
 |---|---|
-| 1 (lowest) | `or else` |
-| 2 | `and then` |
-| 3 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` |
-| 4 | `+`, `-`, `or` |
-| 5 | `*`, `div`, `mod`, `and`, `shl`, `shr` |
-| 6 (highest) | `not`, unary `+`/`-` |
+| 1 (highest) | `not`, unary `+`/`-` |
+| 2 | `*`, `div`, `mod`, `and`, `shl`, `shr` |
+| 3 | `+`, `-`, `or` |
+| 4 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` |
+| 5 | `and then` |
+| 6 (lowest) | `or else` |
 
 And the implementation:
 
