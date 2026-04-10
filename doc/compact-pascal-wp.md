@@ -1,7 +1,7 @@
 ---
 title: "Compact Pascal: An Embeddable Pascal-to-WASM Compiler"
 author: Jon Mayo
-date: March 2026
+date: April 2026
 header-includes:
   - |
     ```{=typst}
@@ -39,7 +39,7 @@ Compact Pascal draws inspiration from several sources in the Pascal family:
 - **ISO 10206 (Extended Pascal)** [2] informs the dynamic memory model (`New`/`Dispose`) and serves as a reference for language extensions.
 - **Component Pascal / Oberon** [3] (Wirth's later Pascal-lineage languages) inspire the minimalist philosophy: a small, coherent language rather than a feature-laden one.
 - **Go** [4] provides the model for structural interfaces — polymorphism without inheritance.
-- **Pascaline / IP Pascal** [20] demonstrates that Pascal can be extended with modules, dynamic arrays, and concurrency while preserving full ISO 7185 compatibility and type safety. Compact Pascal's `const` parameters, `forward` declaration style, and eventual dynamic array design draw on Pascaline's precedent.
+- **Pascaline / IP Pascal** [20] demonstrates that Pascal can be extended with modules, dynamic arrays, and concurrency while preserving full ISO 7185 compatibility and type safety. Compact Pascal's `const` parameters and `forward` declaration style adopt Pascaline's conventions, and the eventual dynamic array design draws on Pascaline's precedent.
 - **SuperPascal** [21] and the broader Brinch Hansen tradition (Concurrent Pascal [22], Joyce [23]) show that safe concurrency can be expressed in Pascal-family syntax. SuperPascal's single-pass disjointness checking — verifying at compile time that parallel processes do not interfere — is a technique Compact Pascal could adapt if concurrency is added in a future phase.
 - **ParaSail** [24] takes the radical approach of eliminating pointers, global variables, and aliasing entirely, making every expression safe for parallel evaluation. Its region-based memory management (no global GC heap) and Hoare-style assertions built into the syntax are relevant models for future Compact Pascal extensions.
 - **Vector Pascal** [25] extends Pascal with APL-derived array operations (maps, reductions, slicing) that map to SIMD hardware. Its dimensional type system (compile-time unit checking for scientific quantities) is an independently interesting extension model.
@@ -103,7 +103,7 @@ The system has three layers:
 
 ### Core Language
 
-The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records (including variant records), set types, and pointers; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Floating point (`real`) and dynamic allocation (`New`/`Dispose`) are planned for later phases. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
+The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records, enumerated types, and set types; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Variant records, pointers, floating point (`real`), and dynamic allocation (`New`/`Dispose`) are planned for later phases. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
 
 Source files are UTF-8. The compiler's lexer only acts on ASCII-range bytes (0x00–0x7F); bytes 0x80–0xFF pass through verbatim in string literals and comments. `char` is a byte, not a Unicode codepoint, and `length` returns the byte count — the same model as C and Go's `[]byte`. Legacy source files in CP437 (the code page used by DOS-era Pascal systems) or other encodings must be converted to UTF-8 before compilation using standard tools (`iconv`, `encoding_rs`, etc.).
 
@@ -121,7 +121,7 @@ Compact Pascal includes standard functions and procedures as compiler intrinsics
 
 ### Language Extensions
 
-- **Structural interfaces and methods:** Go-style interfaces with `implement` blocks, designed for single-pass compilation.
+- **Structural interfaces and methods (planned):** Go-style interfaces with `implement` blocks, designed for single-pass compilation.
 
 The full language specification is maintained in the Compact Pascal Language Reference (`doc/compact-pascal-ref.md`).
 
@@ -268,19 +268,19 @@ The compiler halts on the first error with a diagnostic written to stderr (fd 2)
 | **Rust** | wasmi [11] | Pure Rust, no native dependencies, small binary, works for WASM-in-WASM |
 | **Zig** | wasm3 [12] (C) | Fast interpreter, small footprint, trivial C interop via `@cImport` |
 | **C** | User's choice (vtable) | Bring-your-own-runtime: wasm3, WAMR, vmir, or any C-compatible WASM interpreter |
-| **Browser** | Native `WebAssembly` API | Full-speed execution via wasm-bindgen |
+| **Browser** | Native `WebAssembly` API | Full-speed execution, no tooling beyond standard browser APIs |
 
 ## Bootstrapping
 
-The compiler is written in Pascal from the start — not in Rust, Zig, or C. This creates a bootstrapping problem: the compiler cannot compile itself until it exists as an executable.
+The compiler is written in Pascal from the start — not in Rust, Zig, or C. This created a bootstrapping problem: the compiler could not compile itself until it existed as an executable.
 
 ### Bootstrap Strategy
 
-Bootstrap using the **Free Pascal Compiler (fpc)** [7] in Turbo Pascal [8] / BP 7.0 compatibility mode (`-Mtp`):
+The bootstrap used the **Free Pascal Compiler (fpc)** [7] in Turbo Pascal [8] / BP 7.0 compatibility mode (`-Mtp`):
 
-1. Write the Compact Pascal compiler in a Pascal subset compatible with fpc's Turbo Pascal mode. This keeps the compiler source close to classic Pascal and avoids fpc-specific extensions.
-2. Use fpc to build the compiler as a native executable. Run the native compiler on Compact Pascal source to produce WASM binaries.
-3. Once the compiler can compile itself, produce a **snapshot binary**: the compiler compiled to WASM by itself. Commit this snapshot to git (acceptable as long as it stays under 1 MB; revisit if it exceeds that).
+1. The Compact Pascal compiler was written in a Pascal subset compatible with fpc's Turbo Pascal mode. This keeps the compiler source close to classic Pascal and avoids fpc-specific extensions.
+2. fpc builds the compiler as a native executable. The native compiler compiles Compact Pascal source to produce WASM binaries.
+3. The compiler compiles itself to produce a **snapshot binary**: the compiler compiled to WASM by itself. This snapshot is committed to git (under 1 MB; currently ~103 KB).
 4. Future updates: use the snapshot compiler (running in wasmi/wasm3) to compile newer versions of itself. Update the snapshot blob when the compiler changes.
 
 ### Developer Experience
@@ -297,20 +297,15 @@ The Phase 1 compiler serves as the subject of a step-by-step compiler constructi
 compiler/       — Pascal source for the compiler (built with fpc)
 compiler-tests/ — test suite modeled on BSI Pascal Validation Suite
 src/
-  rust/         — Rust crate source
-  zig/          — Zig library source
   c/            — C embedding library (bring-your-own-WASM-runtime)
-snapshot/       — the compiler WASM blob (shared by Rust, Zig, and C)
+  rust/         — Rust crate source (planned)
+  zig/          — Zig library source (planned)
+snapshot/       — the compiler WASM blob (shared by all embedding libraries)
 examples/
-  rust/         — Rust example programs (hello, ffi, pode-server)
-  zig/          — Zig example programs
   c/            — C example programs (wasm3)
-  html/         — client-side browser playground (static HTML, no server)
+  pascal/       — example Pascal programs
 pages/          — GitHub Pages site (includes deployed playground)
 doc/            — language specification, white paper, and compiler tutorial
-Cargo.toml      — Rust build (lib path: src/rust/lib.rs)
-build.zig       — Zig build (root source: src/zig/)
-build.zig.zon   — Zig package manifest
 ```
 
 ### Test Suite
@@ -638,9 +633,11 @@ Note: `self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-i
 | Precedence | Operators | Associativity |
 |---|---|---|
 | 1 (highest) | `not`, unary `+`/`-` | Right |
-| 2 | `*`, `div`, `mod`, `and`, `and then` | Left |
-| 3 | `+`, `-`, `or`, `or else` | Left |
-| 4 (lowest) | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
+| 2 | `*`, `div`, `mod`, `and`, `shl`, `shr` | Left |
+| 3 | `+`, `-`, `or` | Left |
+| 4 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
+| 5 | `and then` | Left |
+| 6 (lowest) | `or else` | Left |
 
 ### Comments and Compiler Directives
 
