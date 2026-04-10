@@ -6,6 +6,9 @@
 **Target:** SIMD instruction sets (MMX, SSE, AltiVec)
 **Source:** Vector Pascal Reference manual PDF (https://dl.acm.org/doi/10.1145/571727.571737)
 **Language manual:** https://www.dcs.gla.ac.uk/~wpc/reports/compilers/compilerindex/vp-ver2.html
+**Compiler index:** https://www.dcs.gla.ac.uk/~wpc/reports/compilers/compilerindex/x25.html
+**Implementation:** Java (open source, available on SourceForge)
+**Dependencies:** Java, GCC (djgpp on Windows), NASM assembler, LaTeX (for literate programming)
 
 ## Core Concept
 
@@ -259,8 +262,13 @@ specific code generators use pattern-matching to select SIMD instructions.
 Code generators exist for:
 - Intel 486 (scalar fallback)
 - Pentium with MMX
-- Pentium III (SSE)
+- Pentium III (SSE, P3)
+- Pentium 4 (P4)
 - AMD K6
+- AMD Athlon
+- AMD Opteron 64-bit (with multi-core parallelism support)
+- Sony PlayStation 2 Emotion Engine
+- Cell processor (PS3) — prototype
 
 For arrays longer than the native SIMD width, the system generates loops over
 SIMD-width chunks.
@@ -328,6 +336,15 @@ PIXEL2BYTE, BYTE2PIXEL, LIBRARY, EXTERNAL, NAME, CDECL, SHL, SHR.
   (real exponent, always real result).
 - `exit` statement: bare `exit;` returns from procedure; `exit(expr)` returns value
   from function.
+
+## IDE: VIPER
+
+Vector Pascal includes the VIPER IDE providing:
+- Syntax highlighting
+- Project management
+- Compilation and linking integration
+- VPTeX: automatic Pascal-to-LaTeX translation for literate programming via
+  comment-embedded LaTeX markup
 
 ## Significance
 
