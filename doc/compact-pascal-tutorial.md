@@ -647,7 +647,7 @@ else if (not atEof) and (ch = '(') then begin
 end;
 ```
 
-Brace comments containing `{$` are compiler directives in Free Pascal. In Phase 1, the compiler skips all brace comments uniformly. Directive parsing will be added in Chapter 10.
+Brace comments containing `{$` are compiler directives in Free Pascal. In Phase 1, the compiler skips all brace comments uniformly. The full compiler recognizes directives like `{$I}` and `{$IMPORT}`; see the language reference for the complete list.
 
 ### String Literals
 
