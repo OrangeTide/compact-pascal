@@ -70,11 +70,32 @@ Each chapter's code builds on the previous chapter. The tutorial covers the core
 
 ### Prerequisites
 
-You need three tools installed:
+You need these tools installed:
 
 - **Free Pascal Compiler (fpc)** — to bootstrap the compiler. We use `-Mtp` mode (Turbo Pascal 7.0 compatibility). Any fpc 3.x release works.
 - **wasmtime** — a WASM runtime that supports WASI preview 1, for running compiled programs. wasmer also works.
 - **wasm-validate** — from the wabt toolkit, for validating the WASM binaries our compiler produces.
+- **wasm2wat** — also from wabt, for disassembling WASM binaries into readable text. This is your primary debugging tool when the compiler produces incorrect output.
+
+### FPC `-Mtp` Mode Constraints
+
+The compiler is written in Turbo Pascal 7.0 compatibility mode (`fpc -Mtp`). This restricts the language to a subset of what modern Free Pascal supports. Keep these constraints in mind throughout the tutorial:
+
+| Feature | Status in `-Mtp` |
+|---|---|
+| `longint` (32-bit integer) | Available — use instead of `integer` (which is 16-bit) |
+| `string` (255-char short strings) | Available |
+| `concat(s, c)` where `c` is `char` | Works (fpc implicitly converts) |
+| `shr` / `shl` | Available (`shr` is logical/unsigned) |
+| `inc` / `dec` | Available as built-ins |
+| `uses` clause | Not available |
+| `class` / `object` | Not available |
+| Initialized variables (`var x: integer = 5`) | Not available |
+| String concatenation with `+` | Not available — use `concat()` |
+
+**Brace comment rule:** Pascal's `{ ... }` comments end at the first `}`, even inside prose. Never write `{` or `}` inside a `{ ... }` comment — the comment will terminate early, causing a syntax error in the remaining code. When you need to mention braces in a comment, spell them out: "left-curly-brace" and "right-curly-brace." This is especially important when writing directive-parsing code that references `{$IMPORT}` or `{$EXPORT}` — those strings contain `}` and will break any enclosing brace comment.
+
+**Large buffers:** Turbo Pascal has limited stack space. Declare any buffer larger than a few KB (such as a 128 KB code buffer) as a global variable so it lives in the data segment, not on the stack.
 
 ### Conventions
 
@@ -442,6 +463,30 @@ $ echo $?
 
 The program compiles to a valid WASM module, passes validation, and exits with code 0. The output file is about 50 bytes — a complete WASM module with header, five sections, and a function body that does nothing.
 
+### Debugging WASM Output
+
+When the compiler produces a binary that fails validation or behaves unexpectedly, `wasm2wat` is your primary debugging tool. It disassembles a `.wasm` binary into human-readable WebAssembly Text (WAT):
+
+```bash
+$ wasm2wat empty.wasm
+(module
+  (type (;0;) (func))
+  (func (;0;) (type 0))
+  (memory (;0;) 1 256)
+  (global (;0;) (mut i32) (i32.const 65536))
+  (export "_start" (func 0))
+  (export "memory" (memory 0)))
+```
+
+Get into the habit of disassembling early and often. When something goes wrong in later chapters, the workflow is:
+
+1. **Compile** the test program.
+2. **`wasm-validate`** — if this fails, the error message tells you which section or instruction is malformed.
+3. **`wasm2wat`** — compare the disassembly against what you expected. Look for wrong opcodes, missing sections, or incorrect function indices.
+4. **`halt(N)`** — if the binary is valid but produces wrong results, add `halt` calls with different exit codes to narrow down where execution diverges from expectation.
+
+For a more detailed view, `wasm-objdump -d` (also from wabt) shows raw byte offsets alongside disassembly, which helps when debugging section encoding bugs.
+
 \newpage
 
 ## Chapter 2: The Scanner
@@ -499,6 +544,8 @@ var
 ```
 
 Token kinds are integer constants. Punctuation and operators get their own constants (`tkPlus`, `tkAssign`, `tkLParen`, etc.), keywords are recognized during identifier scanning, and there are two literal types: `tkInteger` and `tkString`.
+
+Use a systematic numbering scheme to avoid collisions as new tokens are added in later chapters. One approach: punctuation 1–49, keyword tokens 100–199, built-in identifiers 200+. Whatever scheme you choose, check existing values before assigning new ones — a silent collision between two token constants (e.g., `tkBreak` and `tkAnd` both set to 118) causes the scanner to misidentify tokens, producing baffling parse errors far from the actual bug.
 
 The complete set of keywords the compiler recognizes includes all Pascal reserved words plus built-in identifiers like `write`, `writeln`, `halt`, `true`, and `false`. Keywords are case-insensitive — the scanner uppercases identifiers before checking the keyword table.
 
@@ -1032,7 +1079,16 @@ begin
 end;
 ```
 
-The iovec, nwritten scratch, and newline byte are allocated in the data segment on first use by `EnsureIOBuffers`. They are aligned to 4-byte boundaries because WASM's `i32.store` requires aligned addresses.
+The iovec, nwritten scratch, and newline byte are allocated in the data segment on first use by `EnsureIOBuffers`. They must be aligned to 4-byte boundaries because `fd_write` requires the iovec pointer to be 4-byte aligned. If string literals placed before `EnsureIOBuffers` leave `dataLen` at a non-multiple of 4, pad it before allocating:
+
+```pascal
+while (dataLen mod 4) <> 0 do begin
+  SmallBufEmit(dataBuf, 0);
+  dataLen := dataLen + 1;
+end;
+```
+
+Without this padding, wasmtime aborts with "Pointer not aligned to 4."
 
 ### Writing Integers
 
@@ -1056,6 +1112,14 @@ begin
   EmitCall(EnsureWriteInt);
 end;
 ```
+
+### The Import Ordering Invariant
+
+`EnsureWriteInt` computes `idxWriteInt := numImports + 1` at the moment it is called, then records that index permanently. If any import is added *after* this point, all defined-function indices shift by one, and the recorded index becomes wrong. Calls to `__write_int` then invoke the wrong function — typically `_start` or another built-in — producing cryptic "type mismatch" validation errors.
+
+The rule: **freeze all imports before recording any defined-function index.** When a new `Ensure*` function introduces both an import and a defined helper, make it eagerly import everything it might need (including imports for other helpers) before computing any index. In practice, this means `EnsureWriteInt` should also call `EnsureFdWrite` and `EnsureProcExit` to lock down `numImports` before computing `idxWriteInt`.
+
+This invariant applies throughout the compiler. Chapters 6 and 8 will add more imports and helpers; each one must respect this ordering or risk silently corrupting function indices.
 
 ### The `writeln` Newline
 
@@ -1199,7 +1263,7 @@ The compiler desugars this to:
 
 1. Evaluate and store the initial value.
 2. Evaluate and store the limit value (once, not on every iteration).
-3. Emit a `block`/`loop` pair.
+3. Emit a three-level block structure (see below).
 4. Compare the counter to the limit; `br_if` to exit if counter > limit.
 5. Execute the body.
 6. Increment the counter.
@@ -1207,7 +1271,26 @@ The compiler desugars this to:
 
 The limit value must be evaluated once and stored, because the limit expression could have side effects or be expensive. The compiler uses a scratch location in the data segment for this.
 
-`downto` uses the same pattern but with `i32.lt_s` for the exit condition and `i32.sub` for the decrement.
+**The three-level block structure is critical.** A `for` loop needs three distinct branch targets — `break` (exit the loop), `continue` (skip to the increment), and the loop back-edge (jump to the condition test). A simple `block`/`loop` pair only provides two targets, so `continue` would jump to the loop header and skip the increment step. The correct structure wraps the body in an inner `block` that serves as the `continue` target:
+
+```wat
+block @exit              ;; break target (br 2 from body)
+  loop @top              ;; loop back-edge (br 1 from increment)
+    ;; ... condition test, br_if @exit ...
+    block @continue      ;; continue target (br 0 from body)
+      ;; ... loop body ...
+    end @continue        ;; continue lands here
+    ;; ... increment counter ...
+    br @top              ;; back to condition test
+  end @top
+end @exit
+```
+
+When `continue` executes inside the body, `br 0` targets `@continue`, which falls through to the increment code. Without the inner `block`, `br 0` would target `@top` (the `loop`), jumping directly to the condition test and skipping the increment — causing an infinite loop for `for` loops and wrong counter values for any loop with `continue`.
+
+`downto` uses the same structure but with `i32.lt_s` for the exit condition and `i32.sub` for the decrement.
+
+> **Watch Out:** This is the single most dangerous bug in the compiler. If the `for` loop uses a two-level `block`/`loop` without the inner `@continue` block, programs without `continue` work correctly (the increment always runs), but any `for` loop with `continue` silently hangs or produces wrong results. The bug only manifests when `continue` is actually used, which may not happen until self-hosting — where the compiler's own scanner uses `continue` in character-processing loops.
 
 ### `repeat`/`until`
 
@@ -1241,9 +1324,21 @@ Notice that `repeat`/`until` allows multiple semicolon-separated statements betw
 Turbo Pascal 7.0 (1992) introduced `break` and `continue`. Neither appears in ISO 7185 or ISO 10206 (Extended Pascal) — they are a Borland extension that Delphi and Free Pascal carried forward.
 :::
 
-The compiler tracks two values: `breakDepth` and `continueDepth`. These record the `br` label index needed to reach the exit block and the loop header, respectively. Outside any loop, both are -1 (and the compiler reports an error if `break` or `continue` is used). When entering a loop, the compiler saves the old depths, sets them for the new loop's block/loop structure, and restores the old values on exit.
+**Pascal `continue` is not the same as WASM `br 0` on a `loop`.** Pascal's `continue` means "go to the next iteration," which for a `for` loop means "run the increment, then test the condition." WASM's `br 0` inside a `loop` means "jump to the loop header." These are identical for `while` and `repeat` (where the condition is at the header or footer), but differ for `for` loops where the increment is between the body and the back-edge branch. This is why the `for` loop requires the three-level block structure described above.
 
-For a `while` loop with its `block`/`loop` pair, `break` needs `br breakDepth` (targeting the outer block, which jumps forward past the loop) and `continue` needs `br continueDepth` (targeting the inner loop, which jumps backward to the loop header). When loops are nested inside other WASM blocks (like `if`/`else` or outer loops), the depths increment to account for the additional nesting.
+The compiler tracks two values: `breakDepth` and `continueDepth`. These record the `br` label index needed to reach the exit block and the continue target, respectively. Outside any loop, both are -1 (and the compiler reports an error if `break` or `continue` is used). When entering a loop, the compiler saves the old depths, sets them for the new loop's block/loop structure, and restores the old values on exit.
+
+The initial depths differ by loop type:
+
+| Loop | Block structure | `breakDepth` | `continueDepth` |
+|---|---|---|---|
+| `while` | `block` / `loop` | 1 | 0 |
+| `for` | `block` / `loop` / `block` | 2 | 0 |
+| `repeat` | `loop` only | -1 (unsupported) | 0 |
+
+For `for` loops, `breakDepth` is 2 (skipping the `@continue` block, the `loop`, and targeting the outer `block`), and `continueDepth` is 0 (targeting the inner `@continue` block, which falls through to the increment). For `repeat`, `break` is not supported because there is no outer `block` to target.
+
+When loops are nested inside other WASM blocks (like `if`/`else` or outer loops), both depths are incremented to account for the additional nesting. Each WASM `if`, `block`, or `loop` entered inside a loop body adds one level to both `breakDepth` and `continueDepth`.
 
 ```pascal
 tkBreak: begin
@@ -1350,6 +1445,46 @@ end.
 
 Exit code: 120 (5! = 120).
 
+### Testing: `continue` in a `for` Loop
+
+This test is essential — it catches the three-level block structure bug described in the `for` loop section:
+
+```pascal
+program forconttest;
+var i, sum: integer;
+begin
+  sum := 0;
+  for i := 1 to 10 do begin
+    if (i mod 2) = 0 then continue;
+    sum := sum + i;
+  end;
+  halt(sum)
+end.
+```
+
+Exit code: 25 (1 + 3 + 5 + 7 + 9 = 25).
+
+If the `for` loop uses a two-level `block`/`loop` without the inner `@continue` block, this test either hangs (infinite loop — the counter never increments) or exits with the wrong code. Add this test in Chapter 5, not later, because the bug is invisible to any test that does not use `continue` inside a `for` loop.
+
+### Testing: `break` Inside Nested `if`
+
+```pascal
+program breaknest;
+var i, sum: integer;
+begin
+  sum := 0;
+  for i := 1 to 100 do begin
+    if i > 5 then break;
+    sum := sum + i;
+  end;
+  halt(sum)
+end.
+```
+
+Exit code: 15 (1 + 2 + 3 + 4 + 5 = 15).
+
+This test catches off-by-one errors in `breakDepth` tracking. The `if` block inside the loop adds one WASM label level, so `breakDepth` must be incremented when entering the `if` and decremented when leaving it. If the depth is wrong, `break` targets the wrong block — either trapping (too deep) or breaking out of the `if` instead of the loop (too shallow).
+
 \newpage
 
 ## Chapter 6: Procedures and Functions
@@ -1361,6 +1496,19 @@ Up to now, all code has lived in the program's main `begin`/`end` block. This ch
 Each Pascal procedure or function becomes a separate WASM function. WASM functions are declared in two parts: a *type signature* in the type section (parameter types and return type), and a *body* in the code section (local declarations and instructions). The `call` instruction invokes a function by its index.
 
 All parameters in our compiler are passed as `i32` values — whether they represent integers, booleans, characters, or pointers. A procedure with two `integer` parameters and no return value gets the WASM type `(i32, i32) -> ()`. A function returning `integer` gets `(i32, i32) -> (i32)`.
+
+Before compiling any user-defined procedure, the compiler must freeze all built-in imports and helper functions. User functions are numbered starting at `numImports + numBuiltinHelpers`, and this base must not change after the first user function is compiled. Create an `EnsureBuiltinImports` procedure that eagerly registers everything:
+
+```pascal
+procedure EnsureBuiltinImports;
+begin
+  EnsureFdWrite;
+  EnsureProcExit;
+  EnsureWriteInt;   { reserves numImports+1 for __write_int }
+end;
+```
+
+Call `EnsureBuiltinImports` at the start of `ParseProcDecl`, before allocating the user function's slot. This guarantees that `numImports` is stable. Without this step, a user function compiled before any `write` call would claim the WASM index that `__write_int` expects, and all subsequent integer output would call the wrong function.
 
 ### Compiling Procedure Declarations
 
@@ -1465,6 +1613,23 @@ This is the classic pass-by-reference implementation: the caller and callee shar
 if syms[sym].isConstParam then
   Error('cannot assign to const parameter ''' + name + '''');
 ```
+
+### WASM Local Layout
+
+Each WASM function has a flat array of locals. Parameters occupy the first slots (assigned by the WASM runtime), and the compiler adds extra locals after them. Keeping track of which index means what is critical — every new local added in a later chapter shifts all subsequent indices, and getting one wrong produces silent data corruption.
+
+Here is the layout as it evolves across chapters. Refer to this table when adding new locals:
+
+| Local index | Chapter 6 (proc) | Chapter 6 (func) | Chapter 7+ (proc) | Chapter 7+ (func) | Chapter 10+ |
+|---|---|---|---|---|---|
+| 0..N-1 | params | params | params | params | params |
+| N | — | return value | display save | return value | (same) |
+| N+1 | — | — | — | display save | (same) |
+| N+1 or N+2 | — | — | — | — | case temp |
+
+The `AssembleCodeSection` local header must declare the correct number of extra `i32` locals: 0 for Chapter 6 procedures, 1 for Chapter 6 functions, 1 for Chapter 7+ procedures (display save), 2 for Chapter 7+ functions (return value + display save), and +1 for any function using `case` statements.
+
+> **Watch Out:** When writing WASM helper functions (like `__write_int` or string helpers), extra locals start at index `nparams`, not 0. A helper with 3 parameters that needs 2 scratch locals uses indices 3 and 4, not 0 and 1. Getting this wrong overwrites parameter values — a bug that produces correct results for some inputs and wrong results for others, making it very hard to diagnose.
 
 ### Function Return Values
 
@@ -2092,6 +2257,10 @@ All string helper functions (`__str_assign`, `__write_str`, `__str_compare`, `__
 
 This keeps the output small for programs that do not use strings, while providing full string support for those that do.
 
+**Import ordering matters here too.** String helpers introduce a new import — `fd_read` for `readln` support. `EnsureStringHelpers` must import `fd_read` *before* `EnsureWriteInt` records its index, or `idxWriteInt` will be off by one (see "The Import Ordering Invariant" in Chapter 4). In practice, `EnsureStringHelpers` should eagerly import everything — `fd_write`, `proc_exit`, `fd_read` — then call `EnsureWriteInt`, in that order.
+
+**WASM local indices in helpers with 3+ parameters.** Refer to the WASM Local Layout table in Chapter 6: extra locals always start at index `nparams`. For 3-parameter helpers like `__str_append(dst, max, src)`, scratch locals start at index 3, not 2. Getting this wrong overwrites the third parameter — the source address — producing corrupt output for any string append where the source is longer than a few bytes.
+
 ### Testing: String Functions
 
 ```pascal
@@ -2541,6 +2710,22 @@ Output:
 
 The last line confirms that `DoublePoint` (a value parameter) modified its local copy without affecting the caller's `pt`.
 
+### Declaration Section Order
+
+Standard Pascal allows `type`, `var`, and procedure/function declaration sections to appear in any order at the program level. The `t043_record_param` test above places `var pt: TPoint` after the procedure declarations — valid Pascal that the compiler must accept.
+
+`ParseProgram` should use a flexible loop that accepts `type`, `var`, `procedure`, or `function` tokens in any order, rather than checking for them in a fixed sequence:
+
+```pascal
+while tokKind in [tkType, tkVar, tkProcedure, tkFunction] do begin
+  if tokKind = tkType then ParseTypeBlock
+  else if tokKind = tkVar then ParseVarBlock
+  else ParseProcDecl;
+end;
+```
+
+Within a procedure body, the standard order `type`, `var`, nested procedures, `begin`/`end` is sufficient — nested procedures cannot appear after the `begin`, so a linear sequence works.
+
 \newpage
 
 ## Chapter 10: Constants, Enums, and Case
@@ -2775,7 +2960,15 @@ The compiler generates the `case` statement as nested `if`/`else` blocks. This i
 3. OR all label conditions together for arms with multiple labels.
 4. Emit `if`/`else` chains.
 
-The selector needs a dedicated temporary local because each label comparison must re-read it. The compiler tracks this with `curCaseTempIdx`:
+The selector needs a dedicated temporary local because each label comparison must re-read it. The compiler tracks this with `curCaseTempIdx`, which must be computed from the WASM local layout (see the table in Chapter 6):
+
+| Context | `curCaseTempIdx` |
+|---|---|
+| `_start` (main program) | 0 |
+| Procedure | `nparams + 1` (after display save) |
+| Function | `nparams + 2` (after return value + display save) |
+
+When `curFuncNeedsCaseTemp` is set, `AssembleCodeSection` adds one more `i32` local to the function's local header. Save and restore `curFuncNeedsCaseTemp` around nested `ParseProcDecl` calls — otherwise a nested function's `case` statement resets the global, and the enclosing function omits the extra local.
 
 ```pascal
 tkCase: begin
@@ -2842,6 +3035,18 @@ else
   end
 end
 ```
+
+Between arms, the compiler emits `OpElse` to transition from one arm's `if` body to the next arm's label test. When the arm loop exits because `tokKind = tkElse`, the last arm's `if` block is still open — the `else` clause body must go inside its `else` branch:
+
+```pascal
+if tokKind = tkElse then begin
+  EmitOp(OpElse);          { enter else branch of last arm's if }
+  NextToken;
+  ParseStatement;          { else clause body }
+end;
+```
+
+> **Watch Out:** Without the `OpElse` before the else clause body, the else code runs *after* the last arm's `if`/`end` — unconditionally, regardless of the selector value. The WASM `if`/`end` block ends, and execution falls through to the else code. This bug only manifests when the selector matches one of the earlier arms, because the else code runs in addition to the matched arm.
 
 The compiler tracks the nesting depth and emits the corresponding number of `end` instructions when the case statement closes:
 
