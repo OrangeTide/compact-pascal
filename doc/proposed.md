@@ -172,16 +172,120 @@
 
   **The type-safety story:** The same system that prevents `Meter + Second` (2a) also ensures your conversion factor has the right dimension (2b), so you can't accidentally apply a mass conversion to a distance. Dimensional analysis catches category errors; unit conversion catches ratio errors. Together they would have caught both the Mars Climate Orbiter failure (Lockheed produced `PoundForce * USSecond`, NASA expected `Newton * Second` — the types are incompatible, assignment is a compile error) and the Gimli Glider incident (fuel calculated in `Kilogram` but loaded by `USPound` — again, incompatible types).
 
-## 3: Annotations and Reflection - from Go, Rust, Java, etc.
+## 3: Annotations — Compile-Time Metadata for Declarations
 
-  Needs more research. But records, types, variables, arrays, functions, etc could be tagged with annotation syntax. either back-tick (\`) like in Go annotations. or [[ ]] C++ attributes, or #[] in Rust attributes.
+  Annotations attach structured metadata to declarations. The compiler emits annotation tables into the WASM data segment and exports their addresses, making them accessible both to Pascal code at runtime and to the host via the export. This gives both sides the same view of annotated types — the host can do JSON marshalling, the guest can do its own serialization, and they share the same table.
 
-  The purpose of annotations would be to give libraries/units a way to do introspection and reflection.
-  Perhaps reflect (the ability to modify itself, like in Lisp) is beyond the scope of Compact Pascal, although it might be an easier route towards macros than Rust's macros.
+  ### Why Not Full Reflection?
 
-  Some example use cases would be to provide serializers for JSON to know which fields of a Record to import/export and under what name (primary use case in Go)
+  The white paper excludes RTTI because automatic type descriptors for every type cause code size explosion and complicate single-pass emission. WASM's Harvard architecture (code and data in separate address spaces) makes runtime code introspection impossible — a program cannot inspect or modify its own code.
 
-  A more exotic case would fit in the with next section on persistence.
+  Annotations are different: they are **opt-in**. Only annotated declarations get table entries. No annotations, no table, no cost. Lisp-style `reflect` is out of scope — Compact Pascal cannot modify its own code, and the single-pass compiler cannot replay declarations. But structured metadata about declarations that opted in is feasible and useful.
+
+  ### Syntax: `[[ ]]`
+
+  ```
+  type
+    UserRecord = record
+      [[field:'user_id']]
+      ID: integer;
+      [[field:'display_name']]
+      Name: string;
+      [[field:'-']]             { skip this field in serialization }
+      CacheKey: integer;
+    end;
+  ```
+
+  The `[[` token is unambiguous in a single-pass parser. In standard Pascal, `[` opens set constructors and array indices, but `[[` — two consecutive open brackets — never occurs naturally. The lexer distinguishes `[[` from `[` with one character of lookahead, the same technique used for `<=` vs `<`. The closing `]]` is equally clean. C++ uses the same `[[ ]]` syntax for attributes, so the notation has precedent.
+
+  An early bootstrap compiler can skip everything between `[[` and `]]` without understanding the contents, while still closely following the official grammar. This makes annotations forward-compatible — older compilers ignore annotations they don't recognize.
+
+  Compiler directives (`{$...}`) remain separate. Directives control compiler behavior (range checks, memory layout, stack size). Annotations describe declarations (field names, export markers, persistence hints). The distinction is clear: directives are instructions to the compiler, annotations are metadata about the program.
+
+  ### Annotation Kinds
+
+  Annotations are restricted to specific, compiler-recognized kinds. Each kind has defined semantics — the compiler knows what to do with it. This is not a general-purpose extensibility mechanism like Java annotations or Rust derive macros.
+
+  Planned kinds:
+
+  | Kind | Applies to | Purpose |
+  |------|-----------|---------|
+  | `field` | Record fields | Serialization name mapping |
+  | `export` | Procedures | Mark as WASM export |
+  | `deprecated` | Any declaration | Compiler warning on use |
+  | `persist` | Types, fields | Persistence participation (section 4) |
+  | `index` | Record fields | Mark as indexed for associative tables (section 5) |
+
+  The set of annotation kinds is compiler-defined and closed. User code cannot define new annotation kinds — this keeps the mechanism simple and the compiler single-pass.
+
+  ### Annotation Tables in the Data Segment
+
+  The compiler emits annotation metadata as initialized data in the WASM data segment — an annotation table. Each annotated type produces a sequence of entries. The table address is exported, so the host can read it directly from guest memory without a custom section.
+
+  Table entries carry: offset, size, typeId, and name for each annotated field. Record types use record-start/record-end marker entries to encode nesting, giving tree structure in a flat table — the compiler emits markers as it enters and leaves record declarations, purely sequential, no tree held in memory.
+
+  ```
+  { Annotation table layout (conceptual) }
+  { entry: tag (record-start|field|record-end), typeId, offset, size, nameLen, name[] }
+
+  record-start  typeId=7  "UserRecord"
+    field        typeId=1  offset=0   size=4  "user_id"        { integer }
+    field        typeId=2  offset=4   size=256 "display_name"  { string }
+  record-end    typeId=7  "UserRecord"
+  ```
+
+  The WASM module exports the table start address and entry count:
+
+  ```wasm
+  (global (export "__annotation_table") i32 (i32.const 1024))
+  (global (export "__annotation_count") i32 (i32.const 3))
+  ```
+
+  This is the same pattern WASM uses for its own type and function sections — indexed entries with a count. The host reads the export, walks the table, and has full knowledge of annotated types, field layouts, and names. The host and guest share the same memory, so there is no serialization boundary — both sides read the same bytes.
+
+  ### The `typeof` Operator
+
+  The compiler assigns a numeric typeId to every type during compilation. `typeof(T)` evaluates to this typeId as a compile-time integer constant — no runtime introspection. The same typeId appears in annotation table entries, so Pascal code can match fields by type:
+
+  ```
+  var
+    i: integer;
+    entry: AnnotationEntry;
+  begin
+    for i := 0 to AnnotationCount - 1 do begin
+      entry := AnnotationTable[i];
+      case entry.typeId of
+        typeof(integer): SerializeInt(basePtr, entry.offset, entry.size);
+        typeof(string):  SerializeStr(basePtr, entry.offset, entry.size);
+      end;
+    end;
+  end.
+  ```
+
+  Each `typeof(...)` arm is a compile-time constant, so this is a regular `case` statement — no dynamic dispatch, no type descriptors. The annotation table provides the runtime data (which fields exist, where they are), and `typeof` provides the compile-time bridge to handle each type correctly. This is not RTTI — it is opt-in metadata with compile-time type matching.
+
+  ### Host-Side and Guest-Side Serialization
+
+  Because the annotation table is in shared linear memory with an exported address, both sides can use it:
+
+  - **Host-side:** The host (Rust, Zig, C) reads the exported `__annotation_table` address, walks the entries, and marshals record data to/from JSON, protobuf, database rows, etc. The host has full knowledge of field names, types, offsets, and sizes. No FFI calls needed — just memory reads.
+  - **Guest-side:** Pascal code iterates the same table using the `AnnotationTable` global and `typeof` case dispatch. A Pascal unit could implement its own JSON writer, binary serializer, or debug printer using only the annotation table and standard I/O.
+  - **Both at once:** The host provides JSON parsing via imports (fast, native), the guest provides the field-walking logic via the annotation table (type-aware, application-specific). Each side does what it is good at.
+
+  This dual-access model falls naturally out of WASM's shared linear memory. No custom sections, no separate metadata formats — one table, two readers.
+
+  ### What Annotations Are Not
+
+  - **Not macros.** Annotations do not transform code. Rust's `#[derive(...)]` generates trait implementations by inspecting the AST — that requires multi-pass compilation. Compact Pascal's single-pass compiler cannot replay or transform declarations.
+  - **Not automatic RTTI.** Unannotated types have no table entries and no runtime cost. The white paper's objection to RTTI — code size explosion from universal type descriptors — does not apply to opt-in metadata.
+  - **Not self-modifying.** WASM's Harvard architecture prevents code introspection. Annotations describe data layout, not code structure. A program can read its annotation tables but cannot modify them or inspect its own instructions.
+
+  **Open questions:**
+
+  - Exact binary encoding of annotation table entries — fixed-size with padded names, or variable-length with length prefixes?
+  - Should `typeof` be a reserved word or a built-in function? (Reserved word is simpler for the single-pass compiler.)
+  - Naming convention for the exported globals (`__annotation_table`, `__annotation_count`, or something else)?
+  - Should the compiler emit annotation tables for all annotated types automatically, or require an explicit directive to enable table generation?
 
 ## 4: Persistence via Host Imports - From PS-algol
 
