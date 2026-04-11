@@ -245,8 +245,11 @@ bump-version:
 	   $(CPAS_SRC) && \
 	 sed -i \
 	   -e "s/\*\*Version [0-9][0-9]\.[0-9][0-9]*\.[0-9][0-9]*\*\*/**Version $(VERSION)**/" \
-	   doc/compact-pascal-ref.md && \
-	 git add $(CPAS_SRC) doc/compact-pascal-ref.md && \
+	   doc/compact-pascal-ref.md \
+	   doc/compact-pascal-wp.md \
+	   doc/compact-pascal-tutorial.md && \
+	 git add $(CPAS_SRC) doc/compact-pascal-ref.md \
+	   doc/compact-pascal-wp.md doc/compact-pascal-tutorial.md && \
 	 git commit -e -m "Bump version to $(VERSION)"
 
 # ── Cleanup ──────────────────────────────────────────────────────
