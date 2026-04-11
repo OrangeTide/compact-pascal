@@ -11,6 +11,8 @@ header-includes:
     ```
 ---
 
+**Version 26.04.1** (CalVer: YY.MM.minor)
+
 ## Abstract
 
 This document proposes **Compact Pascal**, a new programming language in the Pascal family, and a portable toolchain for embedding it in Rust, Zig, and C applications. The compiler is written in Pascal itself, compiles to WebAssembly (WASM), and ships as a self-contained WASM binary that host applications execute via an interpreter. The result is a lightweight, embeddable Pascal environment that runs anywhere WASM runs — native applications, browsers, and edge runtimes — with no external dependencies beyond the host language's standard toolchain.

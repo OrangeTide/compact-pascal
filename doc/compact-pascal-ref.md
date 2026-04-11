@@ -10,7 +10,7 @@ header-includes:
     ```
 ---
 
-**Version 26.04.0** (CalVer: YY.MM.minor)
+**Version 26.04.1** (CalVer: YY.MM.minor)
 
 Compact Pascal is a new language in the Pascal family, rooted in ISO 7185 (Standard Pascal) and ISO 10206 (Extended Pascal), with modifications and additional extensions described in this document.
 

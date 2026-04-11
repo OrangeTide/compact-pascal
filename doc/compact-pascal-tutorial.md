@@ -35,6 +35,8 @@ include-before:
     ```
 ---
 
+**Version 26.04.1** (CalVer: YY.MM.minor)
+
 ## Preface
 
 This book walks you through building a Pascal compiler from scratch. The compiler reads Compact Pascal source code and produces WebAssembly (WASM) binaries that run in browsers, on the command line, or embedded in applications. By the end, you will have a working compiler that handles a substantial subset of the language — enough to understand every technique needed for the full implementation.
