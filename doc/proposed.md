@@ -287,25 +287,155 @@
   - Naming convention for the exported globals (`__annotation_table`, `__annotation_count`, or something else)?
   - Should the compiler emit annotation tables for all annotated types automatically, or require an explicit directive to enable table generation?
 
-## 4: Persistence via Host Imports - From PS-algol
+## 4: Persistence via Host Imports — from PS-algol
 
-  Persistence via host imports — this is the most architecturally interesting match. PS-algol's core insight is
-  that persistence should be orthogonal to the language — you write normal code, and the runtime decides what persists based on reachability from a root. Compact Pascal's WASM import model is a natural fit:
-  - Host provides open_database, get_root, set_root, commit as WASM imports
-  - The compiler (or a runtime library) handles serialization of records/arrays to/from a host-managed store
-  - Persistence is identified by reachability from the root, same as PS-algol
+  PS-algol's core insight is that persistence should be orthogonal to the language — you write normal code, and the runtime decides what persists based on reachability from a root. Programs written in PS-algol showed ~3x reduction in source code size compared to equivalent programs in Pascal with explicit database calls. Compact Pascal's WASM embedding model is a natural fit for this idea, but the implementation strategy is fundamentally different from PS-algol's.
 
-  This doesn't require language changes — it's just host imports + a serialization convention. But the PS-algol
-  papers show that doing it well (the PIDLAM, the threshing algorithm, transaction semantics) requires careful
-  design. The 3x code reduction they measured vs. explicit database calls is the real selling point.
+  ### PS-algol's Approach (and Why It Doesn't Fit)
 
-  The constraint: this needs New/Dispose and heap allocation (Phase 5) since persistent data structures are
-  typically heap-allocated graphs. It also needs some form of GC or at least reachability analysis to decide what
-  persists.
+  PS-algol adds persistence to S-algol as standard functions — the compiler itself barely changes. All persistence work happens in the runtime:
 
-  Note: PS-algol's transaction model — commit/abandon with automatic threshing is elegant but the O(N²) threshing
-  algorithm and the heap purge-to-database fallback are complex runtime machinery that conflicts with Compact
-  Pascal's "minimal runtime" goal.
+  ```
+  open.database(name, mode, user, password) → database handle
+  get.root(database) → root pointer
+  set.root(old_root, new_root)
+  commit
+  abandon
+  close.database(root)
+  ```
+
+  Persistence is identified by reachability from the database root, like garbage collection identifies liveness. `set.root` makes a subgraph persistent; `commit` writes it to the store.
+
+  The implementation machinery is substantial:
+
+  - **PIDLAM** (Persistent ID to Local Address Map): a table that translates between in-memory object pointers (LONs) and persistent identifiers (PIDs). Every pointer dereference goes through this table. 14 bytes overhead per object.
+  - **Threshing algorithm**: at commit time, breadth-first traversal from the root separates persistent objects from temporary ones. O(N²) worst case.
+  - **Heap purge**: if GC cannot free enough space, the entire heap is serialized to the database and reloaded. This is the fallback for memory pressure.
+  - **Two-stack model**: the interpreter maintains separate stacks for scalars and pointers so the GC can find roots.
+
+  This is complex runtime machinery — exactly what Compact Pascal's "minimal runtime" goal avoids. The PIDLAM alone is a significant data structure, and the threshing algorithm requires heap traversal that depends on GC infrastructure. PS-algol's approach assumes a runtime that manages all memory allocation and can walk the heap at will.
+
+  ### Compact Pascal's Approach: Host-Managed Persistence
+
+  The key difference: in the WASM embedding model, the host has full visibility into guest memory. The host can read and write linear memory directly. Combined with the annotation tables from section 3, the host already knows the layout of every annotated record type — field offsets, sizes, type IDs, and serialization names. The host does not need a PIDLAM or threshing algorithm because it can serialize records directly by reading linear memory at the offsets described by the annotation table.
+
+  Persistence becomes a set of host-provided imports:
+
+  ```
+  { Host imports for persistence }
+  procedure OpenStore(name: string; mode: integer): integer; external;
+  procedure CloseStore(handle: integer); external;
+  procedure StoreRecord(handle: integer; typeId: integer; ptr: integer); external;
+  function LoadRecord(handle: integer; key: string): integer; external;
+  procedure CommitStore(handle: integer); external;
+  procedure AbandonStore(handle: integer); external;
+  ```
+
+  When Pascal code calls `StoreRecord`, the host:
+  1. Reads the annotation table (already exported, section 3) to find the record's field layout.
+  2. Reads the record's bytes directly from linear memory at the given pointer.
+  3. Serializes each field using the offset, size, typeId, and name from the annotation table.
+  4. Writes the serialized form to the persistent store (SQLite, file, key-value store — host's choice).
+
+  Loading is the reverse: the host reads from the store, writes field values into linear memory at the correct offsets, and returns the pointer. No PIDLAM, no threshing, no heap walking. The annotation table is the serialization schema.
+
+  ### What This Looks Like in Practice
+
+  ```
+  program addressbook;
+
+  type
+    Address = record
+      [[field:'house_number']]
+      HouseNo: integer;
+      [[field:'street']]
+      Street: string;
+      [[field:'town']]
+      Town: string;
+    end;
+
+    Person = record
+      [[field:'name']]
+      Name: string;
+      [[field:'phone']]
+      Phone: string;
+      [[field:'address']]
+      Addr: Address;
+    end;
+
+  var
+    store: integer;
+    p: Person;
+
+  begin
+    store := OpenStore('addressbook.db', 1);
+
+    p.Name := 'Ron Morrison';
+    p.Phone := '555-0142';
+    p.Addr.HouseNo := 42;
+    p.Addr.Street := 'North Street';
+    p.Addr.Town := 'St Andrews';
+
+    StoreRecord(store, typeof(Person), addr(p));
+    CommitStore(store);
+    CloseStore(store);
+  end.
+  ```
+
+  Compare with the PS-algol equivalent from the original paper — the structure is similar, but there is no `set.root`, no reachability-based persistence, no implicit commit-on-exit. Persistence is explicit: you call `StoreRecord` with a typed pointer, and the host does the rest. The 3x code reduction that PS-algol measured over explicit database calls in Pascal came from eliminating boilerplate serialization code — the annotation table achieves the same result through a different mechanism.
+
+  ### Transaction Semantics
+
+  PS-algol provides `commit` and `abandon` for transaction control. The WASM model can support the same semantics, but the implementation is simpler because the host controls the persistent store:
+
+  - **Commit**: the host flushes buffered writes to the store. All `StoreRecord` calls since the last commit (or since `OpenStore`) become durable.
+  - **Abandon**: the host discards buffered writes. The in-memory state is unchanged — only the store is rolled back.
+
+  PS-algol's commit is complex because it must traverse the heap and decide what to persist (the threshing algorithm). Compact Pascal's commit is simple because persistence is explicit — the host already knows exactly which records were stored.
+
+  ### Constraints and Dependencies
+
+  - **Phase 5+ (New/Dispose)**: persistent data structures with pointer fields (linked lists, trees) require heap allocation. Stack-only records can be persisted in earlier phases, but the full value of persistence requires dynamic allocation.
+  - **Annotation tables (section 3)**: the host's ability to serialize records depends on knowing the field layout. Without annotations, the host would need a separate schema definition, defeating the purpose.
+  - **Nested records**: the record-start/record-end markers in the annotation table (section 3) handle nested record types like `Person` containing `Address`. The host walks the tree structure in the annotation table to serialize nested fields.
+
+  ### What We Skip from PS-algol
+
+  - **Reachability-based persistence.** PS-algol persists everything reachable from the root. This requires heap traversal and GC infrastructure. Compact Pascal uses explicit persistence — you choose what to store.
+  - **PIDLAM.** No indirection table for persistent identifiers. Records are addressed by their linear memory pointer. The host translates between memory layout and persistent format using the annotation table.
+  - **Threshing.** No algorithm to separate persistent from temporary objects. There is nothing to separate — persistence is explicit.
+  - **Heap purge.** No fallback that serializes the entire heap under memory pressure. The host manages its own storage independently of guest memory.
+
+  These simplifications are possible because the WASM embedding model gives the host capabilities that PS-algol's runtime had to build from scratch. The host already has what PS-algol's PIDLAM provides — the ability to read any object in guest memory by address — because linear memory is shared.
+
+  ### The Trade-Off: Explicit vs. Automatic Persistence
+
+  What we gain in simplicity we give up in orthogonality. PS-algol's strongest property is that persistence is transparent — the programmer writes normal code, and the runtime decides what persists based on reachability. You never call a "save" function. You set the root, commit, and everything reachable is durable. This is a genuinely different programming model, not just a convenience.
+
+  Compact Pascal's explicit persistence is closer to what Java provides with JPA/Hibernate or what Rust provides with Diesel — you annotate your types, call store/load explicitly, and manage the object lifecycle yourself. This is well-understood territory, and the annotation table makes the boilerplate minimal, but it is not the paradigm shift that PS-algol represents. The programmer must decide what to persist and when, which means persistence is not orthogonal to the program's logic — it is part of it.
+
+  A future extension could explore automatic persistence by combining annotations with GC reachability analysis (Phase 5+), moving closer to PS-algol's model. But that would require the heap walker and root-tracing machinery we are deliberately avoiding in this proposal.
+
+  ### Schema Migration
+
+  This proposal does not define a schema migration process. When a record type changes between program versions — fields added, removed, renamed, or retyped — existing data in the persistent store becomes incompatible with the new annotation table. This is a real problem that every persistence system must address.
+
+  Precedents:
+
+  - **Diesel (Rust)**: up/down migration scripts written in SQL. Each migration has a forward transformation and a rollback. The migration history is tracked in a table within the database itself.
+  - **ActiveRecord (Ruby)**: similar up/down migrations, with a DSL for common operations (add column, rename column, change type).
+  - **Protocol Buffers**: field numbering with explicit deprecation. Old fields are never reused. Readers skip unknown fields. Forward and backward compatibility are built into the wire format.
+  - **PS-algol**: does not address this. Programs that change structure types are simply incompatible with old databases. (Category 5 on the persistence spectrum — data that exists between versions of a program — is stated as a goal but not solved by the implementation.)
+
+  For Compact Pascal, the annotation table provides the raw material for migration: field names, types, offsets, and sizes for both the old and new schema are available to the host. A migration could be a host-side operation that reads the old schema from the stored annotation table, reads the new schema from the current program's annotation table, and transforms the data. But the mechanism for defining, ordering, and applying migrations is an open design question.
+
+  ### Open Questions
+
+  - How are pointer fields in records handled during serialization? A pointer to another record in linear memory is meaningless in the persistent store. Options: follow the pointer and serialize recursively (the annotation table has the nested structure), store a foreign key / record ID, or restrict persistent records to value-only fields.
+  - Should `LoadRecord` return a fresh allocation (requires New/Dispose) or write into a caller-provided buffer?
+  - Is there a query mechanism beyond key-based `LoadRecord`? This connects to section 5 (associative tables).
+  - Should the store handle be a first-class value or a global implicit context (like PS-algol's current database)?
+  - What is the schema migration strategy? Host-side transformation using old/new annotation tables, Pascal-side migration scripts, or something else?
 
 ## 5: Associative Tables as built-in abstractions - from PS-algol
 
