@@ -437,8 +437,151 @@
   - Should the store handle be a first-class value or a global implicit context (like PS-algol's current database)?
   - What is the schema migration strategy? Host-side transformation using old/new annotation tables, Pascal-side migration scripts, or something else?
 
-## 5: Associative Tables as built-in abstractions - from PS-algol
+## 5: Associative Structures via Index Operator Overloading
 
-  Associative tables as a built-in abstraction — PS-algol provides table, lookup(table, key), enter(table,value, key), scan(table, func) as standard functions backed by B-trees. In Compact Pascal, this could be a host-provided data structure via imports — the host maintains the B-tree, Pascal code just calls lookup/enter.  Useful as a standard library pattern even without persistence.
+  Rather than adding a built-in table type, associative data structures can be built on operator overloading (section 1) extended to the index operator `[]`. The operator declaration names concrete types for the key and value, and points to getter and setter functions that can be Pascal procedures, host imports, or a mix. The same mechanism works for hash maps, B-trees, sparse arrays, or any keyed data structure — the backing implementation is behind the function signatures.
 
-  Also of interest is Lua's associative tables and meta-tables. A subset of this might prove to be useful, if it can be mapped to a static language like Compact Pascal.
+  ### Index Operator Overloading
+
+  Section 1 defines binary operator overloading as `(symbol, function, identity)`. The index operator is different — it needs a getter and a setter (reading `t[k]` is a different operation than writing `t[k] := v`), and the key and value types are part of the declaration. There is no identity element because indexing has no meaningful reduction or unary form.
+
+  ```
+  operator [KeyType]:ValueType = getter, setter;
+  ```
+
+  The compiler infers which container type the operator applies to from the first parameter of the getter and setter functions, the same way section 1 infers the operand type from the binary function's parameters. Resolution follows the same rule: predefined array indexing (ordinal index into a declared range) is checked first, then user-defined `[]` overloads. No ambiguity — if the variable is `array[1..10] of integer`, normal indexing wins; if it is a record type with an overloaded `[]`, the overload fires.
+
+  A simple string-to-integer table backed entirely by host imports:
+
+  ```
+  type
+    StringIntMap = record
+      handle: integer;
+    end;
+
+  {$IMPORT 'tables' si_get}
+  function SIGet(var m: StringIntMap; key: string): integer; external;
+  {$IMPORT 'tables' si_set}
+  procedure SISet(var m: StringIntMap; key: string; value: integer); external;
+
+  operator [string]:integer = SIGet, SISet;
+
+  var t: StringIntMap;
+  begin
+    t['Alice'] := 30;          { compiler emits call to SISet(t, 'Alice', 30) }
+    writeln(t['Bob']);          { compiler emits call to SIGet(t, 'Bob') }
+  end.
+  ```
+
+  A Pascal-side implementation using a sorted array in linear memory, with only the resize operation delegated to the host:
+
+  ```
+  type
+    Entry = record
+      Key: string;
+      Value: integer;
+    end;
+
+    SortedMap = record
+      Data: array[0..255] of Entry;
+      Count: integer;
+    end;
+
+  function SMGet(var m: SortedMap; key: string): integer;
+  { binary search in m.Data[0..m.Count-1] }
+
+  procedure SMSet(var m: SortedMap; key: string; value: integer);
+  { insert-or-update with shift, pure Pascal }
+
+  operator [string]:integer = SMGet, SMSet;
+  ```
+
+  Or a hybrid: Pascal handles the common path (lookup in a local cache), host handles the slow path (disk-backed B-tree):
+
+  ```
+  {$IMPORT 'btree' btree_get}
+  function BTreeGet(var t: BTreeHandle; key: string): integer; external;
+
+  function CachedGet(var t: CachedBTree; key: string): integer;
+  begin
+    if key = t.LastKey then
+      CachedGet := t.LastValue
+    else begin
+      CachedGet := BTreeGet(t.Tree, key);
+      t.LastKey := key;
+      t.LastValue := CachedGet;
+    end;
+  end;
+  ```
+
+  The compiler does not care whether the getter and setter are `external` imports, Pascal procedures, or a mix. It resolves the overload from the type signatures and emits a call. This is the same principle as section 1: small mechanism, implementation behind the interface.
+
+  ### What the Operator Does Not Cover
+
+  The `[]` operator handles single-key get and single-key set. Several common operations on associative structures are beyond what an index operator can express:
+
+  **Multimaps.** When one key maps to multiple values, `t['sensor']` is ambiguous — which value? Walking multiple results requires a cursor or iterator, not a single return value. This is a procedural API: `FindFirst(t, key)`, `FindNext(t, cursor)`.
+
+  **Positional access.** Comparing positions within the data structure, range scans ("all keys between A and B"), or ordered traversal. B-tree range queries are cursor operations: `SeekGE(t, lowerBound)`, `Next(t, cursor)`, `Current(t, cursor)`.
+
+  **Composite keys.** `t[deviceId, timestamp]` requires multi-dimensional index overloading. The syntax could extend to `operator [string, integer]:value = getter, setter` where the getter takes two key parameters, but each combination of key types needs its own declaration. This is workable for a small number of cases but verbose for many.
+
+  **Existence testing.** `if 'Alice' in t` — Pascal's `in` operator already exists for set membership. It could be overloaded following the same pattern as section 1: `operator in = KeyExists;` where `KeyExists(key: string; m: StringIntMap): boolean`. Same resolution: predefined `in` for sets first, overloads second.
+
+  **Deletion.** `Delete(t, 'Alice')` is a regular procedure call, not an operator. No special syntax needed.
+
+  **Iteration.** PS-algol provides `scan(table, callback)`. Icon provides `key(T)` as a generator. Compact Pascal currently has neither higher-order functions (callbacks with captured state) nor generators. Iteration over associative structures would use a cursor API: `FirstKey(t)`, `NextKey(t, currentKey)`, testing for a sentinel or failure condition. This is less elegant than scan or generators, but it works within the current language.
+
+  The `[]` operator is the convenient surface for the common case. The full API — create, destroy, insert, lookup, delete, scan, cursor operations, range queries — is regular procedures and functions, either Pascal-side or host imports. The operator does not replace the API; it provides shorthand for the two most frequent operations.
+
+  ### Precedents
+
+  | Language | Mechanism | Key types | Backing |
+  |----------|-----------|-----------|---------|
+  | PS-algol | `table`, `lookup`, `enter`, `scan` | string only | B-tree, persistent |
+  | Icon | `table(default)`, `t[key]`, `key(t)` | any hashable | hash table |
+  | Lua | `t[key]`, metatables for operator dispatch | any (except nil) | hash + array hybrid |
+  | Python | `dict[key]`, `__getitem__`/`__setitem__` | any hashable | hash table |
+  | C++ STL | `map[key]`, iterators, `find()`, `equal_range()` | any with `<` | red-black tree |
+  | AWK | `a[key]`, `for (k in a)` | string | hash table |
+  | ParaSail | `BMap[key]`, bounded generics | any `Ordered<>` | balanced tree |
+
+  PS-algol and Icon are the most relevant precedents. PS-algol's tables are string-keyed and B-tree-backed — a natural fit for host-provided persistence. Icon's tables have a default value for missing keys, which avoids the "key not found" error problem. Both use simple procedural APIs rather than operator overloading.
+
+  Compact Pascal's approach differs: the overloaded `[]` operator gives familiar array-indexing syntax, and the getter/setter functions can live anywhere — Pascal code, host imports, or both. This is more flexible than PS-algol's fixed API but less magical than Lua's metatables.
+
+  ### Connection to Persistence (Section 4)
+
+  Associative tables and persistence are natural complements. PS-algol provides both as standard functions, and the combination is where the 3x code reduction comes from — you look up a record by key, modify it, and the persistence layer handles storage.
+
+  In Compact Pascal, the connection is through the host: a host-provided table implementation (B-tree, SQLite, key-value store) can be both the associative lookup mechanism and the persistent store. The `[]` operator provides the syntax, the annotation table (section 3) provides the serialization schema, and the host provides the storage. The same `StoreRecord` from section 4 could be the setter behind an overloaded `[]` on a persistent table type.
+
+  ```
+  type
+    PersonStore = record
+      handle: integer;
+    end;
+
+  {$IMPORT 'store' person_get}
+  function GetPerson(var s: PersonStore; key: string): Person; external;
+  {$IMPORT 'store' person_set}
+  procedure SetPerson(var s: PersonStore; key: string; p: Person); external;
+
+  operator [string]:Person = GetPerson, SetPerson;
+
+  var db: PersonStore;
+  begin
+    db['Ron Morrison'] := p;              { persist }
+    writeln(db['Ron Morrison'].Phone);    { retrieve }
+  end.
+  ```
+
+  The host reads the annotation table to know how to serialize `Person`. The Pascal code just uses `[]` syntax. This is the same dual-access model from section 3 — one mechanism, two sides.
+
+  ### Open Questions
+
+  - Should the `[]` overload support a read-only form (getter only, no setter) for immutable or read-only views?
+  - What happens when a key is not found? Options: return a default value (Icon's approach), return a zero/empty value, or trigger a runtime error. This may need to be configurable per operator declaration — perhaps a third function (the "missing" handler), or a default value like Icon's `table(0)`.
+  - Multi-dimensional index overloading: `operator [T1, T2]:V = ...` — is this worth the added complexity, or should composite keys be handled by a wrapper record type?
+  - Should the `in` operator be overloadable independently, or should it be implied by the existence of a `[]` overload (if the getter succeeds, the key exists)?
+  - How does this interact with `for` loops? A `for k in keys(t)` construct would need either generators or a cursor protocol. Defining a standard cursor protocol (a record with `First`/`Next`/`Done` functions) could enable `for` loop integration without generators.
