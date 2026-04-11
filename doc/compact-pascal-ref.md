@@ -1164,7 +1164,7 @@ The language is **case-insensitive** — reserved words and identifiers are matc
 
 `self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `fillchar`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
 
-### Operator Precedence (Highest to Lowest)
+### Operator Precedence (Highest to Lowest) {#operator-precedence}
 
 | Precedence | Operators | Associativity |
 |---|---|---|
