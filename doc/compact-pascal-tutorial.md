@@ -49,6 +49,20 @@ WebAssembly is a modern compilation target — a portable, sandboxed bytecode th
 
 Together, they make an ideal teaching project: the source language is simple enough to parse in one pass, and the target is modern enough to be practically useful.
 
+### Why Not a Different Backend?
+
+WASM is this tutorial's target, but nothing about the front end — scanning, parsing, symbol tables, type checking — is WASM-specific. If you want to target something else, the compiler techniques transfer directly. What changes is the code generation layer, and the difficulty of that change depends on the target.
+
+**What WASM gives you for free.** WASM is a stack machine: the compiler pushes operands, emits an operator, and the runtime handles the rest. There is no register allocation, no instruction scheduling, no object file format, and no linker. These are the hardest parts of a native backend, and WASM sidesteps all of them. The tradeoff is that WASM requires a runtime to execute, and its binary format has its own learning curve.
+
+**Custom bytecode** is the easiest alternative. If you define a stack-based bytecode similar to WASM's instruction set, most of the `Emit*` procedures survive with only the opcode values changed. You write a small interpreter loop instead of relying on an external runtime. The Quake 3 VM (QVM) is a well-documented example of this approach — a compact stack-based bytecode with a simple instruction set, multiple open-source implementations, and decades of community analysis. Studying QVM is a good starting point if you want to design your own bytecode without inventing everything from scratch.
+
+**LLVM IR** is the most practical path to native code. You replace the `Emit*` procedures with LLVM IR text output and let LLVM handle register allocation, optimization, and machine code emission. The main work is replacing the stack-machine model with SSA-form temporaries (LLVM's `%1 = add i32 %a, %b` instead of push-push-add), replacing WASI imports with libc calls, and replacing the display globals with a frame-pointer chain. This is a substantial rewrite of the code generation layer — roughly half the compiler — but the parsing and semantic analysis stay the same.
+
+**Native machine code** (x86-64, ARM, RISC-V) is the most ambitious option. You now own register allocation, platform calling conventions, machine instruction encoding, and executable file emission (ELF, Mach-O, or PE). Each of those topics could fill its own tutorial. If this interests you, consider using LLVM as an intermediate step: get the compiler emitting LLVM IR first, then study what `llc` produces to understand the native code patterns before attempting direct emission.
+
+The rest of this tutorial targets WASM throughout. The techniques it teaches — recursive descent, Pratt parsing, single-pass code generation, scope management, stack frame layout — apply regardless of backend. If you decide to retarget the compiler later, the front end is yours to keep.
+
 ### How This Book Is Organized
 
 Each chapter adds one major capability to the compiler. After every chapter, you have a working compiler that handles a progressively larger subset of the language. The chapters follow the implementation order:
