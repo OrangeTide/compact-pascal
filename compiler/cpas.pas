@@ -6519,11 +6519,13 @@ end;
 
 { ---- WASM module assembly ---- }
 
+{** Append one byte to the final output buffer (the assembled .wasm file). }
 procedure WriteOutputByte(b: byte);
 begin
   CodeBufEmit(outBuf, b);
 end;
 
+{** Append a ULEB128-encoded integer to the final output buffer. }
 procedure WriteOutputULEB128(value: longint);
 var
   v: longint;
@@ -6539,6 +6541,7 @@ begin
   until v = 0;
 end;
 
+{** Append a length-prefixed WASM name (ULEB128 length + UTF-8 bytes). }
 procedure WriteOutputString(const s: string);
 var i: longint;
 begin
@@ -6547,6 +6550,8 @@ begin
     WriteOutputByte(ord(s[i]));
 end;
 
+{** Emit a WASM section from a small buffer: section id, ULEB128 size,
+  then payload bytes. Skipped if buf is empty. }
 procedure WriteSmallSection(id: byte; var buf: TSmallBuf);
 var i: longint;
 begin
@@ -6557,6 +6562,8 @@ begin
     WriteOutputByte(buf.data[i]);
 end;
 
+{** Emit a WASM section from a (large) code buffer. Same shape as
+  WriteSmallSection; used for code and data sections. }
 procedure WriteCodeSection(id: byte; var buf: TCodeBuf);
 var i: longint;
 begin
@@ -6585,6 +6592,7 @@ begin
   end;
 end;
 
+{** Build the import section from the imports table (WASI functions). }
 procedure AssembleImportSection;
 var i, j: longint;
 begin
@@ -6606,6 +6614,11 @@ begin
   end;
 end;
 
+{** Build the function section: type index for each defined function.
+
+  Slots 0..22 are reserved for the compiler-generated runtime helpers
+  (_start, __write_int, __read_int, string ops, checked arithmetic,
+  set ops, etc.). Slots 23+ are user-defined functions. }
 procedure AssembleFunctionSection;
 var i: longint;
 begin
@@ -6663,6 +6676,8 @@ begin
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
 end;
 
+{** Build the memory section. Declares a single linear memory with
+  pages = max(optMemPages, ceil(dataPos/64KiB)) and max optMaxMemPages. }
 procedure AssembleMemorySection;
 var
   minPages: longint;
@@ -6678,6 +6693,11 @@ begin
   SmallEmitULEB128(secMemory, optMaxMemPages);
 end;
 
+{** Build the global section.
+
+  Globals: $sp (stack pointer, mutable i32) + 8 display[] frame
+  pointers for nested-scope access + immutable __version encoding
+  CalVer as YY*65536 + MM*256 + patch. }
 procedure AssembleGlobalSection;
 const
   MaxDisplayDepth = 8;
@@ -6709,6 +6729,8 @@ begin
   SmallBufEmit(secGlobal, OpEnd);
 end;
 
+{** Build the export section. Always exports _start (entry point),
+  memory, and __version global; then any user EXPORT directives. }
 procedure AssembleExportSection;
 var
   i, j: longint;
@@ -6949,7 +6971,7 @@ begin
 end;
 
 procedure BuildIntToStrHelper;
-(* Build __int_to_str(value: i32, dest: i32) function body into helperCode.
+(** Build __int_to_str(value: i32, dest: i32) function body into helperCode.
    Converts an i32 to decimal ASCII in intBuf scratch area, then copies
    the result as a Pascal string (length byte + chars) to dest.
 
@@ -8352,6 +8374,7 @@ begin
   EmitHelperI32Const(1);
 end;
 
+{** Append all bytes from a code buffer to the secCode section buffer. }
 procedure CopyBufToCode(var src: TCodeBuf);
 var i: longint;
 begin
@@ -8922,6 +8945,10 @@ begin
   ReadULEB128 := result_val;
 end;
 
+{** Decode a signed LEB128 integer from a code buffer at pos.
+
+  Advances pos past the encoded bytes. Used by the -d disassembler
+  (DumpBytes) to display i32.const operands. }
 function ReadSLEB128(var buf: TCodeBuf; var pos: longint): longint;
 var
   b: byte;
@@ -9381,6 +9408,11 @@ end;
 
 { ---- Main ---- }
 
+{** Reset all global compiler state so Compile can be called cleanly.
+
+  Clears the symbol table, scopes, buffers, imports, exports, function
+  table, and all accumulated WASM section buffers. Called once at the
+  start of each compilation. }
 procedure Init;
 var
   i: longint;
