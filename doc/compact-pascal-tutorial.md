@@ -3361,6 +3361,12 @@ Monomorphized generics (like C++ templates or Rust generics) instantiate a separ
 
 **What it requires:** An AST or intermediate representation to store unparsed generic bodies. A second pass to instantiate them. This breaks the single-pass architecture, which is why generics were excluded from the core language. A restricted form (generics over pointer-sized types only, using type erasure) could preserve single-pass at the cost of runtime overhead.
 
+### A Peephole Optimizer
+
+The compiler emits WASM instructions one at a time as it parses expressions. That process leaves characteristic redundancies in the output — a `local.set` immediately followed by a `local.get` of the same local, an `i32.const 0` followed by `i32.add`, pairs of `i32.eqz` that cancel out. A *peephole optimizer* slides a small window over the code buffer after each emission and rewrites recognized patterns in place. The compiler image grows by about 150 lines; the generated WASM shrinks by 5–15 percent on typical programs.
+
+Adding an optimizer after the fact is itself a useful exercise, because the emit layer of this compiler was not designed with one in mind. See **Addendum C: Retrofitting a Peephole Optimizer** — it walks through auditing the existing emit sites, inserting a single hook procedure, gating the whole thing behind `{$IFDEF PEEPHOLE}` so the base compiler is unaffected, and verifying that the existing test suite still passes byte-for-byte with the optimizer disabled.
+
 ### Suggested Reading
 
 - Niklaus Wirth, *Compiler Construction* (1996/2005) — the single-pass recursive-descent tradition this compiler follows.
@@ -3458,6 +3464,391 @@ The block type `bt` is typically `0x40` (void — no value produced) or a value 
 ## Appendix B: Compact Pascal Grammar
 
 See the *Compact Pascal Language Reference* for the complete formal grammar in EBNF notation.
+
+\newpage
+
+## Addendum C: Retrofitting a Peephole Optimizer
+
+This addendum is an optional exercise. Unlike the numbered chapters, it does not add a feature that the language needs — the compiler is already complete without it. Instead, it teaches a skill: inserting an optimizer into a code generator that was not designed for one.
+
+That framing is honest. When the emit layer was introduced back in Chapter 3, we wrote `EmitOp`, `EmitI32Const`, and their siblings as the simplest thing that could possibly work. We did not plan for optimization. Most compilers are built that way. Direct emission is the shortest path from source to output, and teams ship the first version that way to prove the pipeline works. Then someone measures the binary size, or runs the compiler on its own source code, and notices the output is larger than it needs to be. At that point the question becomes: *how do we add optimization to code that was not built for it?*
+
+That question is what this addendum answers. The peephole optimizer itself is short — about 150 lines of Pascal. The interesting work is everything around it: finding the right place to insert the hook, keeping the base compiler unchanged, making sure the existing test suite still passes byte-for-byte when the optimizer is disabled.
+
+### Why the Compiler Leaves Redundancies
+
+A single-pass recursive-descent compiler does not see far enough ahead to avoid emitting sequences that cancel each other out. Consider this Pascal fragment:
+
+```pascal
+x := y + 1;
+```
+
+The expression parser descends into `y + 1`, emits `local.get y`, then `i32.const 1`, then `i32.add`. The result sits on the WASM stack. The assignment then emits `local.set x`. So far so good — five instructions, no waste.
+
+But now consider:
+
+```pascal
+x := x + 1;
+y := x * 2;
+```
+
+After the first statement the compiler has emitted `local.get x / i32.const 1 / i32.add / local.set x`. For the second statement, it immediately emits `local.get x` again — fetching the value it just stored. A human writing WASM by hand would have used `local.tee x` instead of `local.set x`, leaving the new value on the stack for the next use. The single-pass parser does not know the next statement needs `x` until it gets there, by which point `local.set` has already been emitted.
+
+Patterns like this show up everywhere in the output. They are not bugs. They are the natural consequence of a parser that commits to each instruction the moment it knows enough to emit it. A peephole optimizer cleans them up after the fact.
+
+### The Sliding Window
+
+The optimizer watches the last few bytes of the code buffer. After each complete instruction is emitted, it asks: *do the trailing bytes match a pattern I know how to rewrite?* If yes, it rewinds the buffer write pointer and emits the replacement. If no, it does nothing.
+
+There is no second pass. There is no intermediate representation. The buffer already exists — `startCode` has been the code buffer for every function body since Chapter 6. The optimizer reaches into that buffer, reads the trailing bytes, and sometimes modifies them.
+
+```
+Code buffer before TryPeephole runs:
++------+------+------+------+------+------+------+
+| ...  | 0x20 | 0x03 | 0x41 | 0x05 | 0x6A | 0x21 |
+| ...  | get  | (3)  | const| (5)  | add  | set  |
++------+------+------+------+------+------+------+
+                                              ^
+                                              b.len
+
+The parser has just emitted local.set. TryPeephole looks at the
+trailing bytes, sees nothing special, returns. Next emission.
+```
+
+The window is small — typically the trailing two or three instructions, enough to catch the common patterns without running a full dataflow analysis.
+
+### Prerequisite 1: Conditional Compilation Symbols
+
+The whole optimizer is gated behind `{$IFDEF PEEPHOLE}` so a reader who skips this addendum gets a smaller compiler. That means the `PEEPHOLE` symbol has to come from somewhere. In Free Pascal you pass `-dPEEPHOLE` on the command line. The self-hosted compiler needs the same feature.
+
+In Chapter 2 the compiler learned to read its source from stdin. For command-line flags it needs to look at the WASI `args_get` import. The parser for `{$IFDEF}` from Chapter 10 already consults a symbol table — we only need to seed that table from the command line.
+
+```pascal
+{ In the startup code, after args_get has populated argBuf: }
+argIdx := 1;
+while argIdx < argCount do begin
+  arg := GetArg(argIdx);
+  if (length(arg) >= 2) and (arg[1] = '-') and (arg[2] = 'd') then
+    DefineSymbol(copy(arg, 3, length(arg) - 2));
+  { other flags... }
+  argIdx := argIdx + 1;
+end;
+```
+
+`DefineSymbol` adds an entry to the same table that `{$DEFINE}` writes to. No other changes to conditional compilation are needed.
+
+### Prerequisite 2: The -O Flag and optLevel
+
+Even when the optimizer is compiled in, the user might want to disable it — for debugging, for measuring, for bisecting a suspected miscompile. A runtime flag handles this:
+
+```pascal
+var
+  optLevel: longint;  { 0 = off, 1 = peephole }
+```
+
+The argument parser reads `-O0` or `-O1` and sets `optLevel` accordingly. The default is `1` when peephole is compiled in and `0` when it is not (the variable is initialized to 0 at startup and the peephole code is the only thing that ever raises it). Inside `TryPeephole`:
+
+```pascal
+procedure TryPeephole(var b: TCodeBuf);
+begin
+  {$IFDEF PEEPHOLE}
+  if optLevel = 0 then exit;
+  { pattern matching... }
+  {$ENDIF}
+end;
+```
+
+When `PEEPHOLE` is not defined, the procedure body is empty. The Pascal compiler inlines empty procedures, so the cost at every emit site is zero bytes in the compiler image.
+
+### Prerequisite 3: The {$OPT+/-} Directive
+
+Per-region control lets a reader disable the optimizer around a specific block — usually for comparing two emitted sequences. The implementation reuses the directive-parsing machinery from Chapter 10:
+
+```pascal
+{ Inside the directive parser }
+if MatchDirective('OPT+') then
+  optLevel := 1
+else if MatchDirective('OPT-') then
+  optLevel := 0;
+```
+
+That is the entire implementation. Save the old value on a stack if you want proper scoping; for a first pass, a flat toggle is enough.
+
+### Finding the Hook: An Audit
+
+Now the interesting part. The optimizer has to run *after each instruction is emitted*. Where in the existing code is that boundary?
+
+The obvious answer is `CodeBufEmit` — the byte-level append in Chapter 3. Hooking there would see every byte the compiler writes. But that is the wrong answer, and seeing why teaches the retrofit lesson.
+
+Grep the compiler for `CodeBufEmit` calls. The results split into several categories:
+
+| Caller | What it writes | Is this an instruction boundary? |
+|---|---|---|
+| `EmitULEB128`, `EmitSLEB128` | operand bytes for prior opcode | No — still inside an instruction |
+| `EmitOp` | single-byte opcodes | Yes |
+| `EmitI32Const` | `0x41` + SLEB128 value | Yes, after the value |
+| `EmitCall` | `0x10` + ULEB128 funcidx | Yes, after the index |
+| `EmitI32Store`, `EmitI32Load` | opcode + align + offset | Yes, after the offset |
+| `EmitMemoryCopy` | fixed 4-byte sequence | Yes, after the last byte |
+| Inline `CodeBufEmit(startCode, ...)` inside larger helpers | individual bytes | No — mid-instruction |
+| Bulk copy into `funcBodies` | function-body rollup | No — not emission |
+| `WriteOutputByte` | final binary serialization | No — already serialized |
+| `secCode` block for built-in helpers | hand-authored sequences | No — already optimized |
+
+The byte-level `CodeBufEmit` is called from ~20 places in the compiler, many of which emit bytes that are *not* opcode boundaries. LEB128 continuation bytes, alignment immediates, block-type bytes, section framing. If the optimizer hooked at `CodeBufEmit`, it would see the instruction stream as an unframed byte soup — and it would need to re-implement the WASM instruction-length grammar to find the boundaries. That is more complex than the optimizer itself.
+
+The right hook is the *higher-level* Emit functions: `EmitOp`, `EmitI32Const`, `EmitCall`, and so on. Each of those emits exactly one complete instruction. Calling `TryPeephole` at the end of each one gives the optimizer a clean view: *the last instruction in the buffer is now complete; look at it and decide whether to rewrite.*
+
+```pascal
+procedure EmitOp(op: byte);
+begin
+  CodeBufEmit(startCode, op);
+  TryPeephole(startCode);
+end;
+
+procedure EmitI32Const(value: longint);
+begin
+  CodeBufEmit(startCode, OpI32Const);
+  EmitSLEB128(startCode, value);
+  TryPeephole(startCode);
+end;
+
+procedure EmitCall(funcIdx: longint);
+begin
+  CodeBufEmit(startCode, OpCall);
+  EmitULEB128(startCode, funcIdx);
+  TryPeephole(startCode);
+end;
+```
+
+Roughly ten Emit* helpers need the trailing call. The parser, the symbol table, and the section writer do not change at all. That is the retrofit: invasive enough to require touching every emit site, localized enough that the touched sites all live in a single band of the source.
+
+The helper-function buffer `helperCode` uses a parallel family of `EmitHelper*` procedures. Each of those gets its own `TryPeephole(helperCode)` call. The built-in helpers in `secCode` — hand-written sequences for `overflow_add`, `str_copy`, and so on — do *not* go through the Emit* layer. They call `CodeBufEmit` directly with audited byte sequences. The optimizer never sees them, which is correct: they are already optimal for their hand-written purpose.
+
+### The TryPeephole Procedure
+
+The skeleton:
+
+```pascal
+procedure TryPeephole(var b: TCodeBuf);
+{$IFDEF PEEPHOLE}
+var
+  op1, op2, op3: byte;
+{$ENDIF}
+begin
+  {$IFDEF PEEPHOLE}
+  if optLevel = 0 then exit;
+  if b.len < 2 then exit;
+
+  op2 := b.data[b.len - 1];
+  op1 := b.data[b.len - 2];
+
+  { Two-instruction patterns on opcode bytes alone }
+  if (op1 = OpI32Eqz) and (op2 = OpI32Eqz) then begin
+    b.len := b.len - 2;  { drop both — they cancel }
+    exit;
+  end;
+
+  { Patterns with operands — need more work }
+  TryLocalTee(b);
+  TryConstFold(b);
+  {$ENDIF}
+end;
+```
+
+The base case is the easiest pattern to implement: `i32.eqz` followed by `i32.eqz`. Both are single bytes with no operand, so matching is two byte comparisons and rewriting is a subtraction from `b.len`. Four lines of code. The buffer is left shorter than it was; the write pointer now sits where the first `i32.eqz` used to be.
+
+Every pattern the optimizer knows follows the same shape: *read the trailing bytes, recognize a sequence, rewind the buffer, optionally emit a replacement*.
+
+### Pattern 1: local.set/get → local.tee
+
+The most common redundancy. `local.set X` writes the top of the stack to local X. `local.get X` pushes local X onto the stack. If they are adjacent and name the same local, the compiler wrote a value and immediately read it back — exactly what `local.tee X` does in one instruction.
+
+Both `local.set` and `local.get` take a ULEB128 local index as their operand. For locals 0–127 (almost all of them) the index fits in a single byte. The matcher looks for a four-byte trailing sequence: `0x21 idx 0x20 idx`.
+
+```pascal
+procedure TryLocalTee(var b: TCodeBuf);
+var
+  idx1, idx2: byte;
+begin
+  if b.len < 4 then exit;
+  if b.data[b.len - 4] <> OpLocalSet then exit;
+  if b.data[b.len - 2] <> OpLocalGet then exit;
+  idx1 := b.data[b.len - 3];
+  idx2 := b.data[b.len - 1];
+  if idx1 <> idx2 then exit;
+  if idx1 >= 128 then exit;  { multi-byte LEB128, skip for now }
+  b.len := b.len - 4;
+  CodeBufEmit(b, OpLocalTee);
+  CodeBufEmit(b, idx1);
+end;
+```
+
+Notice the early exit on `idx1 >= 128`. Multi-byte LEB128 values would require decoding both operands and comparing the decoded values, not the raw bytes. Most programs never have more than 128 locals in a single function, so the simple form catches almost everything. A reader who wants to handle the general case can add a `DecodeULEB128` helper — maybe twenty lines — and drop the restriction.
+
+### Pattern 2: Identity Elimination
+
+`i32.const 0 / i32.add` is equivalent to no operation. The addend is zero; the sum is the other operand. Same for `i32.const 0 / i32.sub`, `i32.const 0 / i32.or`, and `i32.const 1 / i32.mul`.
+
+```pascal
+procedure TryIdentity(var b: TCodeBuf);
+begin
+  if b.len < 3 then exit;
+  if b.data[b.len - 3] <> OpI32Const then exit;
+
+  case b.data[b.len - 2] of  { the constant value, for small SLEB128 }
+    0: begin
+      case b.data[b.len - 1] of
+        OpI32Add, OpI32Sub, OpI32Or, OpI32Xor: b.len := b.len - 3;
+      end;
+    end;
+    1: begin
+      case b.data[b.len - 1] of
+        OpI32Mul: b.len := b.len - 3;
+      end;
+    end;
+  end;
+end;
+```
+
+The SLEB128 encoding of 0 is the single byte `0x00`; of 1, the single byte `0x01`. Values outside that range encode to multiple bytes, and the matcher ignores them — constant folding (the next pattern) handles larger values.
+
+### Pattern 3: Constant Folding
+
+When two `i32.const` values are followed by an arithmetic operator, both values are known at compile time. The optimizer can compute the result and emit a single `i32.const` of the sum, product, or difference.
+
+```pascal
+procedure TryConstFold(var b: TCodeBuf);
+var
+  a, bv, result: longint;
+  aLen, bLen: longint;
+begin
+  if b.len < 5 then exit;
+  if not IsI32ConstAt(b, b.len - 5, a, aLen) then exit;
+  if not IsI32ConstAt(b, b.len - 5 + aLen, bv, bLen) then exit;
+  if b.len - 5 + aLen + bLen + 1 <> b.len then exit;
+
+  case b.data[b.len - 1] of
+    OpI32Add: result := a + bv;
+    OpI32Sub: result := a - bv;
+    OpI32Mul: result := a * bv;
+    else exit;
+  end;
+
+  b.len := b.len - (aLen + bLen + 2);  { rewind past both consts + opcode }
+  EmitI32ConstRaw(b, result);
+end;
+```
+
+`IsI32ConstAt` is a helper that checks for `0x41` at the given offset and decodes the following SLEB128. `EmitI32ConstRaw` writes an `i32.const` without recursing back into `TryPeephole` — otherwise the optimizer could loop on its own output. The rest of the logic is straightforward arithmetic.
+
+Constant folding is where the `const` declarations from Chapter 10 and the peephole optimizer overlap. The const-evaluator at parse time handles expressions like `Range = MaxSize - MinSize`, producing a single `i32.const` directly. The peephole optimizer handles expressions the parser cannot see at parse time: inlined function calls that happen to return constants, macros expanded from included files, and plain-old hand-written `writeln(10 + 5)`. Together they cover both cases.
+
+### Pattern 4: Strength Reduction
+
+`i32.const 2 / i32.mul` can be rewritten as `i32.const 1 / i32.shl`. Multiplying by a power of two is the same as shifting left by the exponent. This optimization mattered on real hardware from the 1970s through the 1990s — the era of Pascal's heyday — because integer multiply took several cycles while a shift took one. A compiler that knew the multiplier was a constant power of two saved real time by emitting a shift.
+
+On modern WASM runtimes this is almost certainly a wash. The JIT in V8, SpiderMonkey, and wasmtime recognizes constant power-of-two multiplies and lowers them to shifts internally. The optimization has graduated from "essential" to "historical curiosity." Implement it anyway, because there is a useful lesson in the code:
+
+```pascal
+procedure TryStrengthReduce(var b: TCodeBuf);
+var
+  k, kLen, logK: longint;
+begin
+  if b.len < 3 then exit;
+  if b.data[b.len - 1] <> OpI32Mul then exit;
+  { decode the constant immediately preceding the mul }
+  if not IsI32ConstAt(b, b.len - 1 - 2, k, kLen) then exit;
+  if (k <= 0) or ((k and (k - 1)) <> 0) then exit;  { not a power of two }
+  { only handle the single-byte SLEB128 case for simplicity }
+  if kLen <> 2 then exit;
+  logK := 0;
+  while k > 1 do begin k := k shr 1; logK := logK + 1; end;
+  { rewrite in place: change the constant value and the opcode }
+  b.data[b.len - 2] := byte(logK);
+  b.data[b.len - 1] := OpI32Shl;
+end;
+```
+
+The lesson is about layering. The same transformation can be performed at three different layers — source level (the programmer writes `x shl 1` instead of `x * 2`), compile time (the peephole optimizer rewrites it), and runtime (the JIT lowers it). Each layer has to decide whether to spend effort on a transformation that a lower layer will also perform. The answer depends on what the lower layer is actually doing. In 1985 the JIT did not exist, so the compiler had to do strength reduction. In 2026 the JIT does it for free, so the compiler can choose to skip it — but implementing it teaches you how to think about the layering.
+
+### Cascading Rewrites
+
+After one pattern fires, the shortened trailing sequence might match another. Consider:
+
+```
+i32.const 2
+i32.const 3
+i32.add       ← constant folding rewrites this trio as i32.const 5
+i32.const 0   ← and now this const is followed by...
+i32.add       ← ...an add, so identity elimination should drop both
+```
+
+A single-fire `TryPeephole` catches the first rewrite but not the second. A cascading implementation loops until no more patterns match:
+
+```pascal
+procedure TryPeephole(var b: TCodeBuf);
+var
+  prevLen: longint;
+begin
+  if optLevel = 0 then exit;
+  repeat
+    prevLen := b.len;
+    TryLocalTee(b);
+    TryIdentity(b);
+    TryConstFold(b);
+    TryStrengthReduce(b);
+    { add others as you implement them }
+  until b.len = prevLen;
+end;
+```
+
+The loop terminates because every successful rewrite strictly shortens the buffer. A reader implementing this for the first time might start with the single-fire form and add the loop once they observe a cascading case in real output.
+
+### Validating the Retrofit
+
+Before claiming the optimizer works, prove it has not broken anything. The existing test suite compiled 84 programs and checked their runtime output. With the optimizer compiled in but disabled (`-O0`), every test must still pass *and* the emitted WASM must be byte-for-byte identical to the pre-optimizer compiler. If any output differs, the retrofit has introduced a bug in the base emit path — probably a `TryPeephole` call added to a site that should not have one.
+
+```bash
+# Compile without PEEPHOLE, save binaries
+fpc -Mtp compiler/cpas.pas
+./run-tests.sh
+cp compiler-tests/build compiler-tests/build-base
+
+# Compile with PEEPHOLE, run with -O0, compare
+fpc -Mtp -dPEEPHOLE compiler/cpas.pas
+CPAS_ARGS="-O0" ./run-tests.sh
+diff -r compiler-tests/build-base compiler-tests/build  # must be empty
+```
+
+The empty diff is the proof of correctness for the retrofit itself. Only after that passes do you turn on `-O1` and verify that the tests still produce the right runtime output — at that point any remaining bugs are in the pattern implementations, not in the hook placement.
+
+### Measuring the Result
+
+Once the tests pass under `-O1`, measure. The most satisfying benchmark is the compiler compiling itself:
+
+```bash
+# Produce the unoptimized self-hosted build
+cpas -O0 -dPEEPHOLE < compiler/cpas.pas > build/cpas-O0.wasm
+
+# Produce the optimized self-hosted build
+cpas -O1 -dPEEPHOLE < compiler/cpas.pas > build/cpas-O1.wasm
+
+wc -c build/cpas-O0.wasm build/cpas-O1.wasm
+```
+
+A typical result on the Phase 1 compiler is a 5–15 percent reduction in `.wasm` size, depending on which patterns are implemented. The biggest share comes from `local.set/get → local.tee`, because that pattern fires on virtually every assignment followed by a re-read. Constant folding contributes less than you would expect, because the const evaluator from Chapter 10 already catches most of the cases that appear in real source code.
+
+### What the Retrofit Taught
+
+The optimizer is a hundred-something lines of Pascal. The interesting material is the surrounding decisions:
+
+- The right hook for a "run after each instruction" action is not the lowest-level emit function. It is the set of *instruction-boundary* functions. Finding that set required an audit.
+- Gating the entire feature behind `{$IFDEF}` plus a runtime flag means a reader who does not want the optimizer gets a smaller, simpler compiler — and the reader who does want it gets a kill switch for debugging.
+- The byte-for-byte diff under `-O0` is what proves the retrofit is safe. Output invariance under a disabled feature is a useful contract in any codebase, not just a compiler.
+- The same transformation can exist at multiple layers. Deciding whether your layer should perform it requires knowing what the other layers do.
+
+The reason this addendum exists is that most real-world compilers, runtimes, and interpreters get optimizers added to them late. The people doing the adding have to work within code that did not anticipate them. If you finish the tutorial and then add this optimizer, you have practiced exactly that skill on a codebase small enough to hold in your head — which is the last time in your career that will be true.
 
 ---
 
