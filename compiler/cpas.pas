@@ -1598,21 +1598,25 @@ end;
 
 { ---- Buffer operations ---- }
 
+{** Reset a small section buffer to empty. }
 procedure SmallBufInit(var b: TSmallBuf);
 begin
   b.len := 0;
 end;
 
+{** Reset a code-section buffer to empty. }
 procedure CodeBufInit(var b: TCodeBuf);
 begin
   b.len := 0;
 end;
 
+{** Reset a data-section buffer to empty. }
 procedure DataBufInit(var b: TDataBuf);
 begin
   b.len := 0;
 end;
 
+{** Append one byte to a small buffer. Halts on overflow. }
 procedure SmallBufEmit(var b: TSmallBuf; v: byte);
 begin
   if b.len > SmallBufMax then
@@ -1621,6 +1625,7 @@ begin
   b.len := b.len + 1;
 end;
 
+{** Append one byte to the code buffer. Halts on overflow. }
 procedure CodeBufEmit(var b: TCodeBuf; v: byte);
 begin
   if b.len > CodeBufMax then
@@ -1629,6 +1634,7 @@ begin
   b.len := b.len + 1;
 end;
 
+{** Append one byte to the data buffer. Halts on overflow. }
 procedure DataBufEmit(var b: TDataBuf; v: byte);
 begin
   if b.len > DataBufMax then
@@ -1639,6 +1645,11 @@ end;
 
 { ---- LEB128 encoding ---- }
 
+{** Emit an unsigned LEB128-encoded integer to the code buffer.
+
+  LEB128 is WASM's variable-length integer encoding: 7 data bits per
+  byte, high bit set on all but the last byte. Used for indices,
+  offsets, alignment, and sizes in the WASM binary format. }
 procedure EmitULEB128(var b: TCodeBuf; value: longint);
 var
   v: longint;
@@ -1672,7 +1683,13 @@ begin
   { Let me redo this properly }
 end;
 
-{ Redo signed LEB128 properly for TP where shr is logical }
+{** Emit a signed LEB128-encoded integer to the code buffer.
+
+  Signed LEB128 uses sign-magnitude continuation: the loop stops when
+  the remaining value is 0 (positive) or -1 (negative) AND the sign
+  bit of the last emitted byte matches. TP shr is logical, so we
+  manually sign-extend after the shift for negative values. Used for
+  i32.const operands in WASM. }
 procedure EmitSLEB128Fix(var b: TCodeBuf; value: longint);
 var
   byt: byte;
@@ -1702,6 +1719,8 @@ begin
 end;
 
 { Small buffer versions of LEB128 }
+
+{** Emit a signed LEB128 integer to a small buffer. See EmitSLEB128Fix. }
 procedure SmallEmitSLEB128(var b: TSmallBuf; value: longint);
 var
   byt: byte;
@@ -1726,6 +1745,7 @@ begin
   end;
 end;
 
+{** Emit an unsigned LEB128 integer to a small buffer. See EmitULEB128. }
 procedure SmallEmitULEB128(var b: TSmallBuf; value: longint);
 var
   v: longint;
