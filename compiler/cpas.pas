@@ -576,6 +576,12 @@ var
   pushbackCh: char;
   hasPushback: boolean;
 
+{** Read the next input character into the global ch, or set atEof.
+
+  Honors a single-character pushback buffer (set by UnreadCh) so the
+  scanner can peek one character ahead. Tracks srcLine / srcCol for
+  diagnostics. Two variants: the FPC build reads from the input file
+  handle, the TP/self-hosted build uses default stdin via WASI. }
 {$IFDEF FPC}
 procedure ReadCh;
 begin
@@ -618,6 +624,8 @@ begin
 end;
 {$ENDIF}
 
+{** Push a character back so the next ReadCh returns it.
+  Only one character of pushback is supported. }
 procedure UnreadCh(c: char);
 begin
   pushbackCh := c;
@@ -626,6 +634,7 @@ end;
 
 { ---- Scanner ---- }
 
+{** Return c upper-cased if it is an ASCII lowercase letter, else c unchanged. }
 function UpCase(c: char): char;
 begin
   if (c >= 'a') and (c <= 'z') then
@@ -634,12 +643,14 @@ begin
     UpCase := c;
 end;
 
+{** Consume whitespace (anything with code <= space) up to the next token. }
 procedure SkipWhitespace;
 begin
   while (not atEof) and (ch <= ' ') do
     ReadCh;
 end;
 
+{** Consume a // line comment through the trailing newline (but not past it). }
 procedure SkipLineComment;
 begin
   { // comment - skip to end of line }
@@ -647,12 +658,13 @@ begin
     ReadCh;
 end;
 
+{** Skip source text in an inactive IFDEF/ELSE branch.
+
+  Scans characters looking for ELSE or ENDIF at nesting depth 0,
+  counting nested IFDEF/IFNDEF/ENDIF pairs. Returns true if stopped
+  at ELSE, false if stopped at ENDIF. On exit, ch is the character
+  after the closing brace of the ELSE or ENDIF directive. }
 function SkipInactiveBlock: boolean;
-(* Skip source text in an inactive IFDEF/ELSE branch.
-   Scans characters looking for ELSE or ENDIF at nesting depth 0,
-   counting nested IFDEF/IFNDEF/ENDIF pairs.
-   Returns true if stopped at ELSE, false if stopped at ENDIF.
-   On exit, ch = character after the closing brace of the ELSE or ENDIF. *)
 var
   depth: longint;
   dir: string;
@@ -729,9 +741,13 @@ begin
   SkipInactiveBlock := false;
 end;
 
+(** Parse a brace comment or compiler directive ($I, $IFDEF, $R+/-, etc.).
+
+  On entry, ch is the opening brace. On exit, ch is the character
+  after the closing brace. Directives are dispatched here: $I include,
+  $IFDEF / $ELSE / $ENDIF conditional compilation, $R+/- range checks,
+  $Q+/- overflow checks, and friends. *)
 procedure SkipBraceComment;
-(* Parse brace comment or compiler directive.
-   On entry, ch = opening brace. On exit, ch = character after closing brace. *)
 var
   directive: string;
   modName: string[63];
@@ -955,6 +971,8 @@ begin
     Error('unterminated comment');
 end;
 
+{** Skip a (* ... *) paren-star comment. On entry, ch is the '*' after
+  the '('; on exit, ch is the character after the closing ')'. }
 procedure SkipParenComment;
 begin
   { (* comment *) }
@@ -972,6 +990,11 @@ begin
   Error('unterminated comment');
 end;
 
+(** Consume any run of whitespace and comments (brace, paren-star, line).
+
+  Loops until ch is positioned on a real token character (or atEof).
+  A lone '(' or '/' that is not followed by a comment is pushed back
+  and left for NextToken to tokenize. *)
 procedure SkipWhitespaceAndComments;
 var done: boolean;
 begin
@@ -1013,6 +1036,10 @@ begin
   end;
 end;
 
+{** Return the token kind for s if it is a reserved word, else -1.
+
+  s must already be uppercased (Pascal keywords are case-insensitive,
+  so the scanner uppercases the identifier before looking it up). }
 function LookupKeyword(const s: string): longint;
 begin
   LookupKeyword := -1;
@@ -1071,6 +1098,11 @@ var
   pendingInt: longint;
   pendingStr: string;
 
+{** Scan an integer literal into tokInt.
+
+  Accepts decimal, $hex, &octal, %binary, and 0x/0o/0b prefix forms.
+  Sets tokKind := tkInt. Underscores between digits are allowed as
+  visual separators. Overflows are reported by Error. }
 procedure ScanNumber;
 var
   n: longint;
@@ -1208,6 +1240,10 @@ begin
   tokInt := n;
 end;
 
+{** Scan a Pascal string literal (single-quoted) into tokStr.
+
+  Doubled quotes inside the literal represent a single quote. High
+  bytes (>=$80) are passed through verbatim for UTF-8 source. }
 procedure ScanString;
 var
   s: string;
@@ -1282,6 +1318,10 @@ begin
   tokStr := s;
 end;
 
+{** Scan a #nnn character constant or #nnn-prefixed string.
+
+  Accepts runs of #N / 'text' / #N ... and concatenates them into
+  tokStr (as tkString). A single #N becomes a one-character string. }
 procedure ScanCharConst;
 { #N or #$HH char constant at start of token (not adjacent to string) }
 var
@@ -1347,6 +1387,22 @@ begin
   end;
 end;
 
+{** Scan the next token and fill the globals tokKind/tokInt/tokStr.
+
+  Single-pass, one-token lookahead. The parser never touches raw
+  characters — all tokenization flows through here. Output fields:
+
+    tokKind : longint  — one of the tk* constants (tkIdent, tkInt,
+                         tkString, tkPlus, tkBegin, ..., tkEof).
+    tokInt  : longint  — integer value for tkInt, char code for
+                         single-char constants.
+    tokStr  : string   — identifier or string literal text.
+    tokLine, tokCol    — source position of this token's first char.
+
+  pendingTok is a one-token unread buffer: if set by the parser
+  (via PushToken), that token is returned first before scanning
+  resumes. Whitespace and all comment forms are consumed by
+  SkipWhitespaceAndComments before dispatch on the leading char. }
 procedure NextToken;
 var
   ident: string;
@@ -1496,6 +1552,8 @@ begin
   end;
 end;
 
+{** Require the current token to be tk, then advance.
+  Reports an error and halts if the current token is something else. }
 procedure Expect(tk: longint);
 var s: string;
 begin
