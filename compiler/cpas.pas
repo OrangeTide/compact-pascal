@@ -2864,11 +2864,26 @@ end;
 
 { ---- Parsing ---- }
 
-procedure ParseExpression(minPrec: longint);
-{** Pratt-style precedence climbing expression parser.
-  Each call parses a complete expression with operators at or above minPrec.
-  Emits WASM code directly to startCode buffer.
+{** Parse an expression using precedence climbing (Pratt).
+
+  minPrec is the minimum binding power this call will accept; an
+  operator with lower precedence terminates the loop and returns to
+  the caller. Called initially with minPrec = 0 (accept anything).
+
+  Grammar precedence (highest to lowest):
+    7  unary + - not
+    6  * / div mod and shl shr
+    5  + - or xor
+    4  = <> < <= > >= in
+
+  Prefix operators and primary expressions are dispatched before the
+  loop; infix operators inside it. Emits WASM directly to startCode:
+  operands are pushed, then the operator opcode, in the natural
+  stack-machine order. Type checking and promotion happen inline.
+
+  @param minPrec minimum operator precedence to accept
 }
+procedure ParseExpression(minPrec: longint);
 var
   prec: longint;
   op: longint;
@@ -6281,6 +6296,14 @@ begin
   curFrameSize := savedFrameSize;
 end;
 
+{** Parse a Pascal declaration block followed by a begin/end compound body.
+
+  Handles the full Pascal block structure: optional const/type/var
+  sections (repeatable, in any order), nested procedure/function
+  declarations, then the main begin..end compound statement. Called
+  recursively for nested procedures via ParseProcDecl. Maintains
+  curFrameSize across nested calls so each scope gets its own frame
+  size bookkeeping. }
 procedure ParseBlock;
 var
   savedFrameSize: longint;
