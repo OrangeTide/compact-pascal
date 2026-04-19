@@ -533,12 +533,19 @@ procedure EvalConstExpr(var outVal: longint; var outTyp: longint); forward;
 
 { ---- Error handling ---- }
 
+{** Write s to stderr with no trailing newline.
+
+  Host embeddings rely on stderr for diagnostics; all messages carry
+  a tag prefix (Error:, Warning:, Info:, Debug:, Progress:) so hosts
+  can parse them mechanically. The FPC and WASM/TP branches differ
+  only in how the output file is referenced. }
 {$IFDEF FPC}
 procedure WriteError(s: string);
 begin
   write(stderr, s);
 end;
 
+{** Write s to stderr followed by a newline. }
 procedure WriteErrorLn(s: string);
 begin
   writeln(stderr, s);
@@ -556,6 +563,11 @@ begin
 end;
 {$ENDIF}
 
+{** Report a fatal error at the current source position and halt(1).
+
+  All compiler errors go through here. No recovery is attempted — the
+  single-pass design halts on the first error to avoid cascading false
+  positives. Format: "Error: [line:col] msg". }
 procedure Error(msg: string);
 var lineStr, colStr: string[11];
 begin
@@ -565,6 +577,7 @@ begin
   halt(1);
 end;
 
+{** Report a "<what> expected" error at the current source position. }
 procedure Expected(what: string);
 begin
   Error(what + ' expected');
