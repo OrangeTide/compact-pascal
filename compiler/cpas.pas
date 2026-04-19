@@ -1992,24 +1992,30 @@ end;
 
 { ---- Code emission helpers (emit to startCode buffer) ---- }
 
+{** Emit a single WASM opcode byte to startCode. }
 procedure EmitOp(op: byte);
 begin
   CodeBufEmit(startCode, op);
 end;
 
+{** Emit i32.const with signed LEB128 operand.
+  ;; WAT: i32.const <value> }
 procedure EmitI32Const(value: longint);
 begin
   CodeBufEmit(startCode, OpI32Const);
   EmitSLEB128Fix(startCode, value);
 end;
 
+{** Emit call to a WASM function by index.
+  ;; WAT: call <funcIdx> }
 procedure EmitCall(funcIdx: longint);
 begin
   CodeBufEmit(startCode, OpCall);
   EmitULEB128(startCode, funcIdx);
 end;
 
-{ Emit i32.store to [addr] }
+{** Emit i32.store with memarg (align exponent, offset).
+  ;; WAT: i32.store offset=<offset> align=<1 shl align> }
 procedure EmitI32Store(align, offset: longint);
 begin
   CodeBufEmit(startCode, OpI32Store);
@@ -2017,6 +2023,8 @@ begin
   EmitULEB128(startCode, offset);
 end;
 
+{** Emit i32.store8 (byte store) at given offset, natural alignment.
+  ;; WAT: i32.store8 offset=<offset> }
 procedure EmitI32Store8(offset: longint);
 begin
   CodeBufEmit(startCode, OpI32Store8);
@@ -2024,8 +2032,8 @@ begin
   EmitULEB128(startCode, offset);
 end;
 
-{ Emit a store appropriate for the given type: i32.store8 for char/boolean,
-  i32.store for integer and other 4-byte types }
+{** Emit a store sized by type: i32.store8 for char/boolean, i32.store
+  (aligned) for integer and other 4-byte types. Stack: addr, value. }
 procedure EmitStoreByType(typ: longint);
 begin
   if (typ = tyChar) or (typ = tyBoolean) then
@@ -2034,7 +2042,8 @@ begin
     EmitI32Store(2, 0);
 end;
 
-{ Emit memory.copy (dst, src, len already on stack) }
+{** Emit the bulk-memory memory.copy instruction.
+  Stack: dst, src, len. ;; WAT: memory.copy }
 procedure EmitMemoryCopy;
 begin
   CodeBufEmit(startCode, $FC);
@@ -2043,7 +2052,8 @@ begin
   CodeBufEmit(startCode, $00);
 end;
 
-{ Emit i32.load from [addr] }
+{** Emit i32.load with memarg.
+  ;; WAT: i32.load offset=<offset> align=<1 shl align> }
 procedure EmitI32Load(align, offset: longint);
 begin
   CodeBufEmit(startCode, OpI32Load);
@@ -2051,6 +2061,8 @@ begin
   EmitULEB128(startCode, offset);
 end;
 
+{** Emit i32.load8_u (zero-extend byte load).
+  ;; WAT: i32.load8_u offset=<offset> }
 procedure EmitI32Load8u(align, offset: longint);
 begin
   CodeBufEmit(startCode, OpI32Load8u);
@@ -2446,10 +2458,21 @@ end;
 
 { ---- Display and frame access ---- }
 
+(** Push the frame pointer for a target nesting level onto the WASM stack.
+
+  Compact Pascal uses the Dijkstra display technique for nested
+  procedure access: WASM global 0 holds the current frame pointer
+  ($sp), and globals 1..MaxNestLevel hold the frame pointers of
+  enclosing procedures at each outer level (the "display"). When
+  accessing a variable at the current level, load global 0; when
+  accessing an outer-scope variable at level L, load display[L] =
+  global L+1. This makes non-local access O(1) and avoids walking
+  static links.
+
+  ;; WAT: global.get $sp            (if level = curNestLevel)
+  ;; WAT: global.get $display{level} (otherwise)
+*)
 procedure EmitFramePtr(level: longint);
-(* Emit code to push the frame pointer for the given nesting level.
-   If level = curNestLevel, use $sp (global 0).
-   Otherwise, use display[level] (global level+1) for upvalue access. *)
 begin
   if level = curNestLevel then begin
     EmitOp(OpGlobalGet);
@@ -2460,9 +2483,17 @@ begin
   end;
 end;
 
+(** Push the pointer value held by a var- or const-parameter.
+
+  var and const parameters are passed by address. The caller stores
+  the target's address in the callee's frame at syms[sym].offset, so
+  loading that slot yields the pointer, which can then be dereferenced
+  by a subsequent load/store. Used whenever the callee wants to read
+  or write through the parameter.
+
+  ;; WAT: global.get $frame_ptr / i32.const <offset> / i32.add / i32.load
+*)
 procedure EmitVarParamPtr(sym: longint);
-(* Emit code to push the pointer stored in a var/const param.
-   The pointer is stored in the frame at syms[sym].offset. *)
 begin
   EmitFramePtr(syms[sym].level);
   EmitI32Const(syms[sym].offset);
@@ -2498,17 +2529,20 @@ begin
   EmitOp(OpDrop);               { discard errno }
 end;
 
+{** Write bytes to stdout (fd 1) via fd_write. }
 procedure EmitWriteString(addr, len: longint);
 begin
   EmitWriteStringFd(1, addr, len);
 end;
 
+{** Write a single newline character to the given file descriptor. }
 procedure EmitWriteNewlineFd(fd: longint);
 begin
   EnsureIOBuffers;
   EmitWriteStringFd(fd, addrNewline, 1);
 end;
 
+{** Write a single newline character to stdout. }
 procedure EmitWriteNewline;
 begin
   EmitWriteNewlineFd(1);
@@ -2802,9 +2836,19 @@ begin
   EnsureIntToStrHelper := numImports + 21;
 end;
 
+{** Emit a call to the __write_int runtime helper.
+
+  The integer value is already on the WASM operand stack at the
+  point of the call. __write_int is a compiler-generated WASM
+  function (see EnsureWriteInt / the int-to-str helper) that
+  converts the i32 to an ASCII decimal representation in a
+  scratch buffer and then calls fd_write(1, ...) to print it.
+  Separating the helper from inline emission keeps call sites
+  cheap — just a single call instruction.
+
+  ;; WAT: call $__write_int
+}
 procedure EmitWriteInt;
-{** Emit a call to the __write_int helper function.
-  The integer value is already on the WASM operand stack. }
 begin
   EmitCall(EnsureWriteInt);
 end;
@@ -6714,22 +6758,30 @@ begin
   end;
 end;
 
+{** Emit an opcode into the helper-function code buffer.
+  Mirror of EmitOp but targets helperCode, used while building
+  compiler-generated runtime helpers like __write_int. }
 procedure EmitHelper(op: byte);
 begin
   CodeBufEmit(helperCode, op);
 end;
 
+{** Emit i32.const into the helper code buffer.
+  ;; WAT: i32.const <value> }
 procedure EmitHelperI32Const(value: longint);
 begin
   CodeBufEmit(helperCode, OpI32Const);
   EmitSLEB128Fix(helperCode, value);
 end;
 
+{** Emit a raw ULEB128 into the helper code buffer. }
 procedure EmitHelperULEB128(value: longint);
 begin
   EmitULEB128(helperCode, value);
 end;
 
+{** Emit a call instruction into the helper code buffer.
+  ;; WAT: call <funcIdx> }
 procedure EmitHelperCall(funcIdx: longint);
 begin
   CodeBufEmit(helperCode, OpCall);
