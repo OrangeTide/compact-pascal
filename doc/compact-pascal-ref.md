@@ -91,7 +91,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 
 - **No file types.** The `file` type and associated operations are omitted.
 - **Built-in I/O is a compiler intrinsic.** `write`, `writeln`, `read`, `readln` are supported but compile to WASI preview 1 `fd_write`/`fd_read` calls rather than being part of the runtime. Any WASI-compatible host provides these automatically. See [Built-in I/O](#built-in-io).
-- **Dynamic allocation deferred.** `New`/`Dispose` are planned (Phase 5) but not available in the initial release. Phase 1 uses stack-only allocation.
+- **Dynamic allocation deferred.** `New`/`Dispose` are planned (Phase 6) but not available in the initial release. Phase 1 uses stack-only allocation.
 - **Short-circuit evaluation.** `and then` and `or else` operators from ISO 10206 are supported. See [Short-Circuit Evaluation](#short-circuit-evaluation).
 - **TP-style short strings.** Strings use the Turbo Pascal length-byte representation, not ISO 7185 packed arrays of char. See [String Representation](#string-representation).
 - **Type casts.** Turbo Pascal-style type casts (`integer(ch)`) are supported.
@@ -156,7 +156,7 @@ Short strings live on the stack or in records — no heap allocation is required
 
 The embedding libraries provide helper functions to copy between host strings (Rust `&str`/`String`, Zig `[]const u8`, C `const char *`) and the Pascal string representation in the WASM memory space.
 
-A richer dynamically-allocated string type (pointer + length, no 255-character limit) is planned for Phase 5 when `New`/`Dispose` and heap allocation become available.
+A richer dynamically-allocated string type (pointer + length, no 255-character limit) is planned for Phase 6b when `New`/`Dispose` and heap allocation become available.
 
 ### String Parameter Passing
 
@@ -246,7 +246,7 @@ case r of
 end;
 ```
 
-Planned alongside Phase 5b (richer string type). Phase 1 has no `rune` type.
+Planned alongside Phase 6b (richer string type). Phase 1 has no `rune` type.
 
 ## Numeric Literals
 
@@ -434,7 +434,7 @@ These functions and procedures are compiler intrinsics, always available without
 |---|---|---|
 | `fillchar(var x; count, value: integer)` | `var any × integer × integer` | Fill `count` bytes starting at `x` with the byte `value`. Used to zero-initialize records and arrays. |
 
-### Memory Allocation (Phase 5)
+### Memory Allocation (Phase 6)
 
 | Procedure | Signature | Description |
 |---|---|---|
@@ -532,7 +532,7 @@ Compiled programs use this layout in WASM linear memory:
 
 - **Nil guard (bytes 0-3):** Reserved, zeroed. Dereferencing a `nil` pointer reads zeros rather than corrupting data.
 - **Data segment:** Global variables, string literals, and typed constants. Laid out by the compiler at compile time starting at address 4.
-- **Heap:** Grows upward from end of data segment. Available in Phase 5 (`New`/`Dispose`); unused in Phase 1.
+- **Heap:** Grows upward from end of data segment. Available in Phase 6 (`New`/`Dispose`); unused in Phase 1.
 - **Stack:** Grows downward from top of memory.
 
 The initial memory size is controlled by `{$MEMORY}` (default: 1 page = 64 KB). Maximum memory is controlled by `{$MAXMEMORY}` (default: 256 pages = 16 MB).

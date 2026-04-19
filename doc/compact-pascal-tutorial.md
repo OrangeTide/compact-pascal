@@ -3353,7 +3353,7 @@ An extended `case` statement with destructuring — matching record fields, nest
 
 The compiler already supports nested procedures with upvalue access via the Dijkstra display. Making nested procedures *first-class* — assignable to variables, passable as arguments, returnable from functions — requires heap-allocated closure environments, because the enclosing stack frame may be gone when the closure runs.
 
-**What it requires:** Dynamic allocation (`New`/`Dispose`), which means Phase 5 of the project. Each closure becomes a fat pointer: a function table index plus a pointer to the heap-allocated environment. The compiler must detect which variables are captured and allocate them on the heap instead of the stack. WASM's `call_indirect` instruction handles the dynamic dispatch.
+**What it requires:** Dynamic allocation (`New`/`Dispose`), which means Phase 6 of the project. Each closure becomes a fat pointer: a function table index plus a pointer to the heap-allocated environment. The compiler must detect which variables are captured and allocate them on the heap instead of the stack. WASM's `call_indirect` instruction handles the dynamic dispatch.
 
 ### Generics
 

@@ -464,7 +464,7 @@ The transform stack (`SetProjection`, `PushMatrix`, `Translate`, etc.) is implem
 
 This library is a late-stage addition, dependent on:
 
-- Dynamic memory allocation (Phase 5 in the project roadmap)
+- Dynamic memory allocation (Phase 6 in the project roadmap)
 - Real type support
 - Unit system
 

@@ -32,7 +32,7 @@
 
 ## 2: Dimensioned Types - from Vector Pascal
 
-  Dimensional types — compile-time unit checking with zero runtime cost. Dimension exponents are tracked in the type system; meter * meter produces meter^2, and adding meter + second is a compile-time error. Single-pass compatible — you just carry exponent vectors alongside the base type. The catch: it only makes sense once real is available (Phase 5+), so it's a later addition. But it's independently interesting as a safety mechanism for scientific/engineering code.
+  Dimensional types — compile-time unit checking with zero runtime cost. Dimension exponents are tracked in the type system; meter * meter produces meter^2, and adding meter + second is a compile-time error. Single-pass compatible — you just carry exponent vectors alongside the base type. The catch: it only makes sense once real is available (Phase 6+), so it's a later addition. But it's independently interesting as a safety mechanism for scientific/engineering code.
 
   **These are two separate problems.** Vector Pascal's dimensional types handle dimensional analysis — preventing you from adding meters to seconds. They do *not* handle unit conversion — converting meters to feet. Both are the same dimension (`distance`), so the type system treats them identically. Separating these clarifies the design:
 
@@ -399,7 +399,7 @@
 
   ### Constraints and Dependencies
 
-  - **Phase 5+ (New/Dispose)**: persistent data structures with pointer fields (linked lists, trees) require heap allocation. Stack-only records can be persisted in earlier phases, but the full value of persistence requires dynamic allocation.
+  - **Phase 6+ (New/Dispose)**: persistent data structures with pointer fields (linked lists, trees) require heap allocation. Stack-only records can be persisted in earlier phases, but the full value of persistence requires dynamic allocation.
   - **Annotation tables (section 3)**: the host's ability to serialize records depends on knowing the field layout. Without annotations, the host would need a separate schema definition, defeating the purpose.
   - **Nested records**: the record-start/record-end markers in the annotation table (section 3) handle nested record types like `Person` containing `Address`. The host walks the tree structure in the annotation table to serialize nested fields.
 
@@ -418,7 +418,7 @@
 
   Compact Pascal's explicit persistence is closer to what Java provides with JPA/Hibernate or what Rust provides with Diesel — you annotate your types, call store/load explicitly, and manage the object lifecycle yourself. This is well-understood territory, and the annotation table makes the boilerplate minimal, but it is not the paradigm shift that PS-algol represents. The programmer must decide what to persist and when, which means persistence is not orthogonal to the program's logic — it is part of it.
 
-  A future extension could explore automatic persistence by combining annotations with GC reachability analysis (Phase 5+), moving closer to PS-algol's model. But that would require the heap walker and root-tracing machinery we are deliberately avoiding in this proposal.
+  A future extension could explore automatic persistence by combining annotations with GC reachability analysis (Phase 6+), moving closer to PS-algol's model. But that would require the heap walker and root-tracing machinery we are deliberately avoiding in this proposal.
 
   ### Schema Migration
 

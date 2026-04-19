@@ -242,7 +242,7 @@ Compiled programs use the industry-standard WASM memory layout, matching LLVM, R
 
 - **Nil guard (bytes 0-3):** Reserved, zeroed. Dereferencing `nil` (address 0) reads zeros rather than corrupting data.
 - **Data segment:** Global variables, string literals, and typed constants, laid out at compile time.
-- **Heap:** Grows upward from end of data (Phase 5; unused in Phase 1).
+- **Heap:** Grows upward from end of data (Phase 6; unused in Phase 1).
 - **Stack:** Grows downward from top of memory. The stack pointer is a mutable WASM global (`$sp`), initialized to the top of memory. Procedure entry subtracts the frame size; exit adds it back.
 
 In Phase 1 (no heap), the entire space between the data segment and memory top is available for the stack.
@@ -255,7 +255,7 @@ Pascal supports nested procedures with access to enclosing scope variables. Sinc
 
 Phase 1 uses stack-only allocation — all variables (including strings and records) live on the stack or in the data segment. No heap allocator is needed.
 
-**Future (Phase 5):** `New`/`Dispose` with a free-list allocator in WASM linear memory. The heap grows upward from the end of the data segment, toward the stack. Object headers will include metadata (size, mark bits, link pointers) designed to support a future garbage collector.
+**Future (Phase 6):** `New`/`Dispose` with a free-list allocator in WASM linear memory. The heap grows upward from the end of the data segment, toward the stack. Object headers will include metadata (size, mark bits, link pointers) designed to support a future garbage collector.
 
 **Future: Baker's Treadmill GC** [10]**.** A non-moving, incremental garbage collector suitable for WASM linear memory. Requires a shadow stack in linear memory for GC root tracking (since the WASM operand stack is opaque). Deferred until after `New`/`Dispose` is working.
 
