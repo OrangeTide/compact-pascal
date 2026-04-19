@@ -1743,6 +1743,11 @@ end;
 
 { ---- WASM type management ---- }
 
+{** Intern a WASM function signature and return its type-section index.
+
+  Deduplicates: if a type with identical params and results already
+  exists in wasmTypes, return its index; otherwise append. np/nr are
+  the parameter and result counts, p/r the corresponding arrays. }
 function AddWasmType(np: longint; var p: TWasmParamArr;
                      nr: longint; var r: TWasmResultArr): longint;
 var
@@ -1776,13 +1781,14 @@ begin
   numWasmTypes := numWasmTypes + 1;
 end;
 
-{ Common type signatures }
+{** Return the index of the () -> () signature, interning on first use. }
 function TypeVoidVoid: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
   TypeVoidVoid := AddWasmType(0, p, 0, r);
 end;
 
+{** Return the index of the (i32) -> () signature. }
 function TypeI32Void: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1790,6 +1796,7 @@ begin
   TypeI32Void := AddWasmType(1, p, 0, r);
 end;
 
+{** Return the index of the () -> (i32) signature. }
 function TypeVoidI32: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1797,6 +1804,7 @@ begin
   TypeVoidI32 := AddWasmType(0, p, 1, r);
 end;
 
+{** Return the index of the (i32, i32) -> () signature. }
 function TypeI32x2Void: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1804,6 +1812,7 @@ begin
   TypeI32x2Void := AddWasmType(2, p, 0, r);
 end;
 
+{** Return the index of the (i32, i32) -> (i32) signature. }
 function TypeI32x2I32: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1812,6 +1821,7 @@ begin
   TypeI32x2I32 := AddWasmType(2, p, 1, r);
 end;
 
+{** Return the index of the (i32, i32, i32) -> () signature. }
 function TypeI32x3Void: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1819,6 +1829,7 @@ begin
   TypeI32x3Void := AddWasmType(3, p, 0, r);
 end;
 
+{** Return the index of the (i32, i32, i32) -> (i32) signature. }
 function TypeI32x3I32: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1827,6 +1838,7 @@ begin
   TypeI32x3I32 := AddWasmType(3, p, 1, r);
 end;
 
+{** Return the index of the (i32 x4) -> () signature. }
 function TypeI32x4Void: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1834,6 +1846,7 @@ begin
   TypeI32x4Void := AddWasmType(4, p, 0, r);
 end;
 
+{** Return the index of the (i32 x4) -> (i32) signature. }
 function TypeI32x4I32: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
 begin
@@ -1844,6 +1857,12 @@ end;
 
 { ---- Import management ---- }
 
+{** Register a WASM function import and return its function index.
+
+  Imports occupy function indices 0..numImports-1 in the shared
+  function index space; defined functions follow. Dedupes against
+  existing imports on (modname, fieldname). All WASI imports are
+  registered up front so numImports is stable before codegen. }
 function AddImport(mname, fname: string; typeidx: longint): longint;
 var i: longint;
 begin
@@ -1864,11 +1883,13 @@ begin
   numImports := numImports + 1;
 end;
 
+{** Return the function index of the WASI proc_exit import. }
 function EnsureProcExit: longint;
 begin
   EnsureProcExit := idxProcExit;
 end;
 
+{** Return the function index of the WASI fd_write import. }
 function EnsureFdWrite: longint;
 begin
   EnsureFdWrite := idxFdWrite;
@@ -1876,12 +1897,15 @@ end;
 
 { ---- Data segment management ---- }
 
+{** Reserve size bytes in the data segment and return the starting address. }
 function AllocData(size: longint): longint;
 begin
   AllocData := dataPos;
   dataPos := dataPos + size;
 end;
 
+{** Reserve size bytes in the data segment at a boundary that is a multiple
+  of align, emitting zero padding as needed. Returns the aligned address. }
 function AllocDataAligned(size, align: longint): longint;
 var
   pad: longint;
@@ -1896,6 +1920,9 @@ begin
   dataPos := dataPos + size;
 end;
 
+{** Emit the raw bytes of s to the data segment (no length prefix).
+  Returns the starting address. Used for WASI filenames, static
+  literals used by helpers, etc. }
 function EmitDataString(const s: string): longint;
 var
   addr: longint;
@@ -1920,6 +1947,8 @@ begin
   EmitDataPascalString := addr;
 end;
 
+{** Lazily allocate the shared iovec, nwritten, and newline buffers in
+  the data segment on first use. Subsequent calls are no-ops. }
 procedure EnsureIOBuffers;
 begin
   if addrIovec < 0 then begin
@@ -2011,6 +2040,7 @@ end;
 
 { ---- Symbol table ---- }
 
+{** Reset the symbol table and scope stack to empty. }
 procedure InitSymTable;
 begin
   numSyms := 0;
@@ -2018,6 +2048,15 @@ begin
   scopeBase[0] := 0;
 end;
 
+{** Push a new lexical scope onto the scope stack.
+
+  The symbol table is a single flat array; scopeBase[d] records the
+  first index belonging to scope depth d. EnterScope captures the
+  current numSyms as the boundary, so LeaveScope can truncate the
+  array back to that point in O(1) when the scope ends. This mirrors
+  the classic TP compiler technique: no dynamic allocation, and
+  symbol lookup walks backward (most-local first) for Pascal-correct
+  shadowing. }
 procedure EnterScope;
 begin
   scopeDepth := scopeDepth + 1;
@@ -2026,12 +2065,19 @@ begin
   scopeBase[scopeDepth] := numSyms;
 end;
 
+{** Pop the current scope, discarding all symbols added since
+  EnterScope. O(1) — just rewinds numSyms to the saved boundary. }
 procedure LeaveScope;
 begin
   numSyms := scopeBase[scopeDepth];
   scopeDepth := scopeDepth - 1;
 end;
 
+{** Look up name in the symbol table, returning its index or -1.
+
+  Walks backward so inner-scope symbols shadow outer-scope ones
+  with the same name. Linear search — adequate for expected symbol
+  counts (hundreds, not thousands) per PLAN.md. }
 function LookupSym(const name: string): longint;
 var i: longint;
 begin
@@ -2044,6 +2090,11 @@ begin
   end;
 end;
 
+{** Add a symbol to the current scope and return its index.
+
+  Initializes the symbol with kind/typ and sensible defaults for the
+  remaining fields (typeIdx, offset, size, strMax, VAR/CONST param
+  flags). Halts on overflow. }
 function AddSym(const name: string; kind, typ: longint): longint;
 begin
   if numSyms >= MaxSyms then
@@ -2062,6 +2113,9 @@ begin
   numSyms := numSyms + 1;
 end;
 
+{** Populate the outermost scope with built-in types and constants
+  (INTEGER, BOOLEAN, CHAR, BYTE, WORD, SHORTINT, LONGINT, TRUE, FALSE,
+  MAXINT). Must be called after InitSymTable before any user code. }
 procedure AddBuiltins;
 var idx: longint;
 begin
