@@ -1,6 +1,6 @@
 {$MODE TP}
 {$IFNDEF FPC}
-{$MEMORY 160}
+{$MEMORY 192}
 {$MAXMEMORY 256}
 {$ENDIF}
 program cpas;
@@ -22,14 +22,19 @@ const
 
   { Section buffer sizes }
   SmallBufMax = 4095;    { 4 KB for small sections }
-  CodeBufMax  = 131071;  { 128 KB for code section }
-  DataBufMax  = 65535;   { 64 KB for data section }
+  CodeBufMax  = 196607;  { 192 KB for code section }
+  DataBufMax  = 131071;  { 128 KB for data section }
 
   { Symbol table limits }
   MaxSyms    = 1024;
   MaxScopes  = 32;
   MaxFuncs   = 256;   { max user-defined functions }
   MaxIfdefDepth = 8;  { max nested IFDEF levels }
+
+  { Command-line args (WASI args_get) }
+  MaxArgs     = 16;    { max command-line args (including argv[0]) }
+  ArgSlotSize = 256;   { per-arg short-string slot: length byte + up to 255 chars }
+  ArgBufCap   = 1024;  { raw C-string buffer size for all args }
 
   { WASM section IDs }
   SecIdType   = 1;
@@ -405,6 +410,8 @@ var
   idxProcExit: longint;    { proc_exit import index, -1 if not imported }
   idxFdWrite: longint;     { fd_write import index, -1 if not imported }
   idxFdRead: longint;      { fd_read import index, -1 if not imported }
+  idxArgsSizesGet: longint; { args_sizes_get import index }
+  idxArgsGet: longint;     { args_get import index }
   idxIntToStr: longint;    { int-to-string helper, -1 if not emitted }
 
   { Data segment addresses for I/O scratch areas }
@@ -415,6 +422,15 @@ var
   addrReadBuf: longint;    { 1-byte fd_read buffer }
   addrNread: longint;      { 4-byte fd_read result }
   addrCharStr: longint;    { 2-byte scratch for char-to-string conversion }
+
+  { Command-line args (WASI args_sizes_get / args_get) }
+  addrArgc: longint;       { 4-byte argc (filled by args_sizes_get) }
+  addrArgBufSize: longint; { 4-byte buffer size (filled by args_sizes_get) }
+  addrArgv: longint;       { MaxArgs * 4 bytes: argv pointers }
+  addrArgBuf: longint;     { ArgBufCap bytes: raw C-string buffer }
+  addrArgSlots: longint;   { MaxArgs * ArgSlotSize bytes: short-string slots }
+  needsArgs: boolean;      { whether ParamCount/ParamStr were used }
+  argsInitCode: TCodeBuf;  { init code prepended to _start }
 
   { Start function code - accumulated separately, then wrapped }
   startCode: TCodeBuf;
@@ -2730,6 +2746,140 @@ begin
   end;
 end;
 
+procedure EnsureArgsInit;
+{** Allocate argv storage and emit WASI init code prefixed to _start.
+  Backs the ParamCount/ParamStr intrinsics. Init code calls
+  args_sizes_get/args_get, then converts each C-string argv[i] to a
+  Pascal short string in a fixed-size 256-byte slot. Uses _start
+  locals 0..3 as scratch; user code overwrites these before reading. }
+var
+  j: longint;
+begin
+  if needsArgs then exit;
+  needsArgs := true;
+
+  addrArgc := AllocDataAligned(4, 4);
+  for j := 1 to 4 do DataBufEmit(secData, 0);
+  addrArgBufSize := AllocDataAligned(4, 4);
+  for j := 1 to 4 do DataBufEmit(secData, 0);
+  addrArgv := AllocDataAligned(MaxArgs * 4, 4);
+  for j := 1 to MaxArgs * 4 do DataBufEmit(secData, 0);
+  addrArgBuf := AllocDataAligned(ArgBufCap, 4);
+  for j := 1 to ArgBufCap do DataBufEmit(secData, 0);
+  addrArgSlots := AllocDataAligned(MaxArgs * ArgSlotSize, 4);
+  for j := 1 to MaxArgs * ArgSlotSize do DataBufEmit(secData, 0);
+
+  { args_sizes_get(addrArgc, addrArgBufSize); drop errno }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgc);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgBufSize);
+  CodeBufEmit(argsInitCode, OpCall); EmitULEB128(argsInitCode, idxArgsSizesGet);
+  CodeBufEmit(argsInitCode, OpDrop);
+
+  { args_get(addrArgv, addrArgBuf); drop errno }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgv);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgBuf);
+  CodeBufEmit(argsInitCode, OpCall); EmitULEB128(argsInitCode, idxArgsGet);
+  CodeBufEmit(argsInitCode, OpDrop);
+
+  { local 0 = min(argc, MaxArgs) via select(argc, MaxArgs, argc < MaxArgs) }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgc);
+  CodeBufEmit(argsInitCode, OpI32Load); EmitULEB128(argsInitCode, 2); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpLocalTee); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, MaxArgs);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, MaxArgs);
+  CodeBufEmit(argsInitCode, OpI32LtS);
+  CodeBufEmit(argsInitCode, OpSelect);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 0);
+
+  { local 1 = 0 (loop index i) }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 1);
+
+  (* block { loop { ... br_if 1 to break; ...; br 0 } } *)
+  CodeBufEmit(argsInitCode, OpBlock); CodeBufEmit(argsInitCode, WasmVoid);
+  CodeBufEmit(argsInitCode, OpLoop); CodeBufEmit(argsInitCode, WasmVoid);
+
+  { if i >= argc_clamped break }
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpI32GeS);
+  CodeBufEmit(argsInitCode, OpBrIf); EmitULEB128(argsInitCode, 1);
+
+  { cstr = argv[i] = load(addrArgv + i*4); store in local 2 }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgv);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 2);
+  CodeBufEmit(argsInitCode, OpI32Shl);
+  CodeBufEmit(argsInitCode, OpI32Add);
+  CodeBufEmit(argsInitCode, OpI32Load); EmitULEB128(argsInitCode, 2); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 2);
+
+  { scan = cstr; store in local 3 }
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 2);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 3);
+
+  (* block { loop { if *scan == 0 break; scan++; br 0 } } — strlen *)
+  CodeBufEmit(argsInitCode, OpBlock); CodeBufEmit(argsInitCode, WasmVoid);
+  CodeBufEmit(argsInitCode, OpLoop); CodeBufEmit(argsInitCode, WasmVoid);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpI32Load8u); EmitULEB128(argsInitCode, 0); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpI32Eqz);
+  CodeBufEmit(argsInitCode, OpBrIf); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpI32Add);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpBr); EmitULEB128(argsInitCode, 0);
+  CodeBufEmit(argsInitCode, OpEnd);
+  CodeBufEmit(argsInitCode, OpEnd);
+
+  { len = scan - cstr; store in local 3 }
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 2);
+  CodeBufEmit(argsInitCode, OpI32Sub);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 3);
+
+  { if len > 255 then len := 255 }
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 255);
+  CodeBufEmit(argsInitCode, OpI32GtU);
+  CodeBufEmit(argsInitCode, OpIf); CodeBufEmit(argsInitCode, WasmVoid);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 255);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpEnd);
+
+  { slot = addrArgSlots + i*256; store length byte at slot[0] }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgSlots);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 8);
+  CodeBufEmit(argsInitCode, OpI32Shl);
+  CodeBufEmit(argsInitCode, OpI32Add);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, OpI32Store8); EmitULEB128(argsInitCode, 0); EmitULEB128(argsInitCode, 0);
+
+  { memory.copy(slot+1, cstr, len) }
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, addrArgSlots + 1);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 8);
+  CodeBufEmit(argsInitCode, OpI32Shl);
+  CodeBufEmit(argsInitCode, OpI32Add);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 2);
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 3);
+  CodeBufEmit(argsInitCode, $FC); CodeBufEmit(argsInitCode, $0A);
+  CodeBufEmit(argsInitCode, $00); CodeBufEmit(argsInitCode, $00);
+
+  { i++; continue loop }
+  CodeBufEmit(argsInitCode, OpLocalGet); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpI32Const); EmitSLEB128Fix(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpI32Add);
+  CodeBufEmit(argsInitCode, OpLocalSet); EmitULEB128(argsInitCode, 1);
+  CodeBufEmit(argsInitCode, OpBr); EmitULEB128(argsInitCode, 0);
+
+  CodeBufEmit(argsInitCode, OpEnd); { end loop }
+  CodeBufEmit(argsInitCode, OpEnd); { end block }
+end;
+
 function EnsureStrCopy: longint;
 {** Ensure the __str_copy helper is registered.
   __str_copy(src, idx, count, dst) is at slot 8. }
@@ -3151,6 +3301,39 @@ begin
         Expect(tkRParen);
         EmitI32Const(1);
         EmitOp(OpI32Sub);
+      end
+      else if tokStr = 'PARAMCOUNT' then begin
+        { paramcount -> integer. Returns argc - 1 (excludes argv[0] program name). }
+        NextToken;
+        if tokKind = tkLParen then begin
+          NextToken;
+          Expect(tkRParen);
+        end;
+        EnsureArgsInit;
+        EmitI32Const(addrArgc);
+        EmitI32Load(2, 0);
+        EmitI32Const(1);
+        EmitOp(OpI32Sub);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'PARAMSTR' then begin
+        { paramstr(n) -> string. Returns argv[n] as short string; n=0 is
+          program name. Out-of-range indices mask to MaxArgs-1; slots
+          argc..MaxArgs-1 are zero-filled so the return is an empty string. }
+        NextToken;
+        Expect(tkLParen);
+        ParseExpression(PrecNone);
+        if exprType <> tyInteger then
+          Error('paramstr() requires integer argument');
+        Expect(tkRParen);
+        EnsureArgsInit;
+        EmitI32Const(MaxArgs - 1);
+        EmitOp(OpI32And);
+        EmitI32Const(8);
+        EmitOp(OpI32Shl);
+        EmitI32Const(addrArgSlots);
+        EmitOp(OpI32Add);
+        exprType := tyString;
       end
       else if tokStr = 'SQR' then begin
         NextToken;
@@ -8563,18 +8746,21 @@ begin
   { Function count }
   EmitULEB128(secCode, numDefinedFuncs);
 
-  { Slot 0: _start body — conditional locals + code + end }
+  { Slot 0: _start body — conditional locals + (argsInit) + code + end.
+    argsInitCode runs before user code so ParamCount/ParamStr see
+    populated argv slots. }
   if startNlocals > 0 then begin
-    bodyLen := 1 + 1 + 1 + startCode.len + 1;
+    bodyLen := 1 + 1 + 1 + argsInitCode.len + startCode.len + 1;
     EmitULEB128(secCode, bodyLen);
     CodeBufEmit(secCode, 1);          { 1 local declaration block }
     CodeBufEmit(secCode, startNlocals); { N locals }
     CodeBufEmit(secCode, WasmI32);    { of type i32 }
   end else begin
-    bodyLen := 1 + startCode.len + 1;
+    bodyLen := 1 + argsInitCode.len + startCode.len + 1;
     EmitULEB128(secCode, bodyLen);
     CodeBufEmit(secCode, 0);  { 0 local declarations }
   end;
+  CopyBufToCode(argsInitCode);
   CopyBufToCode(startCode);
   CodeBufEmit(secCode, OpEnd);
 
@@ -9088,8 +9274,7 @@ end;
 
 { ---- Dump: human-readable WASM instruction listing ---- }
 
-{$IFDEF FPC}
-function ReadULEB128(var buf: TCodeBuf; var pos: longint): longint;
+function ReadULEB128(var buf: TCodeBuf; var bufPos: longint): longint;
 var
   b: byte;
   shift: longint;
@@ -9098,12 +9283,12 @@ begin
   result_val := 0;
   shift := 0;
   repeat
-    if pos >= buf.len then begin
+    if bufPos >= buf.len then begin
       ReadULEB128 := result_val;
       exit;
     end;
-    b := buf.data[pos];
-    pos := pos + 1;
+    b := buf.data[bufPos];
+    bufPos := bufPos + 1;
     result_val := result_val or ((longint(b) and $7F) shl shift);
     shift := shift + 7;
   until (b and $80) = 0;
@@ -9114,7 +9299,7 @@ end;
 
   Advances pos past the encoded bytes. Used by the -d disassembler
   (DumpBytes) to display i32.const operands. }
-function ReadSLEB128(var buf: TCodeBuf; var pos: longint): longint;
+function ReadSLEB128(var buf: TCodeBuf; var bufPos: longint): longint;
 var
   b: byte;
   shift: longint;
@@ -9123,12 +9308,12 @@ begin
   result_val := 0;
   shift := 0;
   repeat
-    if pos >= buf.len then begin
+    if bufPos >= buf.len then begin
       ReadSLEB128 := result_val;
       exit;
     end;
-    b := buf.data[pos];
-    pos := pos + 1;
+    b := buf.data[bufPos];
+    bufPos := bufPos + 1;
     result_val := result_val or ((longint(b) and $7F) shl shift);
     shift := shift + 7;
   until (b and $80) = 0;
@@ -9141,7 +9326,7 @@ end;
 procedure DumpBytes(var buf: TCodeBuf; startPos, endPos: longint);
 {** Disassemble WASM bytecodes from buf[startPos..endPos-1] to stderr. }
 var
-  pos: longint;
+  bufPos: longint;
   op: byte;
   indent: longint;
   i: longint;
@@ -9150,11 +9335,11 @@ var
   blockType: longint;
   labelCount: longint;
 begin
-  pos := startPos;
+  bufPos := startPos;
   indent := 2;
-  while pos < endPos do begin
-    op := buf.data[pos];
-    pos := pos + 1;
+  while bufPos < endPos do begin
+    op := buf.data[bufPos];
+    bufPos := bufPos + 1;
 
     { Dedent for end/else before printing }
     if (op = OpEnd) or (op = OpElse) then
@@ -9167,7 +9352,7 @@ begin
       OpUnreachable: writeln(stderr, 'unreachable');
       OpNop:         writeln(stderr, 'nop');
       OpBlock: begin
-        blockType := ReadSLEB128(buf, pos);
+        blockType := ReadSLEB128(buf, bufPos);
         if blockType = -64 then { $40 = void block type }
           writeln(stderr, 'block')
         else
@@ -9175,7 +9360,7 @@ begin
         indent := indent + 2;
       end;
       OpLoop: begin
-        blockType := ReadSLEB128(buf, pos);
+        blockType := ReadSLEB128(buf, bufPos);
         if blockType = -64 then { $40 = void block type }
           writeln(stderr, 'loop')
         else
@@ -9183,7 +9368,7 @@ begin
         indent := indent + 2;
       end;
       OpIf: begin
-        blockType := ReadSLEB128(buf, pos);
+        blockType := ReadSLEB128(buf, bufPos);
         if blockType = -64 then { $40 = void block type }
           writeln(stderr, 'if')
         else
@@ -9196,25 +9381,25 @@ begin
       end;
       OpEnd:   writeln(stderr, 'end');
       OpBr: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         writeln(stderr, 'br ', val);
       end;
       OpBrIf: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         writeln(stderr, 'br_if ', val);
       end;
       $0E: begin { br_table }
-        labelCount := ReadULEB128(buf, pos);
+        labelCount := ReadULEB128(buf, bufPos);
         write(stderr, 'br_table');
         for i := 0 to labelCount do begin
-          val := ReadULEB128(buf, pos);
+          val := ReadULEB128(buf, bufPos);
           write(stderr, ' ', val);
         end;
         writeln(stderr);
       end;
       OpReturn:  writeln(stderr, 'return');
       OpCall: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         write(stderr, 'call ', val);
         { Annotate known functions }
         if val = idxFdWrite then
@@ -9279,27 +9464,27 @@ begin
         end;
       end;
       OpCallInd: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         writeln(stderr, 'call_indirect ', val);
         { table index }
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
       end;
       OpDrop:   writeln(stderr, 'drop');
       OpSelect: writeln(stderr, 'select');
       OpLocalGet: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         writeln(stderr, 'local.get ', val);
       end;
       OpLocalSet: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         writeln(stderr, 'local.set ', val);
       end;
       OpLocalTee: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         writeln(stderr, 'local.tee ', val);
       end;
       OpGlobalGet: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         write(stderr, 'global.get ', val);
         if val = 0 then
           writeln(stderr, '  ;; $sp')
@@ -9309,7 +9494,7 @@ begin
           writeln(stderr);
       end;
       OpGlobalSet: begin
-        val := ReadULEB128(buf, pos);
+        val := ReadULEB128(buf, bufPos);
         write(stderr, 'global.set ', val);
         if val = 0 then
           writeln(stderr, '  ;; $sp')
@@ -9319,47 +9504,47 @@ begin
           writeln(stderr);
       end;
       OpI32Load: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.load align=', align, ' offset=', ofs);
       end;
       OpI32Load8s: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.load8_s align=', align, ' offset=', ofs);
       end;
       OpI32Load8u: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.load8_u align=', align, ' offset=', ofs);
       end;
       OpI32Load16s: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.load16_s align=', align, ' offset=', ofs);
       end;
       OpI32Load16u: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.load16_u align=', align, ' offset=', ofs);
       end;
       OpI32Store: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.store align=', align, ' offset=', ofs);
       end;
       OpI32Store8: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.store8 align=', align, ' offset=', ofs);
       end;
       OpI32Store16: begin
-        align := ReadULEB128(buf, pos);
-        ofs := ReadULEB128(buf, pos);
+        align := ReadULEB128(buf, bufPos);
+        ofs := ReadULEB128(buf, bufPos);
         writeln(stderr, 'i32.store16 align=', align, ' offset=', ofs);
       end;
       OpI32Const: begin
-        val := ReadSLEB128(buf, pos);
+        val := ReadSLEB128(buf, bufPos);
         writeln(stderr, 'i32.const ', val);
       end;
       OpI32Eqz:  writeln(stderr, 'i32.eqz');
@@ -9387,17 +9572,17 @@ begin
       OpI32ShrS: writeln(stderr, 'i32.shr_s');
       OpI32ShrU: writeln(stderr, 'i32.shr_u');
       $FC: begin { multi-byte prefix }
-        if pos < endPos then begin
-          val := ReadULEB128(buf, pos);
+        if bufPos < endPos then begin
+          val := ReadULEB128(buf, bufPos);
           case val of
             $0A: begin { memory.copy }
               { skip two memory indices (0, 0) }
-              ReadULEB128(buf, pos);
-              ReadULEB128(buf, pos);
+              ReadULEB128(buf, bufPos);
+              ReadULEB128(buf, bufPos);
               writeln(stderr, 'memory.copy');
             end;
             $0B: begin { memory.fill }
-              ReadULEB128(buf, pos); { memory index }
+              ReadULEB128(buf, bufPos); { memory index }
               writeln(stderr, 'memory.fill');
             end;
           else
@@ -9406,7 +9591,7 @@ begin
         end else
           writeln(stderr, '0xFC (truncated)');
       end;
-    else
+    else begin
       write(stderr, '<unknown opcode $');
       val := op shr 4;
       if val < 10 then write(stderr, chr(ord('0') + val))
@@ -9415,6 +9600,7 @@ begin
       if val < 10 then write(stderr, chr(ord('0') + val))
       else write(stderr, chr(ord('A') + val - 10));
       writeln(stderr, '>');
+    end;
     end;
   end;
 end;
@@ -9499,7 +9685,6 @@ begin
   writeln(stderr, 'Stack size: ', optStackSize, ' bytes');
   writeln(stderr);
 end;
-{$ENDIF}
 
 procedure WriteModule;
 var i: longint;
@@ -9596,6 +9781,7 @@ begin
   CodeBufInit(startCode);
   CodeBufInit(helperCode);
   CodeBufInit(funcBodies);
+  CodeBufInit(argsInitCode);
 
   srcLine := 1;
   srcCol := 0;
@@ -9627,6 +9813,12 @@ begin
   addrReadBuf := -1;
   addrNread := -1;
   addrCharStr := -1;
+  addrArgc := -1;
+  addrArgBufSize := -1;
+  addrArgv := -1;
+  addrArgBuf := -1;
+  addrArgSlots := -1;
+  needsArgs := false;
 
   needsFdWrite := false;
   needsFdRead := false;
@@ -9694,8 +9886,9 @@ begin
   optAlign := 4;
   optDump := false;
 
-  {$IFDEF FPC}
-  { Parse command-line arguments (fpc native binary uses ParamCount/ParamStr) }
+  { Parse command-line arguments. Under fpc bootstrap this uses the
+    RTL ParamCount/ParamStr; under self-hosted cpas these are intrinsics
+    backed by WASI args_sizes_get/args_get. }
   for i := 1 to ParamCount do begin
     if ParamStr(i) = '-dump' then
       optDump := true
@@ -9704,13 +9897,14 @@ begin
       halt(1);
     end;
   end;
-  {$ENDIF}
 
   { Pre-register all WASI imports so numImports is stable before
     any code emission. WASI hosts always provide these functions. }
   idxFdWrite := AddImport('wasi_snapshot_preview1', 'fd_write', TypeI32x4I32);
   idxFdRead := AddImport('wasi_snapshot_preview1', 'fd_read', TypeI32x4I32);
   idxProcExit := AddImport('wasi_snapshot_preview1', 'proc_exit', TypeI32Void);
+  idxArgsSizesGet := AddImport('wasi_snapshot_preview1', 'args_sizes_get', TypeI32x2I32);
+  idxArgsGet := AddImport('wasi_snapshot_preview1', 'args_get', TypeI32x2I32);
 
   InitSymTable;
   AddBuiltins;
@@ -9754,12 +9948,16 @@ begin
   else if curFuncNeedsStringTemp then
     startNlocals := startNlocals + 1;
 
+  { Args init prelude needs 4 i32 scratch locals (argc, i, cstr, len).
+    Indices 0..3 are reused — string/case temps overlap, but they are
+    written before being read by user code so the overlap is harmless. }
+  if needsArgs and (startNlocals < 4) then
+    startNlocals := 4;
+
   { Assemble and write WASM module }
   WriteModule;
 
-  {$IFDEF FPC}
   { Dump instructions if -dump flag was given }
   if optDump then
     DumpModule;
-  {$ENDIF}
 end.
