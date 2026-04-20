@@ -649,7 +649,7 @@ Local directives may appear anywhere in the source. They take effect from the po
 |---|---|---|---|
 | `{$RANGECHECKS ON/OFF}` | `{$R+/-}` | OFF | Emit runtime range checks for array indexing and subrange assignments. |
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
-| `{$ALIGN n}` | — | 1 | Record field alignment in bytes (1, 2, 4, or 8). **Not yet implemented; deferred.** |
+| `{$ALIGN n}` | — | 4 | Record field alignment in bytes (1, 2, 4, or 8). Each field within a record is placed at the next multiple of `n`; the total record size is padded to a multiple of `n`. |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |
 | `{$IMPORT 'module' name}` | — | — | Declare the next procedure or function as a WASM import from `module` with import name `name`. |
@@ -696,12 +696,12 @@ program Example;
 {$R+}                 { enable range checks from here }
 {$Q+}                 { enable overflow checks from here }
 
-{$ALIGN 4}
-type TAligned = record
+{$ALIGN 1}            { pack fields, no padding }
+type TPacked = record
   A: char;
-  B: integer;          { aligned to 4-byte boundary }
+  B: integer;
 end;
-{$ALIGN 1}            { restore default }
+{$ALIGN 4}            { restore default 4-byte alignment }
 
 {$IMPORT 'env' print_int}
 procedure PrintInt(x: integer); external;

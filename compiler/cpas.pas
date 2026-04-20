@@ -488,6 +488,7 @@ var
   optRangeChecks: boolean;    (* R+/-, default false *)
   optOverflowChecks: boolean; (* Q+/-, default false *)
   optExtLiterals: boolean;    (* EXTLITERALS ON/OFF, default false *)
+  optAlign: longint;          (* ALIGN n, record field alignment in bytes (1,2,4,8), default 4 *)
   optDump: boolean;           (* -dump command-line flag *)
 
   { Pending compiler directives }
@@ -919,9 +920,10 @@ begin
       while (not atEof) and (ch <> '}') do
         ReadCh;
     end else if directive = 'ALIGN' then begin
-      { Recognized but not yet implemented }
-      while (not atEof) and (ch <> '}') do
-        ReadCh;
+      intVal := ParseDirectiveInt;
+      if (intVal <> 1) and (intVal <> 2) and (intVal <> 4) and (intVal <> 8) then
+        Error('{$ALIGN} value must be 1, 2, 4, or 8');
+      optAlign := intVal;
     end else if (directive = 'IFDEF') or (directive = 'IFNDEF') then begin
       SkipDirectiveSpaces;
       symName := '';
@@ -2321,8 +2323,8 @@ begin
       ParseTypeSpec(fieldTyp, fieldTypeIdx, fieldSize, fieldStrMax);
 
       for fi := 0 to nFieldNames - 1 do begin
-        { Align to 4-byte boundary }
-        pad := (4 - (fieldOfs mod 4)) mod 4;
+        { Align to optAlign boundary (1, 2, 4, or 8 from ALIGN directive) }
+        pad := (optAlign - (fieldOfs mod optAlign)) mod optAlign;
         fieldOfs := fieldOfs + pad;
         AddField(fieldNames[fi], fieldTyp, fieldTypeIdx, fieldOfs, fieldSize, fieldStrMax);
         types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
@@ -2334,8 +2336,8 @@ begin
     end;
     Expect(tkEnd);
 
-    { Final alignment }
-    pad := (4 - (fieldOfs mod 4)) mod 4;
+    { Final alignment — pad record size to current alignment boundary }
+    pad := (optAlign - (fieldOfs mod optAlign)) mod optAlign;
     fieldOfs := fieldOfs + pad;
     types[tIdx].size := fieldOfs;
     outTyp := tyRecord;
@@ -9689,6 +9691,7 @@ begin
   optRangeChecks := false;
   optOverflowChecks := false;
   optExtLiterals := false;
+  optAlign := 4;
   optDump := false;
 
   {$IFDEF FPC}

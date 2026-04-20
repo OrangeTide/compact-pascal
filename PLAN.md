@@ -98,7 +98,7 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 
 **Language features:**
 - [x] Typed constants — scalar, 1D/ND array, and `array of char` string-literal shortcut implemented (commit 73da405). Stored in data segment; TP-style mutable. Record and set initializers still pending.
-- [ ] `{$ALIGN n}` directive for record field alignment
+- [x] `{$ALIGN n}` directive for record field alignment (n ∈ {1, 2, 4, 8}, default 4; test t089)
 - [ ] `-dump` flag in self-hosted builds (currently `{$IFDEF FPC}`-gated)
 
 **Documentation coverage:**
