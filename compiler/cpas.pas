@@ -1967,6 +1967,16 @@ begin
   EmitDataPascalString := addr;
 end;
 
+procedure EmitDataI32Bytes(v: longint);
+{** Emit 4 little-endian bytes of v to the data buffer. Caller must have
+  reserved space via AllocData / AllocDataAligned. }
+begin
+  DataBufEmit(secData, byte(v and $FF));
+  DataBufEmit(secData, byte((v shr 8) and $FF));
+  DataBufEmit(secData, byte((v shr 16) and $FF));
+  DataBufEmit(secData, byte((v shr 24) and $FF));
+end;
+
 {** Lazily allocate the shared iovec, nwritten, and newline buffers in
   the data segment on first use. Subsequent calls are no-ops. }
 procedure EnsureIOBuffers;
@@ -3244,7 +3254,76 @@ begin
         skConst: begin
           EmitI32Const(syms[sym].offset);
           exprType := syms[sym].typ;
+          exprTypeIdx := syms[sym].typeIdx;
+          exprStrMax := syms[sym].strMax;
+          hasAddr := (exprType = tyArray) or (exprType = tyRecord);
           NextToken;
+
+          { Structured typed consts support .field / [index] selectors;
+            offset holds the data-segment base address. }
+          while hasAddr and ((tokKind = tkDot) or (tokKind = tkLBrack)) do begin
+            if tokKind = tkDot then begin
+              if exprType <> tyRecord then
+                Error('record type expected before ''.''');
+              NextToken;
+              if tokKind <> tkIdent then
+                Expected('field name');
+              fldIdx := LookupField(exprTypeIdx, tokStr);
+              if fldIdx < 0 then
+                Error('unknown field: ' + tokStr);
+              if fields[fldIdx].offset <> 0 then begin
+                EmitI32Const(fields[fldIdx].offset);
+                EmitOp(OpI32Add);
+              end;
+              exprType := fields[fldIdx].typ;
+              exprTypeIdx := fields[fldIdx].typeIdx;
+              exprStrMax := fields[fldIdx].strMax;
+              NextToken;
+            end else if exprType = tyString then begin
+              NextToken;
+              ParseExpression(PrecNone);
+              EmitOp(OpI32Add);
+              exprType := tyChar;
+              exprTypeIdx := -1;
+              exprStrMax := 0;
+              Expect(tkRBrack);
+            end else begin
+              if exprType <> tyArray then
+                Error('array type expected before ''[''');
+              NextToken;
+              ParseExpression(PrecNone);
+              if optRangeChecks then begin
+                EmitI32Const(types[exprTypeIdx].arrLo);
+                EmitI32Const(types[exprTypeIdx].arrHi);
+                EmitCall(EnsureRangeCheck);
+              end;
+              if types[exprTypeIdx].arrLo <> 0 then begin
+                EmitI32Const(types[exprTypeIdx].arrLo);
+                EmitOp(OpI32Sub);
+              end;
+              if types[exprTypeIdx].elemSize <> 1 then begin
+                EmitI32Const(types[exprTypeIdx].elemSize);
+                EmitOp(OpI32Mul);
+              end;
+              EmitOp(OpI32Add);
+              exprType := types[exprTypeIdx].elemType;
+              exprStrMax := types[exprTypeIdx].elemStrMax;
+              exprTypeIdx := types[exprTypeIdx].elemTypeIdx;
+              if tokKind = tkComma then
+                tokKind := tkLBrack
+              else
+                Expect(tkRBrack);
+            end;
+          end;
+
+          { Load scalar value when selectors reduced a structured const to a scalar }
+          if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
+             and (exprType <> tyArray) then begin
+            if (exprType = tyChar) or (exprType = tyBoolean) then
+              EmitI32Load8u(0, 0)
+            else
+              EmitI32Load(2, 0);
+          end;
         end;
         skVar: begin
           { Compute base address or value of the variable.
@@ -6348,6 +6427,54 @@ end;
   recursively for nested procedures via ParseProcDecl. Maintains
   curFrameSize across nested calls so each scope gets its own frame
   size bookkeeping. }
+procedure EmitArrayInitializer(typeIdx: longint);
+{** Emit bytes for a single array value to the current data segment position.
+  Caller must have already reserved the array's size via AllocData/AllocDataAligned.
+  Supports nested arrays and the `array[..] of char = 'literal'` shortcut. }
+var
+  n, i: longint;
+  elemTyp, elemTypeIdx, elemSize: longint;
+  val, valTyp: longint;
+  s: string;
+begin
+  elemTyp := types[typeIdx].elemType;
+  elemTypeIdx := types[typeIdx].elemTypeIdx;
+  elemSize := types[typeIdx].elemSize;
+  n := types[typeIdx].arrHi - types[typeIdx].arrLo + 1;
+
+  { array[lo..hi] of char = 'literal' — must match array length exactly }
+  if (elemTyp = tyChar) and (tokKind = tkString) then begin
+    s := tokStr;
+    if length(s) <> n then
+      Error('string literal length does not match array size');
+    for i := 1 to n do
+      EmitDataI32Bytes(ord(s[i]));
+    NextToken;
+    exit;
+  end;
+
+  Expect(tkLParen);
+  for i := 1 to n do begin
+    if elemTyp = tyArray then
+      EmitArrayInitializer(elemTypeIdx)
+    else begin
+      EvalConstExpr(val, valTyp);
+      if elemSize = 1 then
+        DataBufEmit(secData, byte(val and $FF))
+      else
+        EmitDataI32Bytes(val);
+    end;
+    if i < n then begin
+      if tokKind <> tkComma then
+        Error('too few elements in array initializer');
+      NextToken;
+    end;
+  end;
+  if tokKind = tkComma then
+    Error('too many elements in array initializer');
+  Expect(tkRParen);
+end;
+
 procedure ParseBlock;
 var
   savedFrameSize: longint;
@@ -6355,6 +6482,9 @@ var
   typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax: longint;
   sym: longint;
   ci: longint;
+  dataAddr: longint;
+  initVal, initValTyp: longint;
+  si: longint;
 begin
   savedFrameSize := curFrameSize;
 
@@ -6367,14 +6497,47 @@ begin
         while tokKind = tkIdent do begin
           typDeclName := tokStr;
           NextToken;
-          Expect(tkEqual);
-          EvalConstExpr(typDeclSize, typDeclTyp);
-          sym := AddSym(typDeclName, skConst, typDeclTyp);
-          syms[sym].offset := typDeclSize;
-          if typDeclTyp = tyString then
-            syms[sym].size := 256
-          else
-            syms[sym].size := 4;
+          if tokKind = tkColon then begin
+            { Typed constant: const NAME : TYPE = INIT ; }
+            NextToken;
+            ParseTypeSpec(typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax);
+            Expect(tkEqual);
+            sym := AddSym(typDeclName, skConst, typDeclTyp);
+            syms[sym].typeIdx := typDeclTypeIdx;
+            syms[sym].size := typDeclSize;
+            syms[sym].strMax := typDeclStrMax;
+            if typDeclTyp = tyArray then begin
+              dataAddr := AllocDataAligned(typDeclSize, 4);
+              EmitArrayInitializer(typDeclTypeIdx);
+              syms[sym].offset := dataAddr;
+            end else if typDeclTyp = tyString then begin
+              if tokKind <> tkString then
+                Error('string constant expected');
+              if length(tokStr) > typDeclStrMax then
+                Error('string literal exceeds type capacity');
+              dataAddr := AllocData(typDeclStrMax + 1);
+              DataBufEmit(secData, byte(length(tokStr)));
+              for si := 1 to length(tokStr) do
+                DataBufEmit(secData, byte(ord(tokStr[si])));
+              for si := length(tokStr) + 1 to typDeclStrMax do
+                DataBufEmit(secData, 0);
+              syms[sym].offset := dataAddr;
+              NextToken;
+            end else begin
+              { Scalar typed const: store value directly in offset }
+              EvalConstExpr(initVal, initValTyp);
+              syms[sym].offset := initVal;
+            end;
+          end else begin
+            Expect(tkEqual);
+            EvalConstExpr(typDeclSize, typDeclTyp);
+            sym := AddSym(typDeclName, skConst, typDeclTyp);
+            syms[sym].offset := typDeclSize;
+            if typDeclTyp = tyString then
+              syms[sym].size := 256
+            else
+              syms[sym].size := 4;
+          end;
           Expect(tkSemicolon);
         end;
       end;

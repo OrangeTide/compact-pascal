@@ -100,6 +100,62 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - **`case` with `else` and silent fallthrough.** ISO 7185 treats an unmatched `case` selector as an error. Compact Pascal follows Turbo Pascal: the `else` clause handles unmatched values (extension), and if no branch matches and there is no `else` clause, execution silently continues after `end`. See [Case Statement](#case-statement).
 - **`shl` and `shr`.** Bitwise shift operators not in ISO 7185. They appear at the `MulOp` level (same precedence as `*`, `div`, `mod`). See [Expressions](#expressions) and the [Operator Precedence](#operator-precedence) table.
 
+## Constants
+
+Compact Pascal has two forms of constant declaration.
+
+### Untyped Constants
+
+```pascal
+const
+  max = 100;
+  greeting = 'Hello';
+  limit = max * 2;
+```
+
+The type is inferred from the right-hand side. The expression is evaluated at compile time (see `ConstExpr` in Appendix A for the allowed operators and functions).
+
+### Typed Constants
+
+A typed constant names a storage location with a fixed type and an initial value:
+
+```pascal
+const
+  pi_int: integer = 314;
+  ch: char = 'Q';
+  flag: boolean = true;
+```
+
+Scalar typed constants of ordinal type hold their value like an untyped constant. Structured typed constants — arrays and strings — are placed in the data segment at program startup.
+
+**Array initializers** use parenthesized element lists. The number of elements must match the declared length exactly:
+
+```pascal
+const
+  primes: array[1..5] of integer = (2, 3, 5, 7, 11);
+  matrix: array[1..2, 1..3] of integer = ((1, 2, 3), (4, 5, 6));
+```
+
+Multi-dimensional arrays use nested initializers, one level of parentheses per dimension.
+
+**String-literal shortcut.** For `array[lo..hi] of char`, a string literal may be used in place of a parenthesized list. Its length must equal `hi - lo + 1`:
+
+```pascal
+const
+  greet: array[0..4] of char = 'hello';
+```
+
+**String-typed constants** accept a string literal, padded to the declared capacity:
+
+```pascal
+const
+  prompt: string[10] = 'ready>';
+```
+
+Records and sets are not yet supported as typed constants.
+
+Typed constants are writable under Turbo Pascal's classic semantics (the compiler does not enforce immutability). Programs should treat them as constants and not rely on mutating them.
+
 ## Short-Circuit Evaluation
 
 Compact Pascal supports short-circuit (lazy) boolean evaluation using the `and then` and `or else` operators, as defined in ISO 10206 (Extended Pascal).
@@ -898,10 +954,20 @@ DeclSection      = ConstDeclPart
 
 ConstDeclPart    = 'const' ConstDef { ConstDef } .
 ConstDef         = Identifier '=' ConstExpr ';'
-                 | Identifier ':' Type '=' ConstExpr ';' .
+                 | Identifier ':' Type '=' Initializer ';' .
                  (* First form is an untyped constant.
                     Second form is a typed constant / initialized variable.
                     ConstExpr is evaluated at compile time. *)
+
+Initializer      = ConstExpr
+                 | ArrayInitializer
+                 | StringLiteral .
+                 (* StringLiteral is accepted as a shortcut for
+                    array[lo..hi] of char; its length must equal hi-lo+1. *)
+
+ArrayInitializer = '(' Initializer { ',' Initializer } ')' .
+                 (* Element count must equal the array's declared length.
+                    Nested arrays use nested parenthesized initializers. *)
 
 ConstExpr        = Expression .
                  (* A ConstExpr is syntactically identical to Expression but

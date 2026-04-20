@@ -391,10 +391,20 @@ DeclSection      = ConstDeclPart
 
 ConstDeclPart    = 'const' ConstDef { ConstDef } .
 ConstDef         = Identifier '=' ConstExpr ';'
-                 | Identifier ':' Type '=' ConstExpr ';' .
+                 | Identifier ':' Type '=' Initializer ';' .
                  (* First form is an untyped constant.
                     Second form is a typed constant / initialized variable.
                     ConstExpr is evaluated at compile time. *)
+
+Initializer      = ConstExpr
+                 | ArrayInitializer
+                 | StringLiteral .
+                 (* StringLiteral is a shortcut for array[lo..hi] of char;
+                    its length must equal hi-lo+1. *)
+
+ArrayInitializer = '(' Initializer { ',' Initializer } ')' .
+                 (* Element count must equal declared array length.
+                    Nested arrays use nested parenthesized initializers. *)
 
 ConstExpr        = Expression .
                  (* Syntactically identical to Expression but evaluated at
