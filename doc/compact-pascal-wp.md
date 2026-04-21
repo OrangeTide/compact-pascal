@@ -398,6 +398,8 @@ ConstDef         = Identifier '=' ConstExpr ';'
 
 Initializer      = ConstExpr
                  | ArrayInitializer
+                 | RecordInitializer
+                 | SetInitializer
                  | StringLiteral .
                  (* StringLiteral is a shortcut for array[lo..hi] of char;
                     its length must equal hi-lo+1. *)
@@ -405,6 +407,15 @@ Initializer      = ConstExpr
 ArrayInitializer = '(' Initializer { ',' Initializer } ')' .
                  (* Element count must equal declared array length.
                     Nested arrays use nested parenthesized initializers. *)
+
+RecordInitializer = '(' FieldInit { ';' FieldInit } [ ';' ] ')' .
+FieldInit        = Identifier ':' Initializer .
+                 (* Fields must appear in declaration order;
+                    every field of the record must be specified.
+                    Variant records are not supported. *)
+
+SetInitializer   = '[' [ SetElem { ',' SetElem } ] ']' .
+SetElem          = ConstExpr [ '..' ConstExpr ] .
 
 ConstExpr        = Expression .
                  (* Syntactically identical to Expression but evaluated at

@@ -97,7 +97,7 @@ Optional sliding-window peephole optimizer for the WASM code buffers. Entirely c
 Polish items beyond the self-hosting cut. None of these block any later phase; they close the gap between "compiler writes itself" and "compiler is a complete Compact Pascal toolchain per the language reference."
 
 **Language features:**
-- [x] Typed constants — scalar, 1D/ND array, and `array of char` string-literal shortcut implemented (commit 73da405). Stored in data segment; TP-style mutable. Record and set initializers still pending.
+- [x] Typed constants — scalar, 1D/ND array, `array of char` string-literal shortcut, record `(field: value; ...)`, and set `[elem, ...]` initializers implemented (tests t086–t088, t091, t092). Stored in data segment; TP-style mutable. Variant-record initializers not supported.
 - [x] `{$ALIGN n}` directive for record field alignment (n ∈ {1, 2, 4, 8}, default 4; test t089)
 - [x] `-dump` flag in self-hosted builds (ParamCount/ParamStr intrinsics via WASI args_get)
 

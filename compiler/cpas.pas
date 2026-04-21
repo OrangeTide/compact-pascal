@@ -3519,7 +3519,8 @@ begin
           exprType := syms[sym].typ;
           exprTypeIdx := syms[sym].typeIdx;
           exprStrMax := syms[sym].strMax;
-          hasAddr := (exprType = tyArray) or (exprType = tyRecord);
+          hasAddr := (exprType = tyArray) or (exprType = tyRecord)
+                     or (exprType = tySet);
           NextToken;
 
           { Structured typed consts support .field / [index] selectors;
@@ -3579,14 +3580,20 @@ begin
             end;
           end;
 
-          { Load scalar value when selectors reduced a structured const to a scalar }
+          { Load scalar value when selectors reduced a structured const to a scalar.
+            Large sets (>4 bytes) keep the address since set ops work on memory. }
           if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
-             and (exprType <> tyArray) then begin
+             and (exprType <> tyArray)
+             and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then begin
             if (exprType = tyChar) or (exprType = tyBoolean) then
               EmitI32Load8u(0, 0)
             else
               EmitI32Load(2, 0);
           end;
+          if (exprType = tySet) and (exprTypeIdx >= 0) then
+            exprSetSize := types[exprTypeIdx].size
+          else if exprType = tySet then
+            exprSetSize := 4;
         end;
         skVar: begin
           { Compute base address or value of the variable.
@@ -6690,19 +6697,56 @@ end;
   recursively for nested procedures via ParseProcDecl. Maintains
   curFrameSize across nested calls so each scope gets its own frame
   size bookkeeping. }
+procedure EmitArrayInitializer(typeIdx: longint); forward;
+procedure EmitRecordInitializer(typeIdx: longint); forward;
+procedure EmitSetInitializer(typeIdx: longint); forward;
+
+procedure EmitTypedConstField(fTyp, fTypeIdx, fSize, fStrMax: longint);
+{** Emit bytes for one scalar or structured typed-constant component. }
+var
+  val, valTyp: longint;
+  si: longint;
+begin
+  if fTyp = tyArray then
+    EmitArrayInitializer(fTypeIdx)
+  else if fTyp = tyRecord then
+    EmitRecordInitializer(fTypeIdx)
+  else if fTyp = tySet then
+    EmitSetInitializer(fTypeIdx)
+  else if fTyp = tyString then begin
+    if tokKind <> tkString then
+      Error('string constant expected');
+    if length(tokStr) > fStrMax then
+      Error('string literal exceeds type capacity');
+    DataBufEmit(secData, byte(length(tokStr)));
+    for si := 1 to length(tokStr) do
+      DataBufEmit(secData, byte(ord(tokStr[si])));
+    for si := length(tokStr) + 1 to fStrMax do
+      DataBufEmit(secData, 0);
+    NextToken;
+  end else begin
+    EvalConstExpr(val, valTyp);
+    if fSize = 1 then
+      DataBufEmit(secData, byte(val and $FF))
+    else
+      EmitDataI32Bytes(val);
+  end;
+end;
+
 procedure EmitArrayInitializer(typeIdx: longint);
 {** Emit bytes for a single array value to the current data segment position.
   Caller must have already reserved the array's size via AllocData/AllocDataAligned.
-  Supports nested arrays and the `array[..] of char = 'literal'` shortcut. }
+  Supports nested arrays, records/sets/strings as elements, and the
+  `array[..] of char = 'literal'` shortcut. }
 var
   n, i: longint;
-  elemTyp, elemTypeIdx, elemSize: longint;
-  val, valTyp: longint;
+  elemTyp, elemTypeIdx, elemSize, elemStrMax: longint;
   s: string;
 begin
   elemTyp := types[typeIdx].elemType;
   elemTypeIdx := types[typeIdx].elemTypeIdx;
   elemSize := types[typeIdx].elemSize;
+  elemStrMax := types[typeIdx].elemStrMax;
   n := types[typeIdx].arrHi - types[typeIdx].arrLo + 1;
 
   { array[lo..hi] of char = 'literal' — must match array length exactly }
@@ -6718,15 +6762,7 @@ begin
 
   Expect(tkLParen);
   for i := 1 to n do begin
-    if elemTyp = tyArray then
-      EmitArrayInitializer(elemTypeIdx)
-    else begin
-      EvalConstExpr(val, valTyp);
-      if elemSize = 1 then
-        DataBufEmit(secData, byte(val and $FF))
-      else
-        EmitDataI32Bytes(val);
-    end;
+    EmitTypedConstField(elemTyp, elemTypeIdx, elemSize, elemStrMax);
     if i < n then begin
       if tokKind <> tkComma then
         Error('too few elements in array initializer');
@@ -6736,6 +6772,128 @@ begin
   if tokKind = tkComma then
     Error('too many elements in array initializer');
   Expect(tkRParen);
+end;
+
+procedure EmitRecordInitializer(typeIdx: longint);
+{** Emit bytes for a record typed constant.
+  Syntax: (field: value; field: value; ...). Fields must appear in
+  declaration order; all fields must be specified. Variant records are
+  not supported here — they have no field entries beyond the tag and
+  would need per-variant handling. Emits zero padding between fields to
+  match the declared record layout. }
+var
+  fStart, fCount, fi: longint;
+  expectedOff, curOff: longint;
+  fldName: string;
+begin
+  Expect(tkLParen);
+  fStart := types[typeIdx].fieldStart;
+  fCount := types[typeIdx].fieldCount;
+  curOff := 0;
+  for fi := 0 to fCount - 1 do begin
+    expectedOff := fields[fStart + fi].offset;
+    while curOff < expectedOff do begin
+      DataBufEmit(secData, 0);
+      curOff := curOff + 1;
+    end;
+
+    if tokKind <> tkIdent then
+      Error('field name expected in record initializer');
+    fldName := tokStr;
+    if fldName <> fields[fStart + fi].name then
+      Error('expected field ' + fields[fStart + fi].name
+            + ' but got ' + fldName);
+    NextToken;
+    Expect(tkColon);
+
+    EmitTypedConstField(fields[fStart + fi].typ,
+                        fields[fStart + fi].typeIdx,
+                        fields[fStart + fi].size,
+                        fields[fStart + fi].strMax);
+    curOff := curOff + fields[fStart + fi].size;
+
+    if fi < fCount - 1 then begin
+      if tokKind <> tkSemicolon then
+        Error('; expected between record fields');
+      NextToken;
+    end else if tokKind = tkSemicolon then
+      NextToken;
+  end;
+
+  while curOff < types[typeIdx].size do begin
+    DataBufEmit(secData, 0);
+    curOff := curOff + 1;
+  end;
+
+  Expect(tkRParen);
+end;
+
+procedure EmitSetInitializer(typeIdx: longint);
+{** Emit bytes for a set typed constant.
+  Syntax: [elem, elem, lo..hi, ...]. Elements must be compile-time
+  constants (integer/char/enum literals or declared constants). Small
+  sets (size=4) emit a 4-byte i32 bitmap; large sets emit
+  types[typeIdx].size bytes of bitmap. }
+var
+  bm: array[0..31] of byte;
+  i: longint;
+  lo, hi: longint;
+  sym: longint;
+  setSize, setHiBound: longint;
+begin
+  for i := 0 to 31 do bm[i] := 0;
+  setSize := types[typeIdx].size;
+  setHiBound := types[typeIdx].arrHi;
+
+  Expect(tkLBrack);
+  if tokKind <> tkRBrack then begin
+    repeat
+      if tokKind = tkInteger then begin
+        lo := tokInt; NextToken;
+      end else if (tokKind = tkString) and (length(tokStr) = 1) then begin
+        lo := ord(tokStr[1]); NextToken;
+      end else if tokKind = tkIdent then begin
+        sym := LookupSym(tokStr);
+        if (sym < 0) or (syms[sym].kind <> skConst) then
+          Error('constant expected in set initializer');
+        lo := syms[sym].offset;
+        NextToken;
+      end else
+        Error('constant expected in set initializer');
+
+      if tokKind = tkDotDot then begin
+        NextToken;
+        if tokKind = tkInteger then begin
+          hi := tokInt; NextToken;
+        end else if (tokKind = tkString) and (length(tokStr) = 1) then begin
+          hi := ord(tokStr[1]); NextToken;
+        end else if tokKind = tkIdent then begin
+          sym := LookupSym(tokStr);
+          if (sym < 0) or (syms[sym].kind <> skConst) then
+            Error('constant expected in set initializer');
+          hi := syms[sym].offset;
+          NextToken;
+        end else
+          Error('constant expected in set initializer');
+      end else
+        hi := lo;
+
+      for i := lo to hi do begin
+        if (i < 0) or (i > setHiBound) or (i > 255) then
+          Error('set element out of range');
+        bm[i div 8] := bm[i div 8] or (1 shl (i mod 8));
+      end;
+
+      if tokKind = tkComma then
+        NextToken
+      else
+        break;
+    until false;
+  end;
+  Expect(tkRBrack);
+
+  for i := 0 to setSize - 1 do
+    DataBufEmit(secData, bm[i]);
 end;
 
 procedure ParseBlock;
@@ -6772,6 +6930,14 @@ begin
             if typDeclTyp = tyArray then begin
               dataAddr := AllocDataAligned(typDeclSize, 4);
               EmitArrayInitializer(typDeclTypeIdx);
+              syms[sym].offset := dataAddr;
+            end else if typDeclTyp = tyRecord then begin
+              dataAddr := AllocDataAligned(typDeclSize, 4);
+              EmitRecordInitializer(typDeclTypeIdx);
+              syms[sym].offset := dataAddr;
+            end else if typDeclTyp = tySet then begin
+              dataAddr := AllocDataAligned(typDeclSize, 4);
+              EmitSetInitializer(typDeclTypeIdx);
               syms[sym].offset := dataAddr;
             end else if typDeclTyp = tyString then begin
               if tokKind <> tkString then

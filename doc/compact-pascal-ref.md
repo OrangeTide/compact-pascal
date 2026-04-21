@@ -126,7 +126,7 @@ const
   flag: boolean = true;
 ```
 
-Scalar typed constants of ordinal type hold their value like an untyped constant. Structured typed constants — arrays and strings — are placed in the data segment at program startup.
+Scalar typed constants of ordinal type hold their value like an untyped constant. Structured typed constants — arrays, strings, records, and sets — are placed in the data segment at program startup.
 
 **Array initializers** use parenthesized element lists. The number of elements must match the declared length exactly:
 
@@ -152,7 +152,28 @@ const
   prompt: string[10] = 'ready>';
 ```
 
-Records and sets are not yet supported as typed constants.
+**Record initializers** use parenthesized `field: value` pairs separated by semicolons. Fields must appear in declaration order and every field must be specified:
+
+```pascal
+type
+  TPoint = record x, y: integer end;
+const
+  origin: TPoint = (x: 0; y: 0);
+  p1: TPoint = (x: 3; y: 4);
+```
+
+Nested records, arrays, strings, and sets may appear as field values using the corresponding initializer syntax. Variant records are not supported as typed constants.
+
+**Set initializers** use the standard set-literal syntax. Elements must be compile-time constants (integer/char/enum literals, previously declared constants) and may include ranges:
+
+```pascal
+type
+  DigitSet = set of integer;
+  CharSet  = set of char;
+const
+  primes: DigitSet = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29];
+  digits: CharSet  = ['0'..'9'];
+```
 
 Typed constants are writable under Turbo Pascal's classic semantics (the compiler does not enforce immutability). Programs should treat them as constants and not rely on mutating them.
 
