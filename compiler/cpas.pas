@@ -507,6 +507,7 @@ var
   optExtLiterals: boolean;    (* EXTLITERALS ON/OFF, default false *)
   optAlign: longint;          (* ALIGN n, record field alignment in bytes (1,2,4,8), default 4 *)
   optDump: boolean;           (* -dump command-line flag *)
+  optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
 
   { Pending compiler directives }
   hasPendingImport: boolean;
@@ -1001,6 +1002,8 @@ begin
       if (intVal <> 1) and (intVal <> 2) and (intVal <> 4) and (intVal <> 8) then
         Error('{$ALIGN} value must be 1, 2, 4, or 8');
       optAlign := intVal;
+    end else if directive = 'OPT' then begin
+      if ParseDirectiveSwitch then optLevel := 1 else optLevel := 0;
     end else if (directive = 'DEFINE') or (directive = 'UNDEF') then begin
       SkipDirectiveSpaces;
       symName := '';
@@ -10130,6 +10133,7 @@ begin
   optExtLiterals := false;
   optAlign := 4;
   optDump := false;
+  optLevel := 1;
   numDefined := 0;
   DefineSymbol('CPAS');
 
@@ -10139,6 +10143,10 @@ begin
   for i := 1 to ParamCount do begin
     if ParamStr(i) = '-dump' then
       optDump := true
+    else if ParamStr(i) = '-O0' then
+      optLevel := 0
+    else if ParamStr(i) = '-O1' then
+      optLevel := 1
     else if (length(ParamStr(i)) > 2) and (copy(ParamStr(i), 1, 2) = '-d') then begin
       defArg := copy(ParamStr(i), 3, 255);
       UpcaseStr(defArg);

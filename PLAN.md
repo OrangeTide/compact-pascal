@@ -70,8 +70,8 @@ Optional sliding-window peephole optimizer for the WASM code buffers. Entirely c
 
 **Prerequisites:**
 - [x] `-dSYMBOL` command-line flag for conditional compilation symbols (via WASI `args_get`); `{$DEFINE}` / `{$UNDEF}` directives; `CPAS` predefined
-- [ ] `-O0` / `-O1` command-line flags (parsed, stored in global `optLevel`; ignored when peephole not compiled in)
-- [ ] `{$OPT+/-}` compiler directive (toggles optimizer per-region; ignored when peephole not compiled in)
+- [x] `-O0` / `-O1` command-line flags (parsed, stored in global `optLevel`; ignored when peephole not compiled in). Default `optLevel = 1`.
+- [x] `{$OPT+/-}` compiler directive, `ON`/`OFF` also accepted (toggles optimizer per-region; ignored when peephole not compiled in). Test: `t093_opt_directive`.
 
 **Optimizer:**
 - [ ] `TryPeephole` procedure called after each opcode emission, gated by `{$IFDEF PEEPHOLE}` and `optLevel > 0`
