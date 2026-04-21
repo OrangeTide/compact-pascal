@@ -11,6 +11,7 @@ examples/c/hello/hello
 
 # fpc compiler artifacts
 compiler/cpas
+compiler/cpas-opt
 compiler/*.o
 compiler/*.ppu
 

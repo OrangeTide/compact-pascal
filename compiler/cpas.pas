@@ -244,6 +244,12 @@ type
   TCodeBuf = record
     data: array[0..CodeBufMax] of byte;
     len: longint;
+    { Peephole window state. When PEEPHOLE is compiled in, these track the
+      start positions of the two most recent complete instructions so the
+      optimizer can pattern-match over them. -1 means "no instruction here".
+      Fields exist unconditionally to keep the record layout stable. }
+    lastOpStart: longint;
+    prevOpStart: longint;
   end;
 
   TDataBuf = record
@@ -1707,6 +1713,8 @@ end;
 procedure CodeBufInit(var b: TCodeBuf);
 begin
   b.len := 0;
+  b.lastOpStart := -1;
+  b.prevOpStart := -1;
 end;
 
 {** Reset a data-section buffer to empty. }
@@ -2099,52 +2107,196 @@ begin
   end;
 end;
 
+{ ---- Peephole optimizer (optional, gated by the PEEPHOLE symbol) ---- }
+
+{$IFDEF PEEPHOLE}
+{** Decode a ULEB128 starting at position `pos` in `buf`. Returns the decoded
+  value and advances `pos` past the encoded bytes. Mirrors EmitULEB128 but
+  for in-buffer reads — used to compare operands of adjacent instructions
+  when matching peephole patterns over `local.set X / local.get X`. }
+function DecodeULEB128At(const b: TCodeBuf; var pos: longint): longint;
+var result, shift: longint;
+    byteVal: longint;
+begin
+  result := 0;
+  shift := 0;
+  repeat
+    byteVal := b.data[pos];
+    pos := pos + 1;
+    result := result or ((byteVal and $7F) shl shift);
+    shift := shift + 7;
+  until (byteVal and $80) = 0;
+  DecodeULEB128At := result;
+end;
+
+{** Attempt to rewrite the two trailing instructions in `b` into a shorter
+  equivalent. Called from the bundled Emit* helpers after a complete
+  instruction has been appended. `start` is the offset in `b.data` at which
+  the just-emitted instruction begins (its opcode byte).
+
+  Returns true if a rewrite fired, in which case the caller must not update
+  the peephole window state (this routine already did). Returns false if
+  no pattern matched; the caller then shifts prevOpStart/lastOpStart
+  normally.
+
+  Invariants preserved: b.len points past the final emitted byte, and at
+  least one of lastOpStart/prevOpStart is reset to -1 after a rewrite so we
+  don't try to peephole backwards across the rewritten region. }
+function TryPeephole(var b: TCodeBuf; start: longint): boolean;
+var prevOp, currOp: byte;
+    prevPos, currPos: longint;
+    prevIdx, currIdx: longint;
+begin
+  TryPeephole := false;
+  if b.lastOpStart < 0 then exit;
+
+  prevOp := b.data[b.lastOpStart];
+  currOp := b.data[start];
+
+  { Pattern: local.set X / local.get X  ->  local.tee X
+    Rewrite by overwriting the set opcode with tee and truncating the
+    trailing local.get (opcode + ULEB128). The existing ULEB128 for the
+    set's operand becomes the tee's operand — it is the same index by
+    construction. }
+  if (prevOp = OpLocalSet) and (currOp = OpLocalGet) then begin
+    prevPos := b.lastOpStart + 1;
+    currPos := start + 1;
+    prevIdx := DecodeULEB128At(b, prevPos);
+    currIdx := DecodeULEB128At(b, currPos);
+    if prevIdx = currIdx then begin
+      b.data[b.lastOpStart] := OpLocalTee;
+      b.len := start;
+      { lastOpStart still marks the tee; drop prev context since the
+        instruction that preceded set is no longer the immediate
+        predecessor of anything we will match next. }
+      b.prevOpStart := -1;
+      TryPeephole := true;
+      exit;
+    end;
+  end;
+
+  { Pattern: i32.eqz / i32.eqz  ->  (remove both)
+    Two successive eqz on a boolean are identity; truncate both. }
+  if (prevOp = OpI32Eqz) and (currOp = OpI32Eqz) then begin
+    b.len := b.lastOpStart;
+    b.lastOpStart := -1;
+    b.prevOpStart := -1;
+    TryPeephole := true;
+    exit;
+  end;
+end;
+{$ENDIF}
+
+{** Commit the instruction that begins at `start` to the peephole window.
+  If PEEPHOLE is not compiled in, this is a no-op. If PEEPHOLE is compiled
+  in but optLevel = 0 (e.g., -O0 or the OPT- directive), the window is still
+  tracked but no rewrites fire — this keeps the state fresh for when OPT+
+  later re-enables rewrites. }
+procedure FinishOp(var b: TCodeBuf; start: longint);
+{$IFDEF PEEPHOLE}
+var fired: boolean;
+{$ENDIF}
+begin
+  {$IFDEF PEEPHOLE}
+  fired := false;
+  if optLevel > 0 then fired := TryPeephole(b, start);
+  if not fired then begin
+    b.prevOpStart := b.lastOpStart;
+    b.lastOpStart := start;
+  end;
+  {$ENDIF}
+end;
+
+{** Invalidate the peephole window. Called by emit paths that do not
+  participate in peephole patterns (control flow, calls, memory ops) — they
+  must not leave a stale "previous instruction" pointer that a later
+  peephole attempt would match against across the intervening op. No-op
+  when PEEPHOLE is not compiled in. }
+procedure InvalidateOp(var b: TCodeBuf);
+begin
+  {$IFDEF PEEPHOLE}
+  b.lastOpStart := -1;
+  b.prevOpStart := -1;
+  {$ENDIF}
+end;
+
 { ---- Code emission helpers (emit to startCode buffer) ---- }
 
-{** Emit a single WASM opcode byte to startCode. }
+{** Emit a single WASM opcode byte to startCode.
+  Participates in peephole only for opcodes that are safe stack ops with
+  no operands (currently just i32.eqz). All other opcodes — control flow,
+  arithmetic that we do not yet fold, end-of-block, etc. — invalidate the
+  window so a later match does not cross this boundary. }
 procedure EmitOp(op: byte);
+{$IFDEF PEEPHOLE}
+var start: longint;
+{$ENDIF}
 begin
+  {$IFDEF PEEPHOLE}
+  start := startCode.len;
+  {$ENDIF}
   CodeBufEmit(startCode, op);
+  {$IFDEF PEEPHOLE}
+  if op = OpI32Eqz then
+    FinishOp(startCode, start)
+  else
+    InvalidateOp(startCode);
+  {$ENDIF}
 end;
 
 {** Emit local.get <idx> as a complete instruction.
   ;; WAT: local.get <idx> }
 procedure EmitLocalGet(idx: longint);
+var start: longint;
 begin
+  start := startCode.len;
   CodeBufEmit(startCode, OpLocalGet);
   EmitULEB128(startCode, idx);
+  FinishOp(startCode, start);
 end;
 
 {** Emit local.set <idx> as a complete instruction.
   ;; WAT: local.set <idx> }
 procedure EmitLocalSet(idx: longint);
+var start: longint;
 begin
+  start := startCode.len;
   CodeBufEmit(startCode, OpLocalSet);
   EmitULEB128(startCode, idx);
+  FinishOp(startCode, start);
 end;
 
 {** Emit local.tee <idx> as a complete instruction.
   ;; WAT: local.tee <idx> }
 procedure EmitLocalTee(idx: longint);
+var start: longint;
 begin
+  start := startCode.len;
   CodeBufEmit(startCode, OpLocalTee);
   EmitULEB128(startCode, idx);
+  FinishOp(startCode, start);
 end;
 
 {** Emit global.get <idx> as a complete instruction.
   ;; WAT: global.get <idx> }
 procedure EmitGlobalGet(idx: longint);
+var start: longint;
 begin
+  start := startCode.len;
   CodeBufEmit(startCode, OpGlobalGet);
   EmitULEB128(startCode, idx);
+  FinishOp(startCode, start);
 end;
 
 {** Emit global.set <idx> as a complete instruction.
   ;; WAT: global.set <idx> }
 procedure EmitGlobalSet(idx: longint);
+var start: longint;
 begin
+  start := startCode.len;
   CodeBufEmit(startCode, OpGlobalSet);
   EmitULEB128(startCode, idx);
+  FinishOp(startCode, start);
 end;
 
 {** Emit i32.const with signed LEB128 operand.
@@ -2153,6 +2305,7 @@ procedure EmitI32Const(value: longint);
 begin
   CodeBufEmit(startCode, OpI32Const);
   EmitSLEB128Fix(startCode, value);
+  InvalidateOp(startCode);
 end;
 
 {** Emit call to a WASM function by index.
@@ -2161,6 +2314,7 @@ procedure EmitCall(funcIdx: longint);
 begin
   CodeBufEmit(startCode, OpCall);
   EmitULEB128(startCode, funcIdx);
+  InvalidateOp(startCode);
 end;
 
 {** Emit i32.store with memarg (align exponent, offset).
@@ -2170,6 +2324,7 @@ begin
   CodeBufEmit(startCode, OpI32Store);
   EmitULEB128(startCode, align);
   EmitULEB128(startCode, offset);
+  InvalidateOp(startCode);
 end;
 
 {** Emit i32.store8 (byte store) at given offset, natural alignment.
@@ -2179,6 +2334,7 @@ begin
   CodeBufEmit(startCode, OpI32Store8);
   EmitULEB128(startCode, 0);
   EmitULEB128(startCode, offset);
+  InvalidateOp(startCode);
 end;
 
 {** Emit a store sized by type: i32.store8 for char/boolean, i32.store
@@ -2199,6 +2355,7 @@ begin
   CodeBufEmit(startCode, $0A);
   CodeBufEmit(startCode, $00);
   CodeBufEmit(startCode, $00);
+  InvalidateOp(startCode);
 end;
 
 {** Emit i32.load with memarg.
@@ -2208,6 +2365,7 @@ begin
   CodeBufEmit(startCode, OpI32Load);
   EmitULEB128(startCode, align);
   EmitULEB128(startCode, offset);
+  InvalidateOp(startCode);
 end;
 
 {** Emit i32.load8_u (zero-extend byte load).
@@ -2217,6 +2375,7 @@ begin
   CodeBufEmit(startCode, OpI32Load8u);
   EmitULEB128(startCode, align);
   EmitULEB128(startCode, offset);
+  InvalidateOp(startCode);
 end;
 
 { ---- Symbol table ---- }
@@ -7312,8 +7471,20 @@ end;
   Mirror of EmitOp but targets helperCode, used while building
   compiler-generated runtime helpers like __write_int. }
 procedure EmitHelper(op: byte);
+{$IFDEF PEEPHOLE}
+var start: longint;
+{$ENDIF}
 begin
+  {$IFDEF PEEPHOLE}
+  start := helperCode.len;
+  {$ENDIF}
   CodeBufEmit(helperCode, op);
+  {$IFDEF PEEPHOLE}
+  if op = OpI32Eqz then
+    FinishOp(helperCode, start)
+  else
+    InvalidateOp(helperCode);
+  {$ENDIF}
 end;
 
 {** Emit i32.const into the helper code buffer.
@@ -7322,6 +7493,7 @@ procedure EmitHelperI32Const(value: longint);
 begin
   CodeBufEmit(helperCode, OpI32Const);
   EmitSLEB128Fix(helperCode, value);
+  InvalidateOp(helperCode);
 end;
 
 {** Emit a raw ULEB128 into the helper code buffer. }
@@ -7333,25 +7505,34 @@ end;
 {** Emit local.get <idx> into the helper code buffer.
   ;; WAT: local.get <idx> }
 procedure EmitHelperLocalGet(idx: longint);
+var start: longint;
 begin
+  start := helperCode.len;
   CodeBufEmit(helperCode, OpLocalGet);
   EmitULEB128(helperCode, idx);
+  FinishOp(helperCode, start);
 end;
 
 {** Emit local.set <idx> into the helper code buffer.
   ;; WAT: local.set <idx> }
 procedure EmitHelperLocalSet(idx: longint);
+var start: longint;
 begin
+  start := helperCode.len;
   CodeBufEmit(helperCode, OpLocalSet);
   EmitULEB128(helperCode, idx);
+  FinishOp(helperCode, start);
 end;
 
 {** Emit local.tee <idx> into the helper code buffer.
   ;; WAT: local.tee <idx> }
 procedure EmitHelperLocalTee(idx: longint);
+var start: longint;
 begin
+  start := helperCode.len;
   CodeBufEmit(helperCode, OpLocalTee);
   EmitULEB128(helperCode, idx);
+  FinishOp(helperCode, start);
 end;
 
 {** Emit a call instruction into the helper code buffer.
@@ -7360,6 +7541,7 @@ procedure EmitHelperCall(funcIdx: longint);
 begin
   CodeBufEmit(helperCode, OpCall);
   EmitULEB128(helperCode, funcIdx);
+  InvalidateOp(helperCode);
 end;
 
 procedure BuildWriteIntHelper;

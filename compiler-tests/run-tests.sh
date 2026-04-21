@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMPILER="$PROJECT_DIR/compiler/cpas"
+COMPILER="${CPAS:-$PROJECT_DIR/compiler/cpas}"
 TMPDIR="${TMPDIR:-/tmp}/cpas-tests-$$"
 
 export WASMTIME_HOME="${WASMTIME_HOME:-$HOME/.wasmtime}"
@@ -57,7 +57,10 @@ mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # Build compiler if source is newer than binary, or binary doesn't exist
-if [ ! -x "$COMPILER" ] || [ "$COMPILER.pas" -nt "$COMPILER" ]; then
+# (Skipped when CPAS env var supplies an explicit compiler path — in that
+# case the caller is responsible for having built it with their desired
+# flags, e.g., `fpc -Mtp -dPEEPHOLE ...`.)
+if [ -z "${CPAS:-}" ] && { [ ! -x "$COMPILER" ] || [ "$PROJECT_DIR/compiler/cpas.pas" -nt "$COMPILER" ]; }; then
     echo "Building compiler..."
     (cd "$PROJECT_DIR/compiler" && fpc -Mtp cpas.pas) || {
         echo "FATAL: compiler build failed"
@@ -65,6 +68,8 @@ if [ ! -x "$COMPILER" ] || [ "$COMPILER.pas" -nt "$COMPILER" ]; then
     }
     echo ""
 fi
+
+echo "Compiler: $COMPILER"
 
 run_wasm() {
     # Usage: run_wasm <wasm_file> [< input]
