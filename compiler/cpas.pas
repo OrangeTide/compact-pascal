@@ -30,6 +30,7 @@ const
   MaxScopes  = 32;
   MaxFuncs   = 256;   { max user-defined functions }
   MaxIfdefDepth = 8;  { max nested IFDEF levels }
+  MaxDefines    = 32; (* max conditional symbols: predefined + DEFINE + -d *)
 
   { Command-line args (WASI args_get) }
   MaxArgs     = 16;    { max command-line args (including argv[0]) }
@@ -517,6 +518,8 @@ var
   { Conditional compilation state }
   ifdefActive: array[0..MaxIfdefDepth-1] of boolean; { was the IF branch taken? }
   ifdefDepth: longint;                                { current nesting depth }
+  definedSyms: array[0..MaxDefines-1] of string;      { conditional symbols }
+  numDefined: longint;
 
   (* User-defined exports from EXPORT directives *)
   userExports: array[0..31] of TExportEntry;
@@ -686,6 +689,64 @@ begin
   { // comment - skip to end of line }
   while (not atEof) and (ch <> #10) do
     ReadCh;
+end;
+
+{** Uppercase a string in place for case-insensitive IFDEF matching. }
+procedure UpcaseStr(var s: string);
+var
+  i: longint;
+  r: string;
+  c: char;
+begin
+  r := '';
+  for i := 1 to length(s) do begin
+    c := s[i];
+    if (c >= 'a') and (c <= 'z') then
+      r := r + chr(ord(c) - 32)
+    else
+      r := r + c;
+  end;
+  s := r;
+end;
+
+{** Test whether a conditional symbol is currently defined.
+  Caller must pass an already-uppercased name. }
+function IsDefined(const name: string): boolean;
+var
+  i: longint;
+begin
+  for i := 0 to numDefined - 1 do
+    if definedSyms[i] = name then begin
+      IsDefined := true;
+      exit;
+    end;
+  IsDefined := false;
+end;
+
+{** Add a conditional symbol; no-op if already defined.
+  Caller must pass an already-uppercased name. }
+procedure DefineSymbol(const name: string);
+begin
+  if IsDefined(name) then exit;
+  if numDefined >= MaxDefines then
+    Error('too many conditional symbols');
+  definedSyms[numDefined] := name;
+  inc(numDefined);
+end;
+
+{** Remove a conditional symbol; no-op if not defined.
+  Caller must pass an already-uppercased name. }
+procedure UndefSymbol(const name: string);
+var
+  i, j: longint;
+begin
+  for i := 0 to numDefined - 1 do
+    if definedSyms[i] = name then begin
+      for j := i to numDefined - 2 do
+        definedSyms[j] := definedSyms[j + 1];
+      dec(numDefined);
+      exit;
+    end;
 end;
 
 {** Skip source text in an inactive IFDEF/ELSE branch.
@@ -940,6 +1001,23 @@ begin
       if (intVal <> 1) and (intVal <> 2) and (intVal <> 4) and (intVal <> 8) then
         Error('{$ALIGN} value must be 1, 2, 4, or 8');
       optAlign := intVal;
+    end else if (directive = 'DEFINE') or (directive = 'UNDEF') then begin
+      SkipDirectiveSpaces;
+      symName := '';
+      while (not atEof) and (ch <> '}') and (ch > ' ') do begin
+        if ch in ['a'..'z'] then
+          symName := symName + chr(ord(ch) - 32)
+        else
+          symName := symName + ch;
+        ReadCh;
+      end;
+      if symName = '' then
+        Error('{$' + directive + '} requires a symbol name');
+      if directive = 'DEFINE' then
+        DefineSymbol(symName)
+      else
+        UndefSymbol(symName);
+      while (not atEof) and (ch <> '}') do ReadCh;
     end else if (directive = 'IFDEF') or (directive = 'IFNDEF') then begin
       SkipDirectiveSpaces;
       symName := '';
@@ -951,9 +1029,9 @@ begin
         ReadCh;
       end;
       if directive = 'IFDEF' then
-        condTrue := false
+        condTrue := IsDefined(symName)
       else
-        condTrue := true;
+        condTrue := not IsDefined(symName);
       if ifdefDepth >= MaxIfdefDepth then
         Error('too many nested {$IFDEF}');
       ifdefActive[ifdefDepth] := condTrue;
@@ -9766,6 +9844,7 @@ end;
 procedure Init;
 var
   i: longint;
+  defArg: string;
 begin
   { Initialize all state }
   SmallBufInit(secType);
@@ -9885,6 +9964,8 @@ begin
   optExtLiterals := false;
   optAlign := 4;
   optDump := false;
+  numDefined := 0;
+  DefineSymbol('CPAS');
 
   { Parse command-line arguments. Under fpc bootstrap this uses the
     RTL ParamCount/ParamStr; under self-hosted cpas these are intrinsics
@@ -9892,6 +9973,11 @@ begin
   for i := 1 to ParamCount do begin
     if ParamStr(i) = '-dump' then
       optDump := true
+    else if (length(ParamStr(i)) > 2) and (copy(ParamStr(i), 1, 2) = '-d') then begin
+      defArg := copy(ParamStr(i), 3, 255);
+      UpcaseStr(defArg);
+      DefineSymbol(defArg);
+    end
     else begin
       WriteErrorLn('Unknown option: ' + ParamStr(i));
       halt(1);

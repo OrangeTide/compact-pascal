@@ -69,7 +69,7 @@ wasmtime run compiler.wasm -- -dump < hello.pas > hello.wasm
 Optional sliding-window peephole optimizer for the WASM code buffers. Entirely compile-time gated behind `{$IFDEF PEEPHOLE}` — when not defined, zero bytes are added to the compiler WASM image. Can be added to an existing compiler at any time without modifying the core codegen.
 
 **Prerequisites:**
-- [ ] `-dSYMBOL` command-line flag for conditional compilation symbols (via WASI `args_get`)
+- [x] `-dSYMBOL` command-line flag for conditional compilation symbols (via WASI `args_get`); `{$DEFINE}` / `{$UNDEF}` directives; `CPAS` predefined
 - [ ] `-O0` / `-O1` command-line flags (parsed, stored in global `optLevel`; ignored when peephole not compiled in)
 - [ ] `{$OPT+/-}` compiler directive (toggles optimizer per-region; ignored when peephole not compiled in)
 
@@ -99,7 +99,7 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 **Language features:**
 - [x] Typed constants — scalar, 1D/ND array, and `array of char` string-literal shortcut implemented (commit 73da405). Stored in data segment; TP-style mutable. Record and set initializers still pending.
 - [x] `{$ALIGN n}` directive for record field alignment (n ∈ {1, 2, 4, 8}, default 4; test t089)
-- [ ] `-dump` flag in self-hosted builds (currently `{$IFDEF FPC}`-gated)
+- [x] `-dump` flag in self-hosted builds (ParamCount/ParamStr intrinsics via WASI args_get)
 
 **Documentation coverage:**
 - [ ] fpdoc comments on all public procedures/functions, with detailed comments on core routines (see Findings)

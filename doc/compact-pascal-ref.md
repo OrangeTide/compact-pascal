@@ -663,16 +663,28 @@ Local directives may appear anywhere in the source. They take effect from the po
 | `{$IFNDEF symbol}` | Compile the following block only if `symbol` is **not** defined. |
 | `{$ELSE}` | Alternate block for the preceding `{$IFDEF}` or `{$IFNDEF}`. |
 | `{$ENDIF}` | End of a conditional block. |
+| `{$DEFINE symbol}` | Define `symbol` for the remainder of the compilation unit. |
+| `{$UNDEF symbol}` | Undefine `symbol` for the remainder of the compilation unit. |
 
-Symbol names are case-insensitive and may be up to 255 characters. Nesting is supported up to 8 levels deep.
+Symbol names are case-insensitive and may be up to 255 characters. Nesting is supported up to 8 levels deep. Up to 32 symbols may be defined at once (predefined + `{$DEFINE}` + `-d`).
 
-The compiler currently has no mechanism for the user to define symbols at compile time (`-dSYMBOL` is planned but not yet implemented). As a result, all `{$IFDEF}` tests evaluate to false (symbol undefined) and all `{$IFNDEF}` tests evaluate to true. The compiler's own source uses `{$IFDEF FPC}` to gate fpc-only code: when compiled with fpc, fpc predefines `FPC`; when compiled by the self-hosted cpas compiler, `FPC` is undefined and `{$IFDEF FPC}` blocks are skipped.
+The compiler predefines `CPAS` so sources can detect a Compact Pascal build. Additional symbols can be defined from the command line with `-dSYMBOL` (repeatable), or in source with `{$DEFINE symbol}` / `{$UNDEF symbol}`. The compiler's own source uses `{$IFDEF FPC}` to gate fpc-only code: when compiled with fpc, fpc predefines `FPC`; when compiled by the self-hosted cpas compiler, `FPC` is undefined and `{$IFDEF FPC}` blocks are skipped.
 
 ```pascal
 {$IFDEF DEBUG}
-  writeln('debug mode');
+  writeln('debug mode');    { compile with: cpas -dDEBUG < prog.pas }
 {$ELSE}
   writeln('release mode');
+{$ENDIF}
+
+{$DEFINE VERBOSE}
+{$IFDEF VERBOSE}
+  writeln('verbose output enabled');
+{$ENDIF}
+{$UNDEF VERBOSE}
+
+{$IFDEF CPAS}
+  { built by Compact Pascal }
 {$ENDIF}
 
 {$IFDEF FPC}
