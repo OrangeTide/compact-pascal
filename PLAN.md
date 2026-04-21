@@ -97,7 +97,9 @@ Optional sliding-window peephole optimizer for the WASM code buffers. Entirely c
 Polish items beyond the self-hosting cut. None of these block any later phase; they close the gap between "compiler writes itself" and "compiler is a complete Compact Pascal toolchain per the language reference."
 
 **Language features:**
-- [x] Typed constants — scalar, 1D/ND array, `array of char` string-literal shortcut, record `(field: value; ...)`, and set `[elem, ...]` initializers implemented (tests t086–t088, t091, t092). Stored in data segment; TP-style mutable. Variant-record initializers not supported.
+- [x] Typed constants — scalar, 1D/ND array, `array of char` string-literal shortcut, record `(field: value; ...)`, and set `[elem, ...]` initializers implemented (tests t086–t088, t091, t092). Stored in data segment; TP-style mutable. Variant-record initializers tracked under Milestone 11.
+- [ ] Variant records — `case tag: T of ...` inside record types, and the corresponding typed-constant initializer form. Design: see Milestone 11 below.
+- [ ] Subrange base types in `set of` — `set of 0..31`, `set of 'a'..'z'`, `set of Day(Mon..Fri)`. Docs already promise this; compiler currently rejects. Design: see Milestone 12 below.
 - [x] `{$ALIGN n}` directive for record field alignment (n ∈ {1, 2, 4, 8}, default 4; test t089)
 - [x] `-dump` flag in self-hosted builds (ParamCount/ParamStr intrinsics via WASI args_get)
 
@@ -629,7 +631,7 @@ This is simpler than the earlier `fpRead`/`fpWrite` via `BaseUnix` design: no `u
 
 1. ~~Type descriptor table and `type` declarations~~
 2. ~~Simple records (field access, assignment)~~
-3. Variant records — deferred to a later milestone
+3. Variant records — deferred to Milestone 11
 4. ~~One-dimensional arrays~~
 5. ~~Multi-dimensional arrays (desugar to nested)~~
 6. ~~Structured parameters (var/const/value with copy semantics)~~
@@ -901,3 +903,115 @@ On tag (e.g. v1.2.3), release a set of packages on the Github release page.
 - **Symbol table size:** Adding `typeIdx` to every `TSymEntry` adds 4 bytes × 1024 = 4 KB. Negligible.
 - **Type descriptor pool size:** 256 types × ~44 bytes ≈ 11 KB. 512 fields × ~80 bytes ≈ 40 KB. Well within fpc memory limits.
 - **Code size growth:** Designator refactor will net-reduce code (consolidating duplicated access patterns) while adding selector logic. Estimated +200 lines net for the full milestone.
+
+### Milestone 11: Variant records — `NOT STARTED`
+
+**Overview.** Add `case tag: T of labels: (fields); ...` variant parts to record type declarations, with overlapping field layout, field-table extensions for per-variant lookup, and typed-constant initializers for variant records. Picks up the work originally listed as Milestone 8 §Step 3 and deferred there.
+
+**Why deferred until now.** Variant records aren't on the self-hosting critical path — the bootstrapped compiler already runs without them. They land in Phase 1c as language-completeness polish, alongside the other typed-constant work.
+
+**Implementation order:**
+
+1. **Parser.** Extend `ParseRecordType` to recognize `tkCase` after the fixed field list. Grammar: `case [Ident ':'] TypeIdent of ConstList ':' '(' FieldList ')' { ';' ConstList ':' '(' FieldList ')' }`. Tag field (if named) becomes a normal field at the current offset; each variant's fields restart at the offset immediately after the tag, applying `{$ALIGN n}` padding. Record total size = `tag_offset + sizeof(tag) + max(sizeof(variant_i))`.
+
+2. **Field-table extension.** Add a `variantId` to `TFieldEntry` (0 for fixed-part fields, 1..n for variants). Phase 1 semantics match TP: `LookupField` is variant-blind — any variant's fields are accessible as a programmer-side view of the same memory, no runtime tag check. The `variantId` is stored only so future tag-checking (`{$R+}` extension) and the typed-const initializer can disambiguate.
+
+3. **Typed-constant initializer.** TP syntax: `(fixed_field: v; ...; tag: N; variant_field: v; ...)`. The initializer parser:
+   - Emits fixed-part fields in declaration order (existing logic).
+   - When the tag field is reached, evaluates its value and selects the matching variant branch. Error if no `ConstList` covers the tag value.
+   - Emits the selected variant's fields in declaration order.
+   - Zero-fills from the end of that variant to the record's total size.
+   - Reject unnamed-tag records (`case integer of ...` with no tag identifier) as typed constants — the initializer needs a discriminator name to anchor the variant selection.
+
+4. **Tag range checking (`{$R+}`)** is out of scope for this milestone; tracked separately as a future addition once range checks already exist for arrays.
+
+**Tests:**
+- `t09X_variant_record_basic.pas` — declaration + field access across variants
+- `t09X_variant_record_typed_const.pas` — typed constant for each variant branch
+- Negative: initializer specifying a tag value with no matching variant; missing tag field in initializer; typed const for unnamed-tag record
+
+**Documentation updates:**
+- `doc/compact-pascal-ref.md` — add variant-record syntax under records; extend the typed-constant section with a variant initializer example.
+- `doc/compact-pascal-wp.md` grammar appendix — add `RecordType` with the variant-part production, and a `VariantInitializer` form alongside `RecordInitializer`.
+- This file — flip Milestone 8 §Step 3's "deferred to a later milestone" note to point at Milestone 11, and clear the "Variant-record initializers not supported" note from the Phase 1c typed-constants checkbox once shipped.
+
+### Milestone 12: Subrange base types in `set of` — `NOT STARTED`
+
+**Overview.** Accept `set of` over any ordinal subrange — integer, char, enum — so the existing documented forms (`set of 0..31`, `set of 'a'..'z'`, `set of Day(Mon..Fri)`) actually compile. The language reference and white-paper grammar already permit this; only the compiler's `ParseTypeSpec` set-type branch is gated to bare type names (`integer`, `char`, `boolean`, enum literal-list) and rejects subrange expressions with `"type name expected"`.
+
+**Why this is its own milestone.** Independent from variant records. The change is narrow (parser + bitmap sizing) but touches set constructors, membership tests, and the typed-constant initializer for sets, so it needs its own tests and a deliberate encoding decision.
+
+**Grammar** (already in white paper — no change needed):
+
+```ebnf
+SetType          = 'set' 'of' SimpleType .
+SimpleType       = TypeIdentifier | EnumType | SubrangeType .
+SubrangeType     = Constant '..' Constant
+                 | Identifier '(' Constant '..' Constant ')' .
+```
+
+Examples the compiler must accept:
+
+```pascal
+type
+  SmallSet = set of 0..31;
+  Digits   = set of 0..9;
+  Lower    = set of 'a'..'z';
+  Weekdays = set of Day(Mon..Fri);  { Day is a previously declared enum }
+```
+
+**Encoding decision: anchor bitmaps at 0, not at `arrLo`.** The bitmap covers ordinals `0..arrHi`, rounded up to a byte (or packed into an `i32` when `arrHi < 32`). Bit N is set iff ordinal N is in the set. Consequences:
+
+- **Pros:** `in`, set constructors, union/intersect/difference, and typed-constant initializers all stay identical to the current code. No bias subtraction on the hot path. Matches TP semantics.
+- **Cons:** Wastes bits `0..arrLo-1` when `arrLo > 0` (e.g., `set of 100..127` reserves 128 bits / 16 bytes instead of 32 bits / 4 bytes). Bounded at 32 bytes total.
+- **Rejected alternative:** biasing the bitmap by `arrLo` saves memory but adds a subtract to every membership test and a matching adjustment to every constant literal. Not worth it at Phase 1.
+
+`arrLo` is still recorded on the type descriptor so a future `{$R+}` pass can range-check `x in s` (reject `x < arrLo` or `x > arrHi`). Phase 1 behavior without `{$R+}`: out-of-range membership test returns `false`, include/exclude is a no-op or silent bit-set at the raw ordinal — matching the existing `set of integer` (0..31) behavior today.
+
+**Validation rules:**
+
+- `arrLo >= 0` required. Reject negative subranges — the bitmap is unsigned-ordinal-indexed. (Workaround: shift the enum's ordinals.)
+- `arrHi <= 255` required, same as today.
+- `arrHi >= arrLo` required.
+- For the `Ident(Lo..Hi)` form, `Ident` must resolve to an ordinal type and `Lo..Hi` must fit inside its range — same semantics as the subrange form used in array bounds.
+
+**Implementation order:**
+
+1. **Factor out subrange parsing.** The `array[...]` branch already parses subrange bounds via `EvalConstExpr` (cpas.pas ~line 2449). Extract a helper `ParseOrdinalSubrange(out lo, hi: longint; out baseTyp: longint; out baseTypeIdx: longint)` that handles:
+   - `Constant '..' Constant` — infer base type from the constant's type (`tyInteger`, `tyChar`, `tyBoolean`, or `tyEnum`).
+   - `Identifier '(' Constant '..' Constant ')'` — look up `Identifier` as a type, require it ordinal, parse bounds, verify both fit within the named type's range, use the named type as the base.
+   - Single `Identifier` (existing path: bare type name) — return its full range as `(arrLo, arrHi)`. This makes the helper the single entry point.
+
+2. **Rewrite the `tkSet` branch in `ParseTypeSpec` (cpas.pas line 2527).** Replace the hard-coded `elemTyp` discriminator with a call to `ParseOrdinalSubrange`. Populate `types[tIdx].arrLo`/`arrHi`/`elemType`/`elemTypeIdx` from its output. Keep the existing bitmap-size computation (`fi := arrHi - arrLo + 1; if fi <= 32 then size := 4 else size := (arrHi + 8) div 8`) — note the subtle change: bitmap size must be computed from `arrHi`, not from `fi`, to preserve the anchor-at-0 invariant. Update that line.
+
+3. **Reuse the array subrange parser.** After the helper lands, replace the inline bound parsing in the `tkArray` branch with the same helper so both paths share logic and stay in sync.
+
+4. **Typed-constant initializer.** No code change expected — `[lo..hi]` range elements and enumerated members already emit bits by raw ordinal, and the encoding decision above keeps the layout compatible. Add a test to confirm.
+
+5. **Set constructors and `in`.** No code change expected for the same reason. Add tests for char- and enum-subrange membership to lock in behavior.
+
+**Tests** (positive, under `compiler-tests/positive/`):
+
+- `t09X_set_int_subrange.pas` — `set of 0..63` (straddles small/large boundary), union/intersect/difference, `in` across the boundary.
+- `t09X_set_char_subrange.pas` — `set of 'a'..'z'`, constructor `['a'..'z']`, membership for lowercase letters, non-membership for uppercase.
+- `t09X_set_enum_subrange.pas` — `type Day = (Mon,Tue,...Sun); Weekdays = set of Day(Mon..Fri)`; membership returns true for Mon..Fri, false for Sat/Sun.
+- `t09X_typed_const_set_subrange.pas` — typed constants over each subrange form (already effectively covered by the existing `primes` test once the base type is accepted, but add an explicit case).
+
+**Negative tests:**
+
+- `set of -5..5` — reject (negative lower bound).
+- `set of 0..300` — reject (exceeds 256-value ceiling).
+- `set of 10..5` — reject (inverted range).
+- `set of Day(BadIdent..Fri)` — reject (unknown constant in named-subrange form).
+
+**Documentation updates:**
+
+- `doc/compact-pascal-ref.md` — no production change; remove any language that suggests the feature already works if a reader might misread it. Add a one-line "bitmap is anchored at ordinal 0, so the low end of the subrange reserves but does not waste ordinals" note under Representation.
+- `doc/compact-pascal-wp.md` grammar appendix — no change; `SetType = 'set' 'of' SimpleType` already covers the new cases.
+- This file — flip the Phase 1c checkbox to `[x]` and reference the test IDs when shipped.
+
+**Dependencies and risks:**
+
+- No new runtime support needed. All ops reuse existing small/large-set codegen.
+- Risk: the anchor-at-0 decision means `set of 200..255` reserves 32 bytes even though only 56 bits are meaningful. Acceptable at Phase 1; revisit if memory pressure shows up in real programs.
+- Risk: `{$R+}` range-check extension must subtract `arrLo` only at the *diagnostic* level (reject out-of-range), not at the encoding level. Guard this in the checker design so we don't regress the trivial membership-test codegen.
