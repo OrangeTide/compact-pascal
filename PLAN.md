@@ -64,7 +64,7 @@ wasmtime run hello.wasm
 wasmtime run compiler.wasm -- -dump < hello.pas > hello.wasm
 ```
 
-### Phase 1b: Peephole Optimization (Optional) — `NOT STARTED`
+### Phase 1b: Peephole Optimization (Optional) — `IN PROGRESS`
 
 Optional sliding-window peephole optimizer for the WASM code buffers. Entirely compile-time gated behind `{$IFDEF PEEPHOLE}` — when not defined, zero bytes are added to the compiler WASM image. Can be added to an existing compiler at any time without modifying the core codegen.
 
@@ -74,17 +74,17 @@ Optional sliding-window peephole optimizer for the WASM code buffers. Entirely c
 - [x] `{$OPT+/-}` compiler directive, `ON`/`OFF` also accepted (toggles optimizer per-region; ignored when peephole not compiled in). Test: `t093_opt_directive`.
 
 **Optimizer:**
-- [ ] `TryPeephole` procedure called after each opcode emission, gated by `{$IFDEF PEEPHOLE}` and `optLevel > 0`
-- [ ] Fixed lookback window on code buffer (compile-time constant, tunable)
-- [ ] Switch/case pattern matcher on trailing opcode bytes
-- [ ] LEB128 decode helper for constant-folding patterns
-- [ ] Patterns: `local.set/get → tee`, constant folding, identity elimination, double negation, strength reduction (shift-for-multiply)
-- [ ] Verify all rewrites preserve WASM stack typing
+- [x] `TryPeephole` procedure called after each opcode emission, gated by `{$IFDEF PEEPHOLE}` and `optLevel > 0`. Instruction-boundary hook via bundled `EmitOp`/`EmitLocalGet`/etc. helpers; non-bundled paths invalidate the window.
+- [x] Fixed lookback window on code buffer (last two opcode starts tracked via `lastOpStart` / `prevOpStart` on `TCodeBuf`).
+- [x] Switch/case pattern matcher on trailing opcode bytes (opcode-pair dispatch in `TryPeephole`).
+- [x] LEB128 decode helper for operand comparison (`DecodeULEB128At`).
+- [x] Patterns shipped: `local.set X / local.get X → local.tee X`; `i32.eqz / i32.eqz → drop both` (double-negation). Additional patterns (constant folding, identity elimination, shift-for-multiply) deferred — base codegen rarely emits the redundancies they target.
+- [x] Verify rewrites preserve WASM stack typing (both shipped patterns are type-preserving; `local.tee` keeps the value on stack, double `eqz` returns an i32 equivalent to the input treated as i32 bool).
 
 **Validation:**
-- [ ] Existing test suite passes identically with `-O0` and `-O1`
-- [ ] Disassemble non-trivial programs (`wasm-objdump -d`) to verify pattern elimination
-- [ ] Measure code size reduction on compiler self-compilation
+- [x] Existing test suite passes identically under baseline (byte-identical output with `-O0` or without PEEPHOLE) and under `-dPEEPHOLE` (96/96 tests pass).
+- [x] Disassemble non-trivial programs (`wasm-objdump -d`) to verify pattern elimination — `compiler-tests/peephole-check.sh` builds baseline + peephole compilers, compiles a case-statement fixture, asserts baseline has `local.set`/`local.get`, peephole has `local.tee`, and peephole output is strictly smaller.
+- [ ] Measure code size reduction on compiler self-compilation (deferred until self-compile-to-WASM path lands).
 
 **Tutorial:**
 - [ ] Appendix in tutorial book (not a numbered chapter) — optional exercise
@@ -99,7 +99,7 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 **Language features:**
 - [x] Typed constants — scalar, 1D/ND array, `array of char` string-literal shortcut, record `(field: value; ...)`, and set `[elem, ...]` initializers implemented (tests t086–t088, t091, t092). Stored in data segment; TP-style mutable. Variant-record initializers tracked under Milestone 11.
 - [ ] Variant records — `case tag: T of ...` inside record types, and the corresponding typed-constant initializer form. Design: see Milestone 11 below.
-- [ ] Subrange base types in `set of` — `set of 0..31`, `set of 'a'..'z'`, `set of Day(Mon..Fri)`. Docs already promise this; compiler currently rejects. Design: see Milestone 12 below.
+- [x] Subrange base types in `set of` — `set of 0..31`, `set of 'a'..'z'`, `set of Day(Mon..Fri)` (tests t094–t097, n004–n007). Design: see Milestone 12 below.
 - [x] `{$ALIGN n}` directive for record field alignment (n ∈ {1, 2, 4, 8}, default 4; test t089)
 - [x] `-dump` flag in self-hosted builds (ParamCount/ParamStr intrinsics via WASI args_get)
 
@@ -935,7 +935,7 @@ On tag (e.g. v1.2.3), release a set of packages on the Github release page.
 - `doc/compact-pascal-wp.md` grammar appendix — add `RecordType` with the variant-part production, and a `VariantInitializer` form alongside `RecordInitializer`.
 - This file — flip Milestone 8 §Step 3's "deferred to a later milestone" note to point at Milestone 11, and clear the "Variant-record initializers not supported" note from the Phase 1c typed-constants checkbox once shipped.
 
-### Milestone 12: Subrange base types in `set of` — `NOT STARTED`
+### Milestone 12: Subrange base types in `set of` — `DONE`
 
 **Overview.** Accept `set of` over any ordinal subrange — integer, char, enum — so the existing documented forms (`set of 0..31`, `set of 'a'..'z'`, `set of Day(Mon..Fri)`) actually compile. The language reference and white-paper grammar already permit this; only the compiler's `ParseTypeSpec` set-type branch is gated to bare type names (`integer`, `char`, `boolean`, enum literal-list) and rejects subrange expressions with `"type name expected"`.
 
@@ -960,10 +960,10 @@ type
   Weekdays = set of Day(Mon..Fri);  { Day is a previously declared enum }
 ```
 
-**Encoding decision: anchor bitmaps at 0, not at `arrLo`.** The bitmap covers ordinals `0..arrHi`, rounded up to a byte (or packed into an `i32` when `arrHi < 32`). Bit N is set iff ordinal N is in the set. Consequences:
+**Encoding decision: anchor bitmaps at 0, not at `arrLo`.** The bitmap covers ordinals `0..arrHi`. Bit N is set iff ordinal N is in the set. Size is binary: 4 bytes (packed `i32`) when `arrHi < 32`, else 32 bytes matching existing large-set convention. Consequences:
 
 - **Pros:** `in`, set constructors, union/intersect/difference, and typed-constant initializers all stay identical to the current code. No bias subtraction on the hot path. Matches TP semantics.
-- **Cons:** Wastes bits `0..arrLo-1` when `arrLo > 0` (e.g., `set of 100..127` reserves 128 bits / 16 bytes instead of 32 bits / 4 bytes). Bounded at 32 bytes total.
+- **Cons:** Wastes bits `0..arrLo-1` when `arrLo > 0`. Bounded at 32 bytes total. A byte-rounded size (`(arrHi+8) div 8`) was briefly considered but would have required adjusting the set-constructor and set-copy codegen, which both assume 32 bytes for large sets — not worth it at Phase 1.
 - **Rejected alternative:** biasing the bitmap by `arrLo` saves memory but adds a subtract to every membership test and a matching adjustment to every constant literal. Not worth it at Phase 1.
 
 `arrLo` is still recorded on the type descriptor so a future `{$R+}` pass can range-check `x in s` (reject `x < arrLo` or `x > arrHi`). Phase 1 behavior without `{$R+}`: out-of-range membership test returns `false`, include/exclude is a no-op or silent bit-set at the raw ordinal — matching the existing `set of integer` (0..31) behavior today.
@@ -982,27 +982,27 @@ type
    - `Identifier '(' Constant '..' Constant ')'` — look up `Identifier` as a type, require it ordinal, parse bounds, verify both fit within the named type's range, use the named type as the base.
    - Single `Identifier` (existing path: bare type name) — return its full range as `(arrLo, arrHi)`. This makes the helper the single entry point.
 
-2. **Rewrite the `tkSet` branch in `ParseTypeSpec` (cpas.pas line 2527).** Replace the hard-coded `elemTyp` discriminator with a call to `ParseOrdinalSubrange`. Populate `types[tIdx].arrLo`/`arrHi`/`elemType`/`elemTypeIdx` from its output. Keep the existing bitmap-size computation (`fi := arrHi - arrLo + 1; if fi <= 32 then size := 4 else size := (arrHi + 8) div 8`) — note the subtle change: bitmap size must be computed from `arrHi`, not from `fi`, to preserve the anchor-at-0 invariant. Update that line.
+2. **Rewrite the `tkSet` branch in `ParseTypeSpec`.** Replace the hard-coded `elemTyp` discriminator with a three-form dispatch: bare type ident (legacy defaults), `T(Lo..Hi)` named subrange, or subrange literal via `ParseSubrangeLiteral`. Populate `types[tIdx].arrLo`/`arrHi`/`elemType`/`elemTypeIdx` from its output. **Size is binary: 4 bytes when `arrHi < 32`, else 32 bytes.** Originally planned as `(arrHi + 8) div 8`, but existing set constructor/copy codegen assumes large sets are exactly 32 bytes — anchor-at-0 makes that storage correct regardless of `arrLo`.
 
-3. **Reuse the array subrange parser.** After the helper lands, replace the inline bound parsing in the `tkArray` branch with the same helper so both paths share logic and stay in sync.
+3. **Reuse the array subrange parser.** _Deferred._ The array-bound parsing in `tkArray` is similar in shape but has subtly different semantics (no same-type enforcement on the two bounds, different error message) — out of scope for M12. Not worth changing observable behavior to share a helper.
 
 4. **Typed-constant initializer.** No code change expected — `[lo..hi]` range elements and enumerated members already emit bits by raw ordinal, and the encoding decision above keeps the layout compatible. Add a test to confirm.
 
 5. **Set constructors and `in`.** No code change expected for the same reason. Add tests for char- and enum-subrange membership to lock in behavior.
 
-**Tests** (positive, under `compiler-tests/positive/`):
+**Tests shipped** (positive, under `compiler-tests/positive/`):
 
-- `t09X_set_int_subrange.pas` — `set of 0..63` (straddles small/large boundary), union/intersect/difference, `in` across the boundary.
-- `t09X_set_char_subrange.pas` — `set of 'a'..'z'`, constructor `['a'..'z']`, membership for lowercase letters, non-membership for uppercase.
-- `t09X_set_enum_subrange.pas` — `type Day = (Mon,Tue,...Sun); Weekdays = set of Day(Mon..Fri)`; membership returns true for Mon..Fri, false for Sat/Sun.
-- `t09X_typed_const_set_subrange.pas` — typed constants over each subrange form (already effectively covered by the existing `primes` test once the base type is accepted, but add an explicit case).
+- `t094_set_int_subrange.pas` — `set of 0..9` and `set of 13..19` (integer literal bounds), union across subrange-typed sets.
+- `t095_set_char_subrange.pas` — `set of 'a'..'z'`, `set of 'A'..'Z'`, constructors `['A'..'E', 'Z']`, difference across subrange-bound sets.
+- `t096_set_enum_subrange.pas` — `Weekday = set of Day(Mon..Fri)` and `Workdays = set of Mon..Fri`; covers both named and literal enum-subrange forms plus union across compatible bases.
+- `t097_typed_const_set_subrange.pas` — typed constants over integer- and enum-subrange set types.
 
-**Negative tests:**
+**Negative tests shipped:**
 
-- `set of -5..5` — reject (negative lower bound).
-- `set of 0..300` — reject (exceeds 256-value ceiling).
-- `set of 10..5` — reject (inverted range).
-- `set of Day(BadIdent..Fri)` — reject (unknown constant in named-subrange form).
+- `n004_set_neg_bound.pas` — `set of -5..5` rejected: "set base type may not include negative values".
+- `n005_set_oob_bound.pas` — `set of 0..300` rejected: "set base type too large".
+- `n006_set_inverted.pas` — `set of 10..5` rejected: "inverted range".
+- `n007_set_enum_oor.pas` — `set of Mon..Happy` (bounds from different enum types) rejected: "subrange bounds must belong to the same enum type".
 
 **Documentation updates:**
 

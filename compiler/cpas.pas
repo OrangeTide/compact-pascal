@@ -2526,6 +2526,40 @@ begin
   end;
 end;
 
+procedure ParseSubrangeLiteral(var outLo, outHi, outBaseTyp, outBaseTypeIdx: longint);
+{** Parse `Constant '..' Constant`. Base type is inferred from the low bound.
+    For enum constants, outBaseTypeIdx is set to the enum's type descriptor so
+    callers can identify which enum the bounds belong to; otherwise -1. }
+var
+  hiTyp, sym, hiTypeIdx: longint;
+begin
+  outBaseTypeIdx := -1;
+  hiTypeIdx := -1;
+  { Snoop a leading identifier: if it's a named enum constant, record its
+    enum type descriptor. EvalConstExpr would otherwise lose this info. }
+  if tokKind = tkIdent then begin
+    sym := LookupSym(tokStr);
+    if (sym >= 0) and (syms[sym].kind = skConst) and (syms[sym].typ = tyEnum) then
+      outBaseTypeIdx := syms[sym].typeIdx;
+  end;
+  EvalConstExpr(outLo, outBaseTyp);
+  if not (outBaseTyp in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+    Error('ordinal type expected for subrange bound');
+  if tokKind <> tkDotDot then Expected('..');
+  NextToken;
+  { Snoop the high-bound enum, same trick. }
+  if tokKind = tkIdent then begin
+    sym := LookupSym(tokStr);
+    if (sym >= 0) and (syms[sym].kind = skConst) and (syms[sym].typ = tyEnum) then
+      hiTypeIdx := syms[sym].typeIdx;
+  end;
+  EvalConstExpr(outHi, hiTyp);
+  if hiTyp <> outBaseTyp then
+    Error('subrange bounds must have the same ordinal type');
+  if (outBaseTyp = tyEnum) and (outBaseTypeIdx <> hiTypeIdx) then
+    Error('subrange bounds must belong to the same enum type');
+end;
+
 procedure ParseTypeSpec(var outTyp, outTypeIdx, outSize, outStrMax: longint);
 {** Parse a type specifier. Returns type tag, type descriptor index (-1 for
     simple types), byte size, and string max length. Handles:
@@ -2549,6 +2583,7 @@ var
   nDims: longint;
   dimLo: array[0..7] of longint;
   dimHi: array[0..7] of longint;
+  loBound, hiBound, scratchTypeIdx: longint;
 begin
   outStrMax := 0;
   outTypeIdx := -1;
@@ -2727,35 +2762,90 @@ begin
     outTypeIdx := tIdx;
     outSize := 4;
   end else if tokKind = tkSet then begin
-    { Set type: set of BaseType }
+    (* Set type: accepts three base forms —
+         set of T             bare ordinal type (integer/char/boolean/enum)
+         set of T(Lo..Hi)     named subrange rooted in an ordinal type T
+         set of Lo..Hi        subrange literal (e.g. 0..63, 'a'..'z', Mon..Fri)
+       The bitmap anchors at ordinal 0 regardless of arrLo. arrLo is still
+       recorded so a future {$R+} pass can range-check membership tests. *)
     NextToken;
     Expect(tkOf);
-    ParseTypeSpec(elemTyp, elemTypeIdx, elemSize, elemStrMax);
     tIdx := AddTypeDesc;
     types[tIdx].kind := tySet;
+    elemTypeIdx := -1;
+
+    if tokKind = tkIdent then begin
+      typId := LookupSym(tokStr);
+      if typId < 0 then
+        Error('unknown identifier: ' + tokStr);
+      if syms[typId].kind = skType then begin
+        elemTyp := syms[typId].typ;
+        elemTypeIdx := syms[typId].typeIdx;
+        if not (elemTyp in [tyInteger, tyChar, tyBoolean, tyEnum]) then
+          Error('set base type must be ordinal');
+        typeName := syms[typId].name;
+        NextToken;
+        if tokKind = tkLParen then begin
+          { Named-subrange form: T(Lo..Hi) — T constrains the bound range. }
+          NextToken;
+          ParseSubrangeLiteral(loBound, hiBound, boundType, scratchTypeIdx);
+          Expect(tkRParen);
+          if elemTyp = tyEnum then begin
+            if (loBound < types[elemTypeIdx].arrLo) or (hiBound > types[elemTypeIdx].arrHi) then
+              Error('subrange out of range for ' + typeName);
+          end else if elemTyp = tyChar then begin
+            if (loBound < 0) or (hiBound > 255) then
+              Error('char subrange bound out of range');
+          end else if elemTyp = tyBoolean then begin
+            if (loBound < 0) or (hiBound > 1) then
+              Error('boolean subrange bound out of range');
+          end;
+          types[tIdx].arrLo := loBound;
+          types[tIdx].arrHi := hiBound;
+        end else begin
+          { Bare type name — legacy defaults. }
+          if elemTyp = tyInteger then begin
+            types[tIdx].arrLo := 0;
+            types[tIdx].arrHi := 31;
+          end else if elemTyp = tyChar then begin
+            types[tIdx].arrLo := 0;
+            types[tIdx].arrHi := 255;
+          end else if elemTyp = tyBoolean then begin
+            types[tIdx].arrLo := 0;
+            types[tIdx].arrHi := 1;
+          end else if elemTyp = tyEnum then begin
+            types[tIdx].arrLo := types[elemTypeIdx].arrLo;
+            types[tIdx].arrHi := types[elemTypeIdx].arrHi;
+          end;
+        end;
+      end else if syms[typId].kind = skConst then begin
+        { Subrange literal starting with a named constant (e.g. Mon..Fri). }
+        ParseSubrangeLiteral(loBound, hiBound, elemTyp, elemTypeIdx);
+        types[tIdx].arrLo := loBound;
+        types[tIdx].arrHi := hiBound;
+      end else
+        Error('set base type must be an ordinal type or subrange');
+    end else begin
+      { Subrange literal starting with a numeric/char/boolean literal. }
+      ParseSubrangeLiteral(loBound, hiBound, elemTyp, elemTypeIdx);
+      types[tIdx].arrLo := loBound;
+      types[tIdx].arrHi := hiBound;
+    end;
+
+    { Validate. Bitmap is anchored at ordinal 0, so arrHi alone drives size. }
+    if types[tIdx].arrLo < 0 then
+      Error('set base type may not include negative values');
+    if types[tIdx].arrHi < types[tIdx].arrLo then
+      Error('set base type has inverted range');
+    if types[tIdx].arrHi > 255 then
+      Error('set base type too large (max 256 elements)');
     types[tIdx].elemType := elemTyp;
     types[tIdx].elemTypeIdx := elemTypeIdx;
-    if (elemTyp = tyEnum) and (elemTypeIdx >= 0) then begin
-      types[tIdx].arrLo := types[elemTypeIdx].arrLo;
-      types[tIdx].arrHi := types[elemTypeIdx].arrHi;
-    end else if elemTyp = tyChar then begin
-      types[tIdx].arrLo := 0;
-      types[tIdx].arrHi := 255;
-    end else if elemTyp = tyBoolean then begin
-      types[tIdx].arrLo := 0;
-      types[tIdx].arrHi := 1;
-    end else if elemTyp = tyInteger then begin
-      types[tIdx].arrLo := 0;
-      types[tIdx].arrHi := 31;
-    end else
-      Error('invalid set base type');
-    fi := types[tIdx].arrHi - types[tIdx].arrLo + 1;
-    if fi <= 32 then begin
-      types[tIdx].size := 4;  { fits in i32 }
-    end else if fi <= 256 then begin
-      types[tIdx].size := (fi + 7) div 8;  { byte-rounded bitmap }
-    end else
-      Error('set base type too large (max 256 elements)');
+    if types[tIdx].arrHi < 32 then
+      types[tIdx].size := 4                           { fits in i32 }
+    else
+      types[tIdx].size := 32;                         { large set: fixed 256-bit bitmap }
+
     outTyp := tySet;
     outTypeIdx := tIdx;
     outSize := types[tIdx].size;

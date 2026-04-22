@@ -351,26 +351,27 @@ A set type is declared as `set of T` where `T` is an ordinal type with at most 2
 
 ```pascal
 type
-  CharSet = set of char;          { 256 bits = 32 bytes }
-  SmallSet = set of 0..31;        { 32 bits = 4 bytes }
-  Digits = set of 0..9;           { 16 bits = 2 bytes (rounded up) }
-  Colors = set of (Red, Green, Blue);  { 8 bits = 1 byte }
+  CharSet  = set of char;               { 256 bits, 32 bytes }
+  SmallSet = set of 0..31;              { packed into a 4-byte i32 }
+  Digits   = set of 0..9;               { packed into a 4-byte i32 }
+  Colors   = set of (Red, Green, Blue); { packed into a 4-byte i32 }
+  Lower    = set of 'a'..'z';           { 32 bytes (high ordinal) }
+type
+  Day      = (Sun, Mon, Tue, Wed, Thu, Fri, Sat);
+  Weekday  = set of Day(Mon..Fri);      { named-subrange form }
+  Workday  = set of Mon..Fri;           { subrange-literal form }
 ```
 
 ### Representation
 
-Sets are stored as bit arrays in WASM linear memory. The size is determined by the ordinal range of the base type, rounded up to the nearest byte:
+Sets are stored as bit arrays. Size is binary:
 
-| Base type range | Bitmap size |
+| High ordinal | Storage |
 |---|---|
-| 0..7 (8 values) | 1 byte |
-| 0..15 (16 values) | 2 bytes |
-| 0..31 (32 values) | 4 bytes |
-| 0..63 (64 values) | 8 bytes |
-| 0..127 (128 values) | 16 bytes |
-| 0..255 (256 values) | 32 bytes |
+| `arrHi < 32` | 4 bytes, packed into an `i32` |
+| `arrHi >= 32` | 32 bytes (256 bits) in linear memory |
 
-Bit N is set if the value with ordinal N is a member of the set.
+Bit N is set iff the value with ordinal N is a member of the set. The bitmap is anchored at ordinal 0 regardless of the subrange low bound, so `set of 100..127` reserves the same 32 bytes as `set of char` and shares the same membership codegen. The low bound is still recorded on the type descriptor for future range-check diagnostics.
 
 ### Set Operations
 
