@@ -301,6 +301,7 @@ type
     { Record fields }
     fieldStart: longint; { index into fields[] }
     fieldCount: longint; { number of fields }
+    variantOfs: longint; { byte offset where variant part begins, -1 if none }
     { Array fields }
     elemType: longint;   { element type tag (tyInteger, tyRecord, etc.) }
     elemTypeIdx: longint;{ index into types[] for structured elements, -1 otherwise }
@@ -318,6 +319,7 @@ type
     offset: longint;     { byte offset from record start }
     size: longint;       { byte size }
     strMax: longint;     { max string length (0 for non-string) }
+    variantId: longint;  { 0 for fixed-part fields, 1..n for variant fields }
   end;
 
   { Defined function record — tracks each compiled function body }
@@ -1670,6 +1672,29 @@ begin
   end;
 end;
 
+function PeekNextToken: longint;
+{** Peek at the next token without consuming it. Returns the token kind. }
+var
+  savedKind: longint;
+  savedInt: longint;
+  savedStr: string;
+begin
+  savedKind := tokKind;
+  savedInt := tokInt;
+  savedStr := tokStr;
+  NextToken;
+  PeekNextToken := tokKind;
+  { Push back the peeked token }
+  pendingTok := true;
+  pendingKind := tokKind;
+  pendingInt := tokInt;
+  pendingStr := tokStr;
+  { Restore the current token state }
+  tokKind := savedKind;
+  tokInt := savedInt;
+  tokStr := savedStr;
+end;
+
 {** Require the current token to be tk, then advance.
   Reports an error and halts if the current token is something else. }
 procedure Expect(tk: longint);
@@ -2509,6 +2534,7 @@ begin
   fields[numFields].offset := aoffset;
   fields[numFields].size := asize;
   fields[numFields].strMax := astrMax;
+  fields[numFields].variantId := 0;
   AddField := numFields;
   numFields := numFields + 1;
 end;
@@ -2584,6 +2610,16 @@ var
   dimLo: array[0..7] of longint;
   dimHi: array[0..7] of longint;
   loBound, hiBound, scratchTypeIdx: longint;
+  { Variant record fields }
+  tagFieldName: string;
+  tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax: longint;
+  tagOfs: longint;
+  variantId: longint;
+  maxVariantSize: longint;
+  lo, hi: longint;
+  constListOfs: longint;
+  variantFieldOfs: longint;
+  fldIdx: longint;
 begin
   outStrMax := 0;
   outTypeIdx := -1;
@@ -2625,15 +2661,17 @@ begin
       outStrMax := 255;
     outSize := outStrMax + 1;
   end else if tokKind = tkRecord then begin
-    { Record type }
+    { Record type (possibly with variant part) }
     NextToken;
     tIdx := AddTypeDesc;
     types[tIdx].kind := tyRecord;
     types[tIdx].fieldStart := numFields;
     types[tIdx].fieldCount := 0;
+    types[tIdx].variantOfs := -1;
     fieldOfs := 0;
 
-    while (tokKind <> tkEnd) and (tokKind <> tkEOF) do begin
+    { Parse fixed fields }
+    while (tokKind <> tkEnd) and (tokKind <> tkCase) and (tokKind <> tkEOF) do begin
       { Parse field list: ident [, ident ...] : type ; }
       nFieldNames := 0;
       while tokKind = tkIdent do begin
@@ -2665,6 +2703,151 @@ begin
       if tokKind = tkSemicolon then
         NextToken;
     end;
+
+    { Parse variant part if present }
+    if tokKind = tkCase then begin
+      types[tIdx].variantOfs := fieldOfs;
+      NextToken;
+
+      { Parse tag field name or type }
+      tagFieldName := '';
+      if tokKind = tkIdent then begin
+        { Check if this is a field name (followed by :) or type name (followed by of/int const) }
+        if PeekNextToken = tkColon then begin
+          { Named tag: identifier : type }
+          tagFieldName := tokStr;
+          NextToken;
+          NextToken;  { consume : }
+          ParseTypeSpec(tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax);
+          { Align tag field }
+          pad := (optAlign - (fieldOfs mod optAlign)) mod optAlign;
+          fieldOfs := fieldOfs + pad;
+          tagOfs := fieldOfs;
+          AddField(tagFieldName, tagFieldTyp, tagFieldTypeIdx, tagOfs, tagFieldSize, tagFieldStrMax);
+          types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
+          fieldOfs := fieldOfs + tagFieldSize;
+        end else begin
+          { Unnamed tag: type name directly }
+          ParseTypeSpec(tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax);
+          { Align tag field }
+          pad := (optAlign - (fieldOfs mod optAlign)) mod optAlign;
+          fieldOfs := fieldOfs + pad;
+          tagOfs := fieldOfs;
+          { Add as field with empty name to mark it as unnamed }
+          AddField('', tagFieldTyp, tagFieldTypeIdx, tagOfs, tagFieldSize, tagFieldStrMax);
+          types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
+          fieldOfs := fieldOfs + tagFieldSize;
+        end;
+      end else begin
+        { Type follows directly (no identifier at all) }
+        ParseTypeSpec(tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax);
+        { Align tag field }
+        pad := (optAlign - (fieldOfs mod optAlign)) mod optAlign;
+        fieldOfs := fieldOfs + pad;
+        tagOfs := fieldOfs;
+        { Add as field with empty name to mark it as unnamed }
+        AddField('', tagFieldTyp, tagFieldTypeIdx, tagOfs, tagFieldSize, tagFieldStrMax);
+        types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
+        fieldOfs := fieldOfs + tagFieldSize;
+      end;
+
+      Expect(tkOf);
+
+      { variant offset where variants start }
+      constListOfs := fieldOfs;
+      maxVariantSize := 0;
+      variantId := 1;
+
+      { Parse each variant }
+      repeat
+        { Parse case labels (constants or ranges) }
+        if tokKind = tkInteger then begin
+          lo := tokInt;
+          NextToken;
+          if tokKind = tkDotDot then begin
+            NextToken;
+            if tokKind <> tkInteger then
+              Error('integer constant expected for high bound');
+            hi := tokInt;
+            NextToken;
+          end else
+            hi := lo;
+        end else
+          Error('integer constant expected for variant label');
+
+        { Parse any additional labels (separated by commas) }
+        while tokKind = tkComma do begin
+          NextToken;
+          if tokKind = tkInteger then begin
+            lo := tokInt;
+            NextToken;
+            if tokKind = tkDotDot then begin
+              NextToken;
+              if tokKind <> tkInteger then
+                Error('integer constant expected for high bound');
+              hi := tokInt;
+              NextToken;
+            end else
+              hi := lo;
+          end else
+            Error('integer constant expected for variant label');
+        end;
+
+        Expect(tkColon);
+        Expect(tkLParen);
+
+        { Parse variant fields }
+        variantFieldOfs := constListOfs;
+
+        while (tokKind <> tkRParen) and (tokKind <> tkEOF) do begin
+          nFieldNames := 0;
+          while tokKind = tkIdent do begin
+            if nFieldNames >= 32 then
+              Error('too many fields in one declaration');
+            fieldNames[nFieldNames] := tokStr;
+            nFieldNames := nFieldNames + 1;
+            NextToken;
+            if tokKind = tkComma then
+              NextToken
+            else
+              break;
+          end;
+          if nFieldNames = 0 then
+            break;
+
+          Expect(tkColon);
+          ParseTypeSpec(fieldTyp, fieldTypeIdx, fieldSize, fieldStrMax);
+
+          for fi := 0 to nFieldNames - 1 do begin
+            pad := (optAlign - (variantFieldOfs mod optAlign)) mod optAlign;
+            variantFieldOfs := variantFieldOfs + pad;
+            fldIdx := AddField(fieldNames[fi], fieldTyp, fieldTypeIdx, variantFieldOfs, fieldSize, fieldStrMax);
+            fields[fldIdx].variantId := variantId;
+            types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
+            variantFieldOfs := variantFieldOfs + fieldSize;
+          end;
+
+          if tokKind = tkSemicolon then
+            NextToken;
+        end;
+
+        { Track maximum variant size }
+        if variantFieldOfs - constListOfs > maxVariantSize then
+          maxVariantSize := variantFieldOfs - constListOfs;
+
+        Expect(tkRParen);
+
+        variantId := variantId + 1;
+
+        if tokKind = tkSemicolon then
+          NextToken
+        else
+          break;
+      until tokKind <> tkInteger;
+
+      fieldOfs := constListOfs + maxVariantSize;
+    end;
+
     Expect(tkEnd);
 
     { Final alignment — pad record size to current alignment boundary }
@@ -3721,7 +3904,7 @@ begin
         Expect(tkRParen);
         exprType := tyInteger;
       end
-      else if tokStr = 'LO' then begin
+      else if (tokStr = 'LO') and (LookupSym(tokStr) < 0) then begin
         NextToken;
         Expect(tkLParen);
         ParseExpression(PrecNone);
@@ -3732,7 +3915,7 @@ begin
         EmitOp(OpI32And);
         exprType := tyInteger;
       end
-      else if tokStr = 'HI' then begin
+      else if (tokStr = 'HI') and (LookupSym(tokStr) < 0) then begin
         NextToken;
         Expect(tkLParen);
         ParseExpression(PrecNone);
@@ -5068,7 +5251,7 @@ var
           outVal := outVal * outVal;
           Expect(tkRParen);
         end
-        else if tokStr = 'LO' then begin
+        else if (tokStr = 'LO') and (LookupSym(tokStr) < 0) then begin
           NextToken; Expect(tkLParen);
           EvalConstExpr(outVal, outTyp);
           if outTyp <> tyInteger then
@@ -5076,7 +5259,7 @@ var
           outVal := outVal and $FF;
           Expect(tkRParen);
         end
-        else if tokStr = 'HI' then begin
+        else if (tokStr = 'HI') and (LookupSym(tokStr) < 0) then begin
           NextToken; Expect(tkLParen);
           EvalConstExpr(outVal, outTyp);
           if outTyp <> tyInteger then
@@ -6416,6 +6599,10 @@ var
   savedVarInitVal: array[0..15] of longint;
   savedVarInitIsStr: array[0..15] of boolean;
   savedVarInitStrMax: array[0..15] of longint;
+  localImportMod: string[63];
+  localImportName: string[63];
+  localExportPending: boolean;
+  localExportName: string[63];
 begin
   isFunc := tokKind = tkFunction;
   NextToken; { consume 'procedure' or 'function' }
@@ -6530,10 +6717,13 @@ begin
 
   { Check for external declaration (WASM import) }
   if tokKind = tkExternal then begin
-    NextToken;
-    Expect(tkSemicolon);
     if not hasPendingImport then
       Error('external requires preceding {$IMPORT} directive');
+    localImportMod := pendingImportMod;
+    localImportName := pendingImportName;
+    hasPendingImport := false;
+    NextToken;
+    Expect(tkSemicolon);
 
     { Build WASM type signature for the import }
     for i := 0 to np - 1 do
@@ -6546,7 +6736,7 @@ begin
     typIdx := AddWasmType(np, wasmParams, nWasmResults, wasmResults);
 
     { Register as WASM import }
-    funcIdx := AddImport(pendingImportMod, pendingImportName, typIdx);
+    funcIdx := AddImport(localImportMod, localImportName, typIdx);
 
     { Register in funcs table so call sites can look up param metadata }
     if numFuncs >= MaxFuncs then
@@ -6572,7 +6762,6 @@ begin
     syms[sym].size := numFuncs; { funcs[] index for param metadata }
 
     numFuncs := numFuncs + 1;
-    hasPendingImport := false;
     exit;
   end;
 
@@ -6807,6 +6996,11 @@ begin
     EmitLocalGet(np); { local index for return value }
   end;
 
+  localExportPending := hasPendingExport;
+  localExportName := pendingExportName;
+  if hasPendingExport then
+    hasPendingExport := false;
+
   Expect(tkSemicolon);
 
   { Leave scope }
@@ -6872,13 +7066,12 @@ begin
   end;
 
   (* Record user export if EXPORT was pending *)
-  if hasPendingExport then begin
+  if localExportPending then begin
     if numUserExports >= 32 then
       Error('too many exports');
-    userExports[numUserExports].name := pendingExportName;
+    userExports[numUserExports].name := localExportName;
     userExports[numUserExports].funcIdx := syms[procSym].offset;
     numUserExports := numUserExports + 1;
-    hasPendingExport := false;
   end;
 
   { Restore code emission state }
@@ -6974,50 +7167,192 @@ end;
 
 procedure EmitRecordInitializer(typeIdx: longint);
 {** Emit bytes for a record typed constant.
-  Syntax: (field: value; field: value; ...). Fields must appear in
-  declaration order; all fields must be specified. Variant records are
-  not supported here — they have no field entries beyond the tag and
-  would need per-variant handling. Emits zero padding between fields to
-  match the declared record layout. }
+  Syntax: (field: value; field: value; ...). For non-variant records,
+  all fields must appear in declaration order. For variant records,
+  fixed fields come first, then the tag field (required to determine
+  which variant to initialize), then only the variant fields of the
+  selected variant. Zero-fills remaining space. }
 var
-  fStart, fCount, fi: longint;
+  fStart, fCount, fi, fldIdx: longint;
   expectedOff, curOff: longint;
   fldName: string;
+  variantOfs: longint;
+  tagValue: longint;
+  tagTyp: longint;
+  selectedVariantId: longint;
+  hasVariants: boolean;
+  tagFound: boolean;
 begin
   Expect(tkLParen);
   fStart := types[typeIdx].fieldStart;
   fCount := types[typeIdx].fieldCount;
   curOff := 0;
-  for fi := 0 to fCount - 1 do begin
-    expectedOff := fields[fStart + fi].offset;
-    while curOff < expectedOff do begin
-      DataBufEmit(secData, 0);
-      curOff := curOff + 1;
+
+  variantOfs := types[typeIdx].variantOfs;
+  hasVariants := (variantOfs >= 0);
+  tagFound := false;
+  selectedVariantId := 0;
+
+  { If the record has variants, we must see the tag field to know which variant }
+  if hasVariants then begin
+    { First pass: emit fixed fields and find the tag field }
+    fi := 0;
+    while fi < fCount do begin
+      { If this is the tag field }
+      if (fields[fStart + fi].variantId = 0) and (fields[fStart + fi].offset >= variantOfs) then begin
+        { This is the tag field }
+        if fields[fStart + fi].name = '' then
+          Error('variant records with unnamed tags cannot be initialized with typed constants');
+
+        expectedOff := fields[fStart + fi].offset;
+        while curOff < expectedOff do begin
+          DataBufEmit(secData, 0);
+          curOff := curOff + 1;
+        end;
+
+        if tokKind <> tkIdent then
+          Error('field name expected in record initializer');
+        fldName := tokStr;
+        if fldName <> fields[fStart + fi].name then
+          Error('expected field ' + fields[fStart + fi].name
+                + ' but got ' + fldName);
+        NextToken;
+        Expect(tkColon);
+
+        { Evaluate the tag value }
+        EvalConstExpr(tagValue, tagTyp);
+        selectedVariantId := tagValue;
+
+        { Emit the tag field value directly (already evaluated) }
+        if fields[fStart + fi].size = 1 then
+          DataBufEmit(secData, byte(tagValue and $FF))
+        else
+          EmitDataI32Bytes(tagValue);
+        curOff := curOff + fields[fStart + fi].size;
+
+        if fi < fCount - 1 then begin
+          if tokKind <> tkSemicolon then
+            Error('; expected between record fields');
+          NextToken;
+        end else if tokKind = tkSemicolon then
+          NextToken;
+
+        tagFound := true;
+        fi := fi + 1;
+        break;
+      end else if fields[fStart + fi].variantId = 0 then begin
+        { Regular fixed field }
+        expectedOff := fields[fStart + fi].offset;
+        while curOff < expectedOff do begin
+          DataBufEmit(secData, 0);
+          curOff := curOff + 1;
+        end;
+
+        if tokKind <> tkIdent then
+          Error('field name expected in record initializer');
+        fldName := tokStr;
+        if fldName <> fields[fStart + fi].name then
+          Error('expected field ' + fields[fStart + fi].name
+                + ' but got ' + fldName);
+        NextToken;
+        Expect(tkColon);
+
+        EmitTypedConstField(fields[fStart + fi].typ,
+                            fields[fStart + fi].typeIdx,
+                            fields[fStart + fi].size,
+                            fields[fStart + fi].strMax);
+        curOff := curOff + fields[fStart + fi].size;
+
+        if fi < fCount - 1 then begin
+          if tokKind <> tkSemicolon then
+            Error('; expected between record fields');
+          NextToken;
+        end else if tokKind = tkSemicolon then
+          NextToken;
+
+        fi := fi + 1;
+      end else
+        fi := fi + 1;
     end;
 
-    if tokKind <> tkIdent then
-      Error('field name expected in record initializer');
-    fldName := tokStr;
-    if fldName <> fields[fStart + fi].name then
-      Error('expected field ' + fields[fStart + fi].name
-            + ' but got ' + fldName);
-    NextToken;
-    Expect(tkColon);
+    { Now process variant fields }
+    if tagFound then begin
+      while tokKind <> tkRParen do begin
+        if tokKind <> tkIdent then
+          Error('field name expected in record initializer');
+        fldName := tokStr;
 
-    EmitTypedConstField(fields[fStart + fi].typ,
-                        fields[fStart + fi].typeIdx,
-                        fields[fStart + fi].size,
-                        fields[fStart + fi].strMax);
-    curOff := curOff + fields[fStart + fi].size;
+        { Find this field in the record }
+        fldIdx := -1;
+        for fi := 0 to fCount - 1 do begin
+          if fields[fStart + fi].name = fldName then begin
+            fldIdx := fi;
+            break;
+          end;
+        end;
 
-    if fi < fCount - 1 then begin
-      if tokKind <> tkSemicolon then
-        Error('; expected between record fields');
+        if fldIdx < 0 then
+          Error('unknown field: ' + fldName);
+
+        { Check if this field is in the selected variant }
+        if fields[fStart + fldIdx].variantId <> selectedVariantId then
+          Error('field ' + fldName + ' not in variant');
+
+        NextToken;
+        Expect(tkColon);
+
+        expectedOff := fields[fStart + fldIdx].offset;
+        while curOff < expectedOff do begin
+          DataBufEmit(secData, 0);
+          curOff := curOff + 1;
+        end;
+
+        EmitTypedConstField(fields[fStart + fldIdx].typ,
+                            fields[fStart + fldIdx].typeIdx,
+                            fields[fStart + fldIdx].size,
+                            fields[fStart + fldIdx].strMax);
+        curOff := curOff + fields[fStart + fldIdx].size;
+
+        if tokKind = tkSemicolon then
+          NextToken
+        else if tokKind <> tkRParen then
+          Error('; or ) expected after field value');
+      end;
+    end;
+  end else begin
+    { Non-variant record: simple sequential processing }
+    for fi := 0 to fCount - 1 do begin
+      expectedOff := fields[fStart + fi].offset;
+      while curOff < expectedOff do begin
+        DataBufEmit(secData, 0);
+        curOff := curOff + 1;
+      end;
+
+      if tokKind <> tkIdent then
+        Error('field name expected in record initializer');
+      fldName := tokStr;
+      if fldName <> fields[fStart + fi].name then
+        Error('expected field ' + fields[fStart + fi].name
+              + ' but got ' + fldName);
       NextToken;
-    end else if tokKind = tkSemicolon then
-      NextToken;
+      Expect(tkColon);
+
+      EmitTypedConstField(fields[fStart + fi].typ,
+                          fields[fStart + fi].typeIdx,
+                          fields[fStart + fi].size,
+                          fields[fStart + fi].strMax);
+      curOff := curOff + fields[fStart + fi].size;
+
+      if fi < fCount - 1 then begin
+        if tokKind <> tkSemicolon then
+          Error('; expected between record fields');
+        NextToken;
+      end else if tokKind = tkSemicolon then
+        NextToken;
+    end;
   end;
 
+  { Zero-fill remaining space to record size }
   while curOff < types[typeIdx].size do begin
     DataBufEmit(secData, 0);
     curOff := curOff + 1;
