@@ -1,5 +1,6 @@
 /* compact_pascal.c : embeddable Pascal-to-WASM compiler (bring-your-own runtime) */
 /* PUBLIC DOMAIN or MIT-0 -- See LICENSE for details. */
+/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -359,6 +360,424 @@ cp_wasi_args_get(void *user_data,
 	if (n_results > 0)
 		results[0] = 0; /* success */
 	return 0;
+}
+
+/****************************************************************
+ * Include file expansion
+ ****************************************************************/
+
+#define CP_MAX_INCLUDE_DEPTH 16
+
+struct cp_include_state {
+	size_t allocated;
+	size_t used;
+	char *buffer;
+	int depth;
+	char *err_buf;
+	size_t err_buf_size;
+};
+
+static void
+set_error(struct cp_include_state *state, const char *msg)
+{
+	if (state->err_buf && state->err_buf_size > 0) {
+		size_t len = strlen(msg);
+		if (len > state->err_buf_size - 1)
+			len = state->err_buf_size - 1;
+		memcpy(state->err_buf, msg, len);
+		state->err_buf[len] = '\0';
+	}
+}
+
+static int
+append_buffer(struct cp_include_state *state, const char *data, size_t len)
+{
+	size_t new_size;
+	char *new_buffer;
+
+	if (state->used + len > state->allocated) {
+		new_size = (state->allocated == 0) ? 16384 : state->allocated * 2;
+		while (new_size < state->used + len)
+			new_size *= 2;
+
+		new_buffer = realloc(state->buffer, new_size);
+		if (!new_buffer)
+			return -1;
+
+		state->buffer = new_buffer;
+		state->allocated = new_size;
+	}
+
+	memcpy(state->buffer + state->used, data, len);
+	state->used += len;
+	return 0;
+}
+
+static char *
+read_file(const char *path, size_t *out_len)
+{
+	FILE *fp;
+	long len;
+	char *buf;
+	size_t nread;
+
+	fp = fopen(path, "rb");
+	if (!fp)
+		return NULL;
+
+	if (fseek(fp, 0, SEEK_END) != 0) {
+		fclose(fp);
+		return NULL;
+	}
+	len = ftell(fp);
+	if (len < 0) {
+		fclose(fp);
+		return NULL;
+	}
+	rewind(fp);
+
+	buf = malloc((size_t)len + 1);
+	if (!buf) {
+		fclose(fp);
+		return NULL;
+	}
+
+	nread = fread(buf, 1, (size_t)len, fp);
+	fclose(fp);
+
+	if (nread != (size_t)len) {
+		free(buf);
+		return NULL;
+	}
+	buf[nread] = '\0';
+	*out_len = (size_t)len;
+	return buf;
+}
+
+static char *
+build_path(const char *base_dir, const char *filename)
+{
+	size_t base_len, file_len;
+	char *result;
+	int has_sep;
+
+	if (!filename || !*filename)
+		return NULL;
+
+	if (!base_dir || !*base_dir)
+		return strdup(filename);
+
+	base_len = strlen(base_dir);
+	file_len = strlen(filename);
+
+	has_sep = (base_dir[base_len - 1] == '/' || base_dir[base_len - 1] == '\\');
+
+	result = malloc(base_len + (has_sep ? 0 : 1) + file_len + 1);
+	if (!result)
+		return NULL;
+
+	strcpy(result, base_dir);
+	if (!has_sep)
+		strcat(result, "/");
+	strcat(result, filename);
+
+	return result;
+}
+
+static int
+expand_includes_impl(struct cp_include_state *state,
+                     const char *source,
+                     const char *base_dir);
+
+static int
+scan_and_expand(struct cp_include_state *state,
+                const char *source,
+                const char *base_dir,
+                size_t *pos)
+{
+	const char *p = source + *pos;
+
+	if (*p != '{') {
+		(*pos)++;
+		return 0;
+	}
+	p++;
+
+	if (*p != '$') {
+		(*pos)++;
+		return 0;
+	}
+	p++;
+
+	if ((p[0] == 'I' || p[0] == 'i') && (p[1] == ' ' || p[1] == '\'' || p[1] == '"')) {
+		p++;
+		while (*p && (*p == ' ' || *p == '\t'))
+			p++;
+
+		int has_quote = (*p == '\'' || *p == '"');
+		char quote_char = *p;
+		if (has_quote)
+			p++;
+
+		const char *filename_start = p;
+		while (*p && *p != quote_char && *p != '}')
+			p++;
+
+		const char *filename_end = p;
+
+		if (!has_quote) {
+			while (filename_end > filename_start &&
+			       (*(filename_end - 1) == ' ' || *(filename_end - 1) == '\t' || *(filename_end - 1) == '}'))
+				filename_end--;
+		}
+
+		if (!has_quote && *p != '}') {
+			(*pos)++;
+			return 0;
+		}
+
+		if (has_quote && *p != quote_char) {
+			(*pos)++;
+			return 0;
+		}
+
+		if (has_quote)
+			p++;
+
+		while (*p && *p != '}')
+			p++;
+
+		if (*p != '}') {
+			(*pos)++;
+			return 0;
+		}
+		p++;
+
+		size_t filename_len = filename_end - filename_start;
+		char *filename = malloc(filename_len + 1);
+		if (!filename)
+			return -1;
+
+		memcpy(filename, filename_start, filename_len);
+		filename[filename_len] = '\0';
+
+		if (state->depth >= CP_MAX_INCLUDE_DEPTH) {
+			free(filename);
+			set_error(state, "include nesting too deep");
+			return -1;
+		}
+
+		char *full_path = build_path(base_dir, filename);
+		free(filename);
+		if (!full_path)
+			return -1;
+
+		size_t file_len = 0;
+		char *file_content = read_file(full_path, &file_len);
+		free(full_path);
+
+		if (!file_content) {
+			set_error(state, "cannot open include file");
+			return -1;
+		}
+
+		state->depth++;
+		int ret = expand_includes_impl(state, file_content, base_dir);
+		state->depth--;
+		free(file_content);
+
+		if (ret != 0)
+			return ret;
+
+		*pos = p - source;
+		return 1;
+	} else if ((p[0] == 'I' && p[1] == 'N' && p[2] == 'C' && p[3] == 'L' && p[4] == 'U' && p[5] == 'D' && p[6] == 'E') ||
+	           (p[0] == 'i' && p[1] == 'n' && p[2] == 'c' && p[3] == 'l' && p[4] == 'u' && p[5] == 'd' && p[6] == 'e')) {
+		p += 7;
+		while (*p && (*p == ' ' || *p == '\t'))
+			p++;
+
+		int has_quote = (*p == '\'' || *p == '"');
+		char quote_char = *p;
+		if (has_quote)
+			p++;
+
+		const char *filename_start = p;
+		while (*p && *p != quote_char && *p != '}')
+			p++;
+
+		const char *filename_end = p;
+
+		if (!has_quote) {
+			while (filename_end > filename_start &&
+			       (*(filename_end - 1) == ' ' || *(filename_end - 1) == '\t' || *(filename_end - 1) == '}'))
+				filename_end--;
+		}
+
+		if (!has_quote && *p != '}') {
+			(*pos)++;
+			return 0;
+		}
+
+		if (has_quote && *p != quote_char) {
+			(*pos)++;
+			return 0;
+		}
+
+		if (has_quote)
+			p++;
+
+		while (*p && *p != '}')
+			p++;
+
+		if (*p != '}') {
+			(*pos)++;
+			return 0;
+		}
+		p++;
+
+		size_t filename_len = filename_end - filename_start;
+		char *filename = malloc(filename_len + 1);
+		if (!filename)
+			return -1;
+
+		memcpy(filename, filename_start, filename_len);
+		filename[filename_len] = '\0';
+
+		if (state->depth >= CP_MAX_INCLUDE_DEPTH) {
+			free(filename);
+			set_error(state, "include nesting too deep");
+			return -1;
+		}
+
+		char *full_path = build_path(base_dir, filename);
+		free(filename);
+		if (!full_path)
+			return -1;
+
+		size_t file_len = 0;
+		char *file_content = read_file(full_path, &file_len);
+		free(full_path);
+
+		if (!file_content) {
+			set_error(state, "cannot open include file");
+			return -1;
+		}
+
+		state->depth++;
+		int ret = expand_includes_impl(state, file_content, base_dir);
+		state->depth--;
+		free(file_content);
+
+		if (ret != 0)
+			return ret;
+
+		*pos = p - source;
+		return 1;
+	}
+
+	(*pos)++;
+	return 0;
+}
+
+static int
+find_string_end(const char *source, size_t *pos)
+{
+	char quote = source[*pos];
+	(*pos)++;
+
+	while (source[*pos]) {
+		if (source[*pos] == quote) {
+			(*pos)++;
+			if (source[*pos] == quote) {
+				(*pos)++;
+			} else {
+				return 0;
+			}
+		} else {
+			(*pos)++;
+		}
+	}
+	return -1;
+}
+
+static int
+expand_includes_impl(struct cp_include_state *state,
+                     const char *source,
+                     const char *base_dir)
+{
+	size_t pos = 0;
+
+	while (source[pos]) {
+		if (source[pos] == '\'' || source[pos] == '"') {
+			size_t string_start = pos;
+			if (find_string_end(source, &pos) != 0)
+				return -1;
+			if (append_buffer(state, source + string_start, pos - string_start) != 0)
+				return -1;
+		} else if (source[pos] == '(' && source[pos + 1] == '*') {
+			size_t comment_start = pos;
+			pos += 2;
+			while (source[pos]) {
+				if (source[pos] == '*' && source[pos + 1] == ')') {
+					pos += 2;
+					break;
+				}
+				pos++;
+			}
+			if (append_buffer(state, source + comment_start, pos - comment_start) != 0)
+				return -1;
+		} else if (source[pos] == '{') {
+			int ret = scan_and_expand(state, source, base_dir, &pos);
+			if (ret < 0)
+				return ret;
+			if (ret == 0) {
+				if (append_buffer(state, source + pos - 1, 1) != 0)
+					return -1;
+			}
+		} else {
+			size_t start = pos;
+			while (source[pos] && source[pos] != '\'' && source[pos] != '"' &&
+			       source[pos] != '(' && source[pos] != '{')
+				pos++;
+			if (append_buffer(state, source + start, pos - start) != 0)
+				return -1;
+		}
+	}
+
+	return 0;
+}
+
+char *
+cp_expand_includes(const char *source, const char *base_dir,
+                   char *err_buf, size_t err_buf_size)
+{
+	struct cp_include_state state;
+	char *result;
+
+	if (!source) {
+		if (err_buf && err_buf_size > 0)
+			err_buf[0] = '\0';
+		return NULL;
+	}
+
+	memset(&state, 0, sizeof(state));
+	state.err_buf = err_buf;
+	state.err_buf_size = err_buf_size;
+	state.depth = 0;
+
+	if (expand_includes_impl(&state, source, base_dir ? base_dir : ".") != 0) {
+		free(state.buffer);
+		return NULL;
+	}
+
+	if (append_buffer(&state, "", 1) != 0) {
+		free(state.buffer);
+		return NULL;
+	}
+
+	result = state.buffer;
+	return result;
 }
 
 /****************************************************************

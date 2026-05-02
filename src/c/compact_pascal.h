@@ -269,6 +269,27 @@ int cp_wasi_args_get(void *user_data,
                      uint64_t *results, int n_results);
 
 /****************************************************************
+ * Include file expansion
+ ****************************************************************/
+
+/** Expand {$I 'file'} / {$INCLUDE 'file'} directives in source.
+ *
+ * Scans source for include directives and replaces them with the
+ * contents of the referenced files, resolved relative to base_dir.
+ * Supports recursive expansion (included files may contain includes).
+ * Recursion depth is limited to prevent infinite loops.
+ *
+ * Returns a newly allocated string with all includes expanded, or
+ * NULL on error. Caller must free() the result. On error, writes a
+ * message to err_buf (if non-NULL).
+ *
+ * The err_buf parameter is optional; if provided, error messages will
+ * be written to it (up to err_buf_size bytes, including NUL terminator).
+ */
+char *cp_expand_includes(const char *source, const char *base_dir,
+                         char *err_buf, size_t err_buf_size);
+
+/****************************************************************
  * String conversion helpers
  ****************************************************************/
 
