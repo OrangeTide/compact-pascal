@@ -4,7 +4,7 @@
   <img src="pages/logo/compact-pascal-readme.png" alt="Compact Pascal" width="400">
 </p>
 
-![Status: Early Development](https://img.shields.io/badge/status-early%20development-orange)
+![Status: Phase 1 Complete](https://img.shields.io/badge/status-phase%201%20complete-green)
 ![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 ![WASM Target: 1.0 MVP](https://img.shields.io/badge/WASM-1.0%20MVP-purple)
 [![Human–AI Co-Created](https://dotnetdave.github.io/ai-usage-badges/badges/svg/human-ai-co-created.svg)](https://dotnetdave.github.io/ai-usage-badges/)
@@ -71,18 +71,28 @@ try instance.call("main", &.{});
 
 ## Status
 
-**Early development.** The project is in the planning and design phase. No compiler or libraries exist yet. See the [project plan](PLAN.md) for the phased roadmap.
+**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 104 tests (97 positive, 7 negative). A browser playground is shipped. The C embedding library is partially implemented. See the [project plan](PLAN.md) for the phased roadmap.
+
+**Standalone usage (no embedding library needed):**
+
+```bash
+wasmtime run compiler.wasm < hello.pas > hello.wasm
+wasmtime run hello.wasm
+```
 
 | Phase | Description | Status |
 |---|---|---|
-| 1 | Compiler (Pascal, bootstrapped with fpc) | Not started |
-| 2 | Embedding libraries (Rust + Zig + C) | Not started |
-| 3 | Self-hosting | Not started |
-| 4 | Browser / WASM target | Not started |
-| 5 | Dynamic allocation (`New`/`Dispose`) | Not started |
-| 5b | Richer string type | Not started |
-| 6 | Units and separate compilation | Not started |
-| 7 | Interfaces and methods | Not started |
+| 1 | Compiler (Pascal, bootstrapped with fpc) | Done |
+| 1b | Peephole optimization (optional) | In progress |
+| 1c | Language completeness polish | In progress |
+| 2 | Embedding libraries (Rust + Zig + C) | C partial, Rust/Zig not started |
+| 3 | Self-hosting | Done (fixpoint validated) |
+| 4 | Browser playground | Done |
+| 5 | Playground file I/O | Not started |
+| 6 | Dynamic allocation (`New`/`Dispose`) | Not started |
+| 6b | Richer string type | Not started |
+| 7 | Units and separate compilation | Not started |
+| 8 | Interfaces and methods | Not started |
 
 ## Documentation
 
@@ -91,6 +101,9 @@ try instance.call("main", &.{});
 | [doc/compact-pascal-wp.md](doc/compact-pascal-wp.md) | White paper — motivation, architecture, grammar |
 | [doc/compact-pascal-ref.md](doc/compact-pascal-ref.md) | Language reference (living document, CalVer versioned) |
 | [doc/compact-pascal-tutorial.md](doc/compact-pascal-tutorial.md) | Compiler tutorial book — building the compiler step by step |
+| [doc/pode-server.md](doc/pode-server.md) | Pode Server design (Pascal Node clone) |
+| [doc/lightout-example.md](doc/lightout-example.md) | Light's Out browser game example design |
+| [doc/playground.md](doc/playground.md) | Browser playground design |
 
 ## Prerequisites
 
@@ -109,23 +122,24 @@ try instance.call("main", &.{});
   sudo pacman -S fpc
   ```
 
-- **Rust** (stable) — for building the Rust embedding library.
+- **A WASM runtime** — for running the compiler and compiled programs.
 
   ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  # wasmtime (recommended)
+  curl https://wasmtime.dev/install.sh -sSf | bash
   ```
 
-- **Zig** — for building the Zig embedding library.
+- **C compiler** (optional) — for building the C embedding library and examples.
 
   ```bash
-  # See https://ziglang.org/download/
-  # Or via package manager:
-  # Debian/Ubuntu (via snap)
-  sudo snap install zig --classic
-
-  # macOS (Homebrew)
-  brew install zig
+  # Debian/Ubuntu
+  sudo apt install build-essential
   ```
+
+### Future (not yet needed)
+
+- **Rust** (stable) — for the Rust embedding library (Phase 2).
+- **Zig** — for the Zig embedding library (Phase 2).
 
 ### Optional
 
@@ -154,20 +168,20 @@ try instance.call("main", &.{});
 ## Project Layout
 
 ```
-compiler/       — Pascal source for the compiler (built with fpc)
-compiler-tests/ — test suite (positive and negative tests)
+compiler/       — Pascal source for the compiler (cpas.pas, ~10k lines)
+compiler-tests/ — test suite (97 positive, 7 negative, shell runner)
 src/
-  rust/         — Rust crate source
-  zig/          — Zig library source
-  c/            — C embedding library (bring-your-own-WASM-runtime)
-snapshot/       — compiler WASM blob (shared by Rust, Zig, and C)
+  c/            — C embedding library (compact_pascal.h/.c, vtable-based)
+  rust/         — Rust crate source (not yet started)
+  zig/          — Zig library source (not yet started)
+snapshot/       — compiler WASM blob (compiler.wasm)
+vendor/wasm3/   — wasm3 C source (used by C library)
 examples/
   pascal/       — Compact Pascal example programs
-  rust/         — Rust embedding examples
-  zig/          — Zig embedding examples
-  c/            — C embedding examples
-doc/            — white paper and language reference
+  c/            — C embedding examples (hello, student-compiler)
+doc/            — white paper, language reference, tutorial, tech notes
 pages/          — GitHub Pages site
+  playground/   — browser-based IDE (vanilla HTML/CSS/JS)
 ```
 
 ## Contributing

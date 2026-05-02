@@ -82,7 +82,7 @@ Optional sliding-window peephole optimizer for the WASM code buffers. Entirely c
 - [x] Verify rewrites preserve WASM stack typing (both shipped patterns are type-preserving; `local.tee` keeps the value on stack, double `eqz` returns an i32 equivalent to the input treated as i32 bool).
 
 **Validation:**
-- [x] Existing test suite passes identically under baseline (byte-identical output with `-O0` or without PEEPHOLE) and under `-dPEEPHOLE` (96/96 tests pass).
+- [x] Existing test suite passes identically under baseline (byte-identical output with `-O0` or without PEEPHOLE) and under `-dPEEPHOLE` (104/104 tests pass).
 - [x] Disassemble non-trivial programs (`wasm-objdump -d`) to verify pattern elimination — `compiler-tests/peephole-check.sh` builds baseline + peephole compilers, compiles a case-statement fixture, asserts baseline has `local.set`/`local.get`, peephole has `local.tee`, and peephole output is strictly smaller.
 - [ ] Measure code size reduction on compiler self-compilation (deferred until self-compile-to-WASM path lands).
 
@@ -164,16 +164,18 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 - [x] WASI preview 1 callback implementations (fd_read, fd_write, proc_exit, args_get, args_sizes_get) that users wire into their runtime
 - [x] String conversion helpers: C string ↔ Pascal short string in WASM linear memory
 - [x] Host-guest FFI (imports and exports) through the vtable
-- [ ] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
+- [x] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
 - [x] Example: `examples/c/hello/` — minimal compile-and-run using wasm3
 
 All three libraries share the same snapshot blob and compiler test suite. APIs should be idiomatic to each language.
 
-### Phase 3: Self-Hosting — `NOT STARTED`
+### Phase 3: Self-Hosting — `MOSTLY DONE`
 
-- [ ] Use the native (fpc-built) compiler to compile its own source to WASM, producing the first snapshot binary
-- [ ] Verify fixpoint: run the snapshot in wasmi, compile the compiler source again, diff the output
-- [ ] Commit the snapshot blob to git (must be < 1 MB)
+Core self-hosting is complete: the fpc-built compiler compiles its own source to WASM, the snapshot produces bit-identical output (fixpoint validated), and the blob is committed at 131 KB. Embedding library verification is pending on Phase 2.
+
+- [x] Use the native (fpc-built) compiler to compile its own source to WASM, producing the first snapshot binary
+- [x] Verify fixpoint: fpc-built and self-built compilers produce bit-identical WASM
+- [x] Commit the snapshot blob to git (131 KB, well under the 1 MB budget)
 - [ ] Verify the Rust crate works end-to-end using only the snapshot (no fpc required)
 - [ ] Verify the Zig library works end-to-end using only the snapshot (no fpc required)
 - [ ] Verify the C library works end-to-end using only the snapshot (no fpc required)
@@ -349,7 +351,7 @@ before Run, passed as a blob). See Findings.
 
 **Typed subrange syntax (GPC convention).** Subranges can specify an explicit base type using the GNU Pascal Convention: `Day(Mon..Fri)`. This is in addition to the standard inferred form `Mon..Fri` where the compiler deduces the base type from the constants. The typed form is self-documenting and prepares for a future relaxation of the unique-names rule (e.g., qualified enum access like Modula-2). In the parser, it's an LL(2) distinction in `SimpleType`: after seeing `Identifier`, peek for `(` (typed subrange) vs `..` (untyped subrange) vs anything else (type identifier). Phase 1 impact is minimal — a small addition to type parsing with the same semantic checks already needed for untyped subranges.
 
-**Single-file compiler source.** The compiler is kept as a single file (`compiler/cpas.pas`) rather than split via `{$I}` includes. At ~7400 lines, a single file with well-commented sections is navigable and matches the reality of the design — it's a single-pass compiler with tightly coupled shared global state. Pascal `{$I}` includes are textual paste, not modules, so splitting wouldn't reduce coupling or improve encapsulation. It would add host-side preprocessing complexity (the WASM-hosted compiler receives a pre-expanded source stream). Wirth's Oberon compiler follows the same single-file convention at ~4000 lines. Revisit if the file exceeds ~6000 lines.
+**Single-file compiler source.** The compiler is kept as a single file (`compiler/cpas.pas`) rather than split via `{$I}` includes. At ~10,400 lines, a single file with well-commented sections and fpdoc headers is navigable and matches the reality of the design — it's a single-pass compiler with tightly coupled shared global state. Pascal `{$I}` includes are textual paste, not modules, so splitting wouldn't reduce coupling or improve encapsulation. It would add host-side preprocessing complexity (the WASM-hosted compiler receives a pre-expanded source stream). Wirth's Oberon compiler follows the same single-file convention at ~4000 lines.
 
 **Numeric literals.** TP-style hex literals (`$FF`) are supported in Phase 1. C-style prefixes (`0xFF`, `0o77`, `0b1010`) are available behind the `{$EXTLITERALS ON}` directive, disabled by default. Hex literals are essential for the compiler source (WASM binary encoding uses hex constants extensively).
 
@@ -571,7 +573,7 @@ fpdoc tags (`@param`, `@returns`) are optional — use them when the parameter n
 
 **Tutorial: Phase 1 as a teachable compiler.** The Phase 1 compiler doubles as the subject of a step-by-step compiler construction tutorial (`doc/compact-pascal-tutorial.md`). Phase 1 is the right target because: (1) it is a complete, working compiler with a small enough feature set to cover end-to-end; (2) single-pass recursive descent targeting a stack machine (WASM) is a natural pedagogical architecture — WASM's operand stack maps directly to expression evaluation, so students see parsing and code generation connect without register allocation or SSA; (3) stack-only allocation, no `real` type, and short strings eliminate distractions; (4) WASM output is a modern hook — students get binaries that run in browsers and wasmtime, not a toy VM. The tutorial chapters mirror the implementation order (lexer → expressions → statements → procedures → nested scopes → strings → records/arrays), with each chapter producing a compiler that handles a larger subset. Where self-hosting needs pull a feature forward (e.g., `case` statements needed in the scanner before records are covered), the tutorial treats this as a teachable moment — explaining why a real compiler's requirements shape the build order.
 
-**Doc pass (2026-04-18): fpdoc headers added, inline WAT comments deferred.** Added `{** ... }` fpdoc headers to all Phase 1 procedures/functions in `compiler/cpas.pas`, with expanded prose on the flagged routines (`NextToken`, `EnterScope`/`LeaveScope`, `ParseExpression`, `EmitFramePtr`, `EmitVarParamPtr`, `EmitWriteInt`) and WAT-style one-liners on all 26 `Emit*` headers. Committed in seven subsystem-scoped commits (scanner, diagnostics, symbol table, buffers/LEB, parser, codegen, driver). The inline `{ ;; WAT: ... }` annotation pass on the ~1,254 emission call sites was not done — the emitter headers now document the WAT shape, which gets most of the pedagogical value; annotating every call site would add noise without proportionate payoff. If the tutorial chapters end up wanting per-site WAT asides, that can be a later targeted pass rather than a blanket sweep. Build and 88-test suite still clean.
+**Doc pass (2026-04-18): fpdoc headers added, inline WAT comments deferred.** Added `{** ... }` fpdoc headers to all Phase 1 procedures/functions in `compiler/cpas.pas`, with expanded prose on the flagged routines (`NextToken`, `EnterScope`/`LeaveScope`, `ParseExpression`, `EmitFramePtr`, `EmitVarParamPtr`, `EmitWriteInt`) and WAT-style one-liners on all 26 `Emit*` headers. Committed in seven subsystem-scoped commits (scanner, diagnostics, symbol table, buffers/LEB, parser, codegen, driver). The inline `{ ;; WAT: ... }` annotation pass on the ~1,254 emission call sites was not done — the emitter headers now document the WAT shape, which gets most of the pedagogical value; annotating every call site would add noise without proportionate payoff. If the tutorial chapters end up wanting per-site WAT asides, that can be a later targeted pass rather than a blanket sweep. Build and test suite (now 104 tests: 97 positive + 7 negative) still clean.
 
 ### Peephole optimization
 
