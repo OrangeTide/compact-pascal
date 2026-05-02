@@ -98,8 +98,9 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 
 **Language features:**
 - [x] Typed constants — scalar, 1D/ND array, `array of char` string-literal shortcut, record `(field: value; ...)`, and set `[elem, ...]` initializers implemented (tests t086–t088, t091, t092). Stored in data segment; TP-style mutable. Variant-record initializers tracked under Milestone 11.
-- [ ] Variant records — `case tag: T of ...` inside record types, and the corresponding typed-constant initializer form. Design: see Milestone 11 below.
+- [x] Variant records — `case tag: T of ...` inside record types, and the corresponding typed-constant initializer form (tests t098–t099, n008–n009). Design: see Milestone 11 below.
 - [x] Subrange base types in `set of` — `set of 0..31`, `set of 'a'..'z'`, `set of Day(Mon..Fri)` (tests t094–t097, n004–n007). Design: see Milestone 12 below.
+- [ ] Standalone subrange types — `type T = 0..9;`, `type WorkDay = Mon..Fri;`, `var x: 0..255;`. `ParseSubrangeLiteral` exists but `ParseTypeSpec` has no top-level branch for it. See Findings.
 - [x] `{$ALIGN n}` directive for record field alignment (n ∈ {1, 2, 4, 8}, default 4; test t089)
 - [x] `-dump` flag in self-hosted builds (ParamCount/ParamStr intrinsics via WASI args_get)
 
@@ -108,13 +109,13 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 - [ ] WAT pseudo-code comments on all WASM binary emission sites (partial coverage, ~17 comments today)
 
 **Browser game example (Light's Out):**
-- [ ] `examples/lightout/` — 5×5 Light's Out puzzle running in browser via HTML5 Canvas
-- [ ] Design doc: `doc/lightout-example.md` (already written)
-- [ ] `lightout.pas` — game logic, rendering, input (~120 lines)
-- [ ] `host.js` — JS bridge: canvas, input, Web Audio tone generation (~80 lines)
-- [ ] `index.html` — canvas scaffold (~20 lines)
-- [ ] Makefile for building and local serving
-- [ ] Demonstrates `{$IMPORT}`/`{$EXPORT}` FFI, arrays, constants, frame-driven game loop
+- [x] `examples/lightout/` — 5×5 Light's Out puzzle running in browser via HTML5 Canvas
+- [x] Design doc: `doc/lightout-example.md` (already written)
+- [x] `lightout.pas` — game logic, rendering, input (~240 lines)
+- [x] `host.js` — JS bridge: canvas, input, Web Audio tone generation
+- [x] `index.html` — canvas scaffold
+- [x] Makefile for building and local serving
+- [x] Demonstrates `{$IMPORT}`/`{$EXPORT}` FFI, arrays, constants, frame-driven game loop
 
 ### Phase 2: Embedding Libraries (Rust + Zig + C) — `NOT STARTED`
 
@@ -350,6 +351,8 @@ before Run, passed as a blob). See Findings.
 **`case` statement `else` clause.** The `case` statement supports an optional `else` branch as a default, following the Turbo Pascal extension. If no branch matches and no `else` is present, execution continues past `end` without error.
 
 **Typed subrange syntax (GPC convention).** Subranges can specify an explicit base type using the GNU Pascal Convention: `Day(Mon..Fri)`. This is in addition to the standard inferred form `Mon..Fri` where the compiler deduces the base type from the constants. The typed form is self-documenting and prepares for a future relaxation of the unique-names rule (e.g., qualified enum access like Modula-2). In the parser, it's an LL(2) distinction in `SimpleType`: after seeing `Identifier`, peek for `(` (typed subrange) vs `..` (untyped subrange) vs anything else (type identifier). Phase 1 impact is minimal — a small addition to type parsing with the same semantic checks already needed for untyped subranges.
+
+**Subrange parsing status (2026-05-02).** `ParseSubrangeLiteral` (cpas.pas ~line 2555) handles the `Constant '..' Constant` production and is used by `set of` (Milestone 12). Array bounds use inline `EvalConstExpr` + `..` but are equivalent. Standalone subrange types (`type T = 0..9;`, `var x: 0..255;`, `type WorkDay = Mon..Fri;`) are NOT implemented — `ParseTypeSpec` has no top-level branch for a literal or named constant followed by `..`. Adding it requires: (1) after the `tkIdent` branch resolves a type name, peek for `(` (typed subrange) or `..` (untyped); (2) add a `tkInteger`/`tkChar` entry point for literal-started subranges like `0..255`; (3) decide the runtime representation — since all ordinals are `i32` with no masking unless `{$R+}`, a subrange type is just its base type with bounds metadata for range checks and `set of` sizing. No new `tySubrange` kind is needed in Phase 1; store bounds in the type descriptor and alias the base type.
 
 **Single-file compiler source.** The compiler is kept as a single file (`compiler/cpas.pas`) rather than split via `{$I}` includes. At ~10,400 lines, a single file with well-commented sections and fpdoc headers is navigable and matches the reality of the design — it's a single-pass compiler with tightly coupled shared global state. Pascal `{$I}` includes are textual paste, not modules, so splitting wouldn't reduce coupling or improve encapsulation. It would add host-side preprocessing complexity (the WASM-hosted compiler receives a pre-expanded source stream). Wirth's Oberon compiler follows the same single-file convention at ~4000 lines.
 
@@ -906,7 +909,7 @@ On tag (e.g. v1.2.3), release a set of packages on the Github release page.
 - **Type descriptor pool size:** 256 types × ~44 bytes ≈ 11 KB. 512 fields × ~80 bytes ≈ 40 KB. Well within fpc memory limits.
 - **Code size growth:** Designator refactor will net-reduce code (consolidating duplicated access patterns) while adding selector logic. Estimated +200 lines net for the full milestone.
 
-### Milestone 11: Variant records — `NOT STARTED`
+### Milestone 11: Variant records — `DONE`
 
 **Overview.** Add `case tag: T of labels: (fields); ...` variant parts to record type declarations, with overlapping field layout, field-table extensions for per-variant lookup, and typed-constant initializers for variant records. Picks up the work originally listed as Milestone 8 §Step 3 and deferred there.
 
@@ -928,9 +931,10 @@ On tag (e.g. v1.2.3), release a set of packages on the Github release page.
 4. **Tag range checking (`{$R+}`)** is out of scope for this milestone; tracked separately as a future addition once range checks already exist for arrays.
 
 **Tests:**
-- `t09X_variant_record_basic.pas` — declaration + field access across variants
-- `t09X_variant_record_typed_const.pas` — typed constant for each variant branch
-- Negative: initializer specifying a tag value with no matching variant; missing tag field in initializer; typed const for unnamed-tag record
+- `t098_variant_record_basic.pas` — declaration + field access across variants
+- `t099_variant_record_typed_const.pas` — typed constant for each variant branch
+- `n008_variant_bad_tag.pas` — tag value with no matching variant rejected
+- `n009_variant_unnamed_tag.pas` — typed const for unnamed-tag record rejected
 
 **Documentation updates:**
 - `doc/compact-pascal-ref.md` — add variant-record syntax under records; extend the typed-constant section with a variant initializer example.
