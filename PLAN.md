@@ -84,7 +84,7 @@ Optional sliding-window peephole optimizer for the WASM code buffers. Entirely c
 **Validation:**
 - [x] Existing test suite passes identically under baseline (byte-identical output with `-O0` or without PEEPHOLE) and under `-dPEEPHOLE` (104/104 tests pass).
 - [x] Disassemble non-trivial programs (`wasm-objdump -d`) to verify pattern elimination — `compiler-tests/peephole-check.sh` builds baseline + peephole compilers, compiles a case-statement fixture, asserts baseline has `local.set`/`local.get`, peephole has `local.tee`, and peephole output is strictly smaller.
-- [ ] Measure code size reduction on compiler self-compilation (deferred until self-compile-to-WASM path lands).
+- [x] Measure code size reduction on compiler self-compilation — 64 bytes (0.04%) reduction on self-compilation; 82 bytes (0.08%) across 99 test programs; 26 programs benefited.
 
 **Tutorial:**
 - [ ] Appendix in tutorial book (not a numbered chapter) — optional exercise
@@ -117,19 +117,19 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 - [x] Makefile for building and local serving
 - [x] Demonstrates `{$IMPORT}`/`{$EXPORT}` FFI, arrays, constants, frame-driven game loop
 
-### Phase 2: Embedding Libraries (Rust + Zig + C) — `NOT STARTED`
+### Phase 2: Embedding Libraries (Rust + Zig + C) — `IN PROGRESS`
 
 #### Rust (`compact-pascal` crate, using wasmi)
 
-- [ ] Cargo project setup with wasmi dependency
-- [ ] Embed the snapshot WASM blob of the compiler
-- [ ] Run the compiler in wasmi to compile Pascal source to WASM bytes
-- [ ] Provide WASI preview 1 host imports for the compiler (`fd_read`, `fd_write`, `proc_exit`)
-- [ ] Instantiate and run compiled WASM modules via wasmi
+- [x] Cargo project setup with wasmi dependency
+- [x] Embed the snapshot WASM blob of the compiler
+- [x] Run the compiler in wasmi to compile Pascal source to WASM bytes
+- [x] Provide WASI preview 1 host imports for the compiler (`fd_read`, `fd_write`, `proc_exit`)
+- [x] Instantiate and run compiled WASM modules via wasmi
 - [ ] Host-guest FFI (imports and exports)
 - [ ] String conversion helpers
 - [ ] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
-- [ ] Example: `examples/rust/hello/` — minimal compile-and-run (~30 lines, shows basic API)
+- [x] Example: `examples/rust/hello/` — minimal compile-and-run (~30 lines, shows basic API)
 - [ ] Example: `examples/rust/ffi/` — host-guest FFI (register Rust function, call from Pascal, call Pascal export from Rust)
 - [ ] Example: `examples/rust/pode-server/` — **Pode Server: The Pascal Node Clone** (see `doc/pode-server.md`)
   - [ ] File-based routing: `routes/*.pas` → HTTP endpoints (filename = route path)
