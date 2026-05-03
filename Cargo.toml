@@ -4,7 +4,7 @@ members = []
 [package]
 name = "compact-pascal"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 description = "Embeddable Pascal-to-WASM compiler"
 authors = ["Jon Mayo"]
@@ -19,7 +19,6 @@ path = "examples/rust/hello/main.rs"
 
 [dependencies]
 wasmi = "1.0"
-thiserror = "1.0"
 
 [profile.release]
 opt-level = 3
