@@ -6277,15 +6277,18 @@ begin
         EmitOp(OpBrIf);
         EmitULEB128(startCode, 1);
 
-        { Body }
+        { Body — wrapped in a block so continue (br 0) skips to increment }
+        EmitOp(OpBlock);
+        EmitOp(WasmVoid);
         savedBreak := breakDepth; savedContinue := continueDepth;
-        breakDepth := 1; continueDepth := 0;
-        if exitDepth >= 0 then exitDepth := exitDepth + 2;
+        breakDepth := 2; continueDepth := 0;
+        if exitDepth >= 0 then exitDepth := exitDepth + 3;
         forLimitDepth := forLimitDepth + 1;
         ParseStatement;
         forLimitDepth := forLimitDepth - 1;
-        if exitDepth >= 0 then exitDepth := exitDepth - 2;
+        if exitDepth >= 0 then exitDepth := exitDepth - 3;
         breakDepth := savedBreak; continueDepth := savedContinue;
+        EmitOp(OpEnd); { end body block }
 
         { Increment counter }
         EmitFramePtr(syms[sym].level);
@@ -6330,14 +6333,18 @@ begin
         EmitOp(OpBrIf);
         EmitULEB128(startCode, 1);
 
+        { Body — wrapped in a block so continue (br 0) skips to decrement }
+        EmitOp(OpBlock);
+        EmitOp(WasmVoid);
         savedBreak := breakDepth; savedContinue := continueDepth;
-        breakDepth := 1; continueDepth := 0;
-        if exitDepth >= 0 then exitDepth := exitDepth + 2;
+        breakDepth := 2; continueDepth := 0;
+        if exitDepth >= 0 then exitDepth := exitDepth + 3;
         forLimitDepth := forLimitDepth + 1;
         ParseStatement;
         forLimitDepth := forLimitDepth - 1;
-        if exitDepth >= 0 then exitDepth := exitDepth - 2;
+        if exitDepth >= 0 then exitDepth := exitDepth - 3;
         breakDepth := savedBreak; continueDepth := savedContinue;
+        EmitOp(OpEnd); { end body block }
 
         { Decrement counter }
         EmitFramePtr(syms[sym].level);

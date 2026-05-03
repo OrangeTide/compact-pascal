@@ -95,3 +95,30 @@ impl Default for Compiler {
         Compiler::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compile_simple() {
+        let c = Compiler::new();
+        let r = c.compile("program T; begin end.").unwrap();
+        assert!(!r.wasm.is_empty());
+    }
+
+    #[test]
+    fn test_compile_with_import() {
+        let c = Compiler::new();
+        let src = "program T;\n{$IMPORT 'host' myProc}\nprocedure MyProc(x: integer); external;\nbegin end.";
+        let r = c.compile(src).unwrap();
+        assert!(!r.wasm.is_empty());
+    }
+
+    #[test]
+    fn test_compile_error() {
+        let c = Compiler::new();
+        let r = c.compile("program T; begin");
+        assert!(r.is_err());
+    }
+}
