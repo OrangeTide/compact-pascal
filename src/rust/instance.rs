@@ -4,7 +4,8 @@
 use crate::wasi::WasiContext;
 use std::error::Error;
 use std::fmt;
-use wasmi::{Engine, Linker, Module, Instance as WasmiInstance};
+use std::sync::Arc;
+use wasmi::{Engine, FuncType, Linker, Module, Val, ValType, Instance as WasmiInstance};
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -24,6 +25,91 @@ impl fmt::Display for RuntimeError {
 }
 
 impl Error for RuntimeError {}
+
+pub struct InstanceBuilder {
+    engine: Engine,
+    linker: Linker<WasiContext>,
+}
+
+impl InstanceBuilder {
+    pub fn new() -> Result<Self, RuntimeError> {
+        let engine = Engine::default();
+        let mut linker: Linker<WasiContext> = Linker::new(&engine);
+
+        crate::wasi::add_wasi_imports(&mut linker)
+            .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
+
+        Ok(InstanceBuilder { engine, linker })
+    }
+
+    pub fn register_import<F>(
+        &mut self,
+        module: &str,
+        name: &str,
+        n_params: usize,
+        has_return: bool,
+        callback: F,
+    ) -> Result<&mut Self, RuntimeError>
+    where
+        F: Fn(&[i32]) -> Option<i32> + Send + Sync + 'static,
+    {
+        let params = vec![ValType::I32; n_params];
+        let results = if has_return { vec![ValType::I32] } else { vec![] };
+        let ty = FuncType::new(params, results);
+
+        let callback = Arc::new(callback);
+
+        self.linker
+            .func_new(module, name, ty, move |_caller, args, results| {
+                let i32_args: Vec<i32> = args
+                    .iter()
+                    .map(|v| match v {
+                        Val::I32(n) => *n,
+                        _ => 0,
+                    })
+                    .collect();
+
+                match callback(&i32_args) {
+                    Some(ret) => {
+                        if !results.is_empty() {
+                            results[0] = Val::I32(ret);
+                        }
+                    }
+                    None => {
+                        if !results.is_empty() {
+                            results[0] = Val::I32(0);
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+            .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
+
+        Ok(self)
+    }
+
+    pub fn build(self, wasm: &[u8]) -> Result<Instance, RuntimeError> {
+        let ctx = WasiContext::with_real_io();
+        let mut store = wasmi::Store::new(&self.engine, ctx);
+
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
+
+        let instance = self
+            .linker
+            .instantiate_and_start(&mut store, &module)
+            .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
+
+        Ok(Instance { store, instance })
+    }
+}
+
+impl Default for InstanceBuilder {
+    fn default() -> Self {
+        InstanceBuilder::new().expect("failed to create InstanceBuilder")
+    }
+}
 
 pub struct Instance {
     store: wasmi::Store<WasiContext>,
@@ -72,6 +158,42 @@ impl Instance {
                     Err(RuntimeError::Execution(msg))
                 }
             }
+        }
+    }
+
+    pub fn call_args(
+        &mut self,
+        name: &str,
+        args: &[i32],
+    ) -> Result<Option<i32>, RuntimeError> {
+        let func = self
+            .instance
+            .get_export(&self.store, name)
+            .and_then(|e| e.into_func())
+            .ok_or_else(|| RuntimeError::FunctionNotFound(name.into()))?;
+
+        let wasm_args: Vec<Val> = args.iter().map(|&v| Val::I32(v)).collect();
+        let ty = func.ty(&self.store);
+        let n_results = ty.results().len();
+        let mut results = vec![Val::I32(0); n_results];
+
+        match func.call(&mut self.store, &wasm_args, &mut results) {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("proc_exit(0)") {
+                    return Err(RuntimeError::Execution(msg));
+                }
+            }
+        }
+
+        if n_results > 0 {
+            match &results[0] {
+                Val::I32(v) => Ok(Some(*v)),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
         }
     }
 
@@ -252,6 +374,174 @@ mod tests {
 
         assert_eq!(s1, "first");
         assert_eq!(s2, "second");
+        Ok(())
+    }
+
+    fn compile_source(source: &str) -> Vec<u8> {
+        let compiler = crate::compiler::Compiler::new();
+        compiler.compile(source).expect("compilation failed").wasm
+    }
+
+    fn compile_native(source: &str) -> Vec<u8> {
+        use std::process::{Command, Stdio};
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_MANIFEST_DIR").to_string() + "/compiler/cpas")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("native compiler not found — run: fpc -Mtp compiler/cpas.pas");
+        child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "native compiler failed: {}", String::from_utf8_lossy(&output.stderr));
+        output.stdout
+    }
+
+    #[test]
+    fn test_builder_no_imports() -> Result<(), RuntimeError> {
+        let wasm = compile_source("program T; begin end.");
+        let mut instance = InstanceBuilder::new()?.build(&wasm)?;
+        instance.run()
+    }
+
+    #[test]
+    fn test_import_procedure() -> Result<(), RuntimeError> {
+        let source = r#"program T;
+{$IMPORT 'host' myProc}
+procedure MyProc(x: integer); external;
+begin
+    MyProc(42)
+end."#;
+        let wasm = compile_native(source);
+
+        let called = Arc::new(std::sync::Mutex::new(None));
+        let called2 = called.clone();
+
+        let mut builder = InstanceBuilder::new()?;
+        builder.register_import("host", "myProc", 1, false, move |args| {
+            *called2.lock().unwrap() = Some(args[0]);
+            None
+        })?;
+
+        let mut instance = builder.build(&wasm)?;
+        instance.run()?;
+
+        assert_eq!(*called.lock().unwrap(), Some(42));
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_function_with_return() -> Result<(), RuntimeError> {
+        let source = r#"program T;
+{$IMPORT 'host' addTen}
+function AddTen(x: integer): integer; external;
+var r: integer;
+begin
+    r := AddTen(5);
+    writeln(r)
+end."#;
+        let wasm = compile_native(source);
+
+        let mut builder = InstanceBuilder::new()?;
+        builder.register_import("host", "addTen", 1, true, |args| {
+            Some(args[0] + 10)
+        })?;
+
+        let mut instance = builder.build(&wasm)?;
+        instance.run()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_multi_param() -> Result<(), RuntimeError> {
+        let source = r#"program T;
+{$IMPORT 'host' add3}
+function Add3(a, b, c: integer): integer; external;
+var r: integer;
+begin
+    r := Add3(1, 2, 3);
+    writeln(r)
+end."#;
+        let wasm = compile_native(source);
+
+        let mut builder = InstanceBuilder::new()?;
+        builder.register_import("host", "add3", 3, true, |args| {
+            Some(args[0] + args[1] + args[2])
+        })?;
+
+        let mut instance = builder.build(&wasm)?;
+        instance.run()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_call() -> Result<(), RuntimeError> {
+        let source = r#"
+            program T;
+            {$EXPORT getAnswer}
+            function GetAnswer: integer;
+            begin
+                GetAnswer := 42
+            end;
+            begin
+            end.
+        "#;
+        let wasm = compile_source(source);
+
+        let mut instance = InstanceBuilder::new()?.build(&wasm)?;
+        instance.run()?;
+
+        let result = instance.call_args("getAnswer", &[])?;
+        assert_eq!(result, Some(42));
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_with_args() -> Result<(), RuntimeError> {
+        let source = r#"
+            program T;
+            {$EXPORT double}
+            function Double(x: integer): integer;
+            begin
+                Double := x * 2
+            end;
+            begin
+            end.
+        "#;
+        let wasm = compile_source(source);
+
+        let mut instance = InstanceBuilder::new()?.build(&wasm)?;
+        instance.run()?;
+
+        let result = instance.call_args("double", &[7])?;
+        assert_eq!(result, Some(14));
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_and_export_roundtrip() -> Result<(), RuntimeError> {
+        let source = r#"program T;
+{$IMPORT 'host' hostAdd}
+function HostAdd(a, b: integer): integer; external;
+{$EXPORT compute}
+function Compute(x: integer): integer;
+begin
+    Compute := HostAdd(x, 100)
+end;
+begin
+end."#;
+        let wasm = compile_native(source);
+
+        let mut builder = InstanceBuilder::new()?;
+        builder.register_import("host", "hostAdd", 2, true, |args| {
+            Some(args[0] + args[1])
+        })?;
+
+        let mut instance = builder.build(&wasm)?;
+        instance.run()?;
+
+        let result = instance.call_args("compute", &[23])?;
+        assert_eq!(result, Some(123));
         Ok(())
     }
 }

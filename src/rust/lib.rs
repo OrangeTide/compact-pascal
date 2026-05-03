@@ -8,4 +8,4 @@ mod wasi;
 
 pub use compiler::{Compiler, CompileResult, CompileError};
 pub use include::{expand_includes, IncludeError};
-pub use instance::{Instance, RuntimeError};
+pub use instance::{Instance, InstanceBuilder, RuntimeError};
