@@ -126,7 +126,7 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 - [x] Run the compiler in wasmi to compile Pascal source to WASM bytes
 - [x] Provide WASI preview 1 host imports for the compiler (`fd_read`, `fd_write`, `proc_exit`)
 - [x] Instantiate and run compiled WASM modules via wasmi
-- [ ] Host-guest FFI (imports and exports)
+- [x] Host-guest FFI (imports and exports)
 - [x] String conversion helpers
 - [x] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
 - [x] Example: `examples/rust/hello/` — minimal compile-and-run (~30 lines, shows basic API)
@@ -625,6 +625,8 @@ This is simpler than the earlier `fpRead`/`fpWrite` via `BaseUnix` design: no `u
 - **C: C99 or later.** The C embedding library targets C99 for maximum portability. No C11/C17 features required. The library has no WASM runtime dependency — users bring their own.
 
 **Zig WASM runtime: wasm3 via C interop.** wasm3 (C library) chosen for Zig side. Zig-native interpreters are immature. Zig's `@cImport` makes C interop trivial. Parallels Rust's wasmi choice. **Risk:** wasm3 development has slowed significantly. If the project becomes unmaintained, alternatives include writing a minimal WASM interpreter in Zig or switching to another C-based runtime.
+
+**WASM snapshot hangs on `{$IMPORT}` + `external` sources.** The WASM compiler snapshot (compiler.wasm running in wasmi) enters an infinite computation loop when compiling Pascal sources that contain both `{$IMPORT 'module' name}` and `procedure/function ... external;`. No `fd_read` calls occur — the hang is pure computation, not an I/O stall. The native FPC-compiled compiler handles the same sources correctly. Export-only sources (`{$EXPORT}`) compile fine through the WASM snapshot. Root cause is unknown but likely in the FPC RTL's WASI text-mode I/O path. **Workaround:** Rust FFI tests that need import-bearing WASM use `compile_native()` which shells out to the FPC-built `compiler/cpas` binary. This will be resolved when the compiler migrates to `BlockRead`/`BlockWrite` (binary I/O), eliminating the FPC RTL text-mode dependency.
 
 **Dynamic allocation: deferred to Phase 6.** `New`/`Dispose` and heap allocation deferred from Phase 1 to keep the core compiler minimal. Phase 1 uses stack-only allocation. Baker's Treadmill GC is a good fit for WASM (non-moving, incremental) but requires a shadow stack for root tracking — deferred further until after `New`/`Dispose` is working.
 
