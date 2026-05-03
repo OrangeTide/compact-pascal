@@ -127,8 +127,8 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 - [x] Provide WASI preview 1 host imports for the compiler (`fd_read`, `fd_write`, `proc_exit`)
 - [x] Instantiate and run compiled WASM modules via wasmi
 - [ ] Host-guest FFI (imports and exports)
-- [ ] String conversion helpers
-- [ ] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
+- [x] String conversion helpers
+- [x] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
 - [x] Example: `examples/rust/hello/` — minimal compile-and-run (~30 lines, shows basic API)
 - [ ] Example: `examples/rust/ffi/` — host-guest FFI (register Rust function, call from Pascal, call Pascal export from Rust)
 - [ ] Example: `examples/rust/pode-server/` — **Pode Server: The Pascal Node Clone** (see `doc/pode-server.md`)
@@ -177,7 +177,7 @@ Core self-hosting is complete: the fpc-built compiler compiles its own source to
 - [x] Use the native (fpc-built) compiler to compile its own source to WASM, producing the first snapshot binary
 - [x] Verify fixpoint: fpc-built and self-built compilers produce bit-identical WASM
 - [x] Commit the snapshot blob to git (131 KB, well under the 1 MB budget)
-- [ ] Verify the Rust crate works end-to-end using only the snapshot (no fpc required)
+- [x] Verify the Rust crate works end-to-end using only the snapshot (no fpc required) — 10 integration tests in `tests/integration.rs`
 - [ ] Verify the Zig library works end-to-end using only the snapshot (no fpc required)
 - [ ] Verify the C library works end-to-end using only the snapshot (no fpc required)
 

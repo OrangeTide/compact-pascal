@@ -2,8 +2,10 @@
 // Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 use crate::wasi::{WasiContext, StdioBuffer};
+use crate::include;
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 use wasmi::{Engine, Linker, Module};
 
 #[derive(Debug)]
@@ -79,6 +81,12 @@ impl Compiler {
         }
 
         Ok(CompileResult { wasm, stderr: stderr_str })
+    }
+
+    pub fn compile_with_includes(&self, source: &str, base_dir: &Path) -> Result<CompileResult, CompileError> {
+        let expanded = include::expand_includes(source, base_dir)
+            .map_err(|e| CompileError::Compilation(format!("include expansion error: {}", e)))?;
+        self.compile(&expanded)
     }
 }
 
