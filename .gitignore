@@ -9,6 +9,9 @@ zig-cache/
 # C example binaries
 examples/c/hello/hello
 
+# Compiled example programs
+examples/lightout/lightout.wasm
+
 # fpc compiler artifacts
 compiler/cpas
 compiler/cpas-opt
