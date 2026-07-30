@@ -14,12 +14,14 @@ parts of that specification the compiler implements today.
 - [x] `record`
 - [x] Enumerated types
 - [x] `set` (small and large bitmap sets)
-- [ ] Variant records
-- [ ] Subrange types
+- [x] Variant records (`case` tag, named or anonymous)
+- [ ] Subrange types (partial: usable as a `set of` base type, including
+      the `T(Lo..Hi)` form, but not as a named type or variable type)
 - [ ] Pointers (`^T`)
 - [ ] `real` (scanner recognizes literals; compiler rejects them)
 - [ ] `rune`
 - [ ] Procedural types
+- [ ] `text` (only `stderr` is recognized; see I/O below)
 
 ## Statements
 
@@ -70,8 +72,18 @@ parts of that specification the compiler implements today.
 - [x] `copy`, `pos`, `concat`, `delete`, `insert`
 - [x] `str`
 - [x] `eof`
+- [x] `maxint`
+- [ ] `fillchar`
 - [ ] `read` / `readln` for `real`
 - [ ] `New` / `Dispose` (requires pointer types)
+- [ ] `RuneLen`, `DecodeRune`, `EncodeRune`, `RuneChr` (require `rune`)
+
+## Built-in I/O
+
+- [x] `write` / `writeln` to standard output (default target)
+- [x] `read` / `readln` from standard input (default target)
+- [x] `stderr` as an explicit first argument
+- [ ] `input` and `output` as explicit first arguments
 
 ## Compiler Directives
 
@@ -84,6 +96,28 @@ parts of that specification the compiler implements today.
 - [x] `{$I 'filename'}` / `{$INCLUDE 'filename'}` (resolved by host)
 - [x] `{$EXTLITERALS ON/OFF}`
 - [x] `{$IFDEF}`, `{$IFNDEF}`, `{$ELSE}`, `{$ENDIF}`, `{$DEFINE}`
+
+## Extensions
+
+None of the extensions described in the Language Reference are implemented
+yet. Standalone methods and structured return types are independent of each
+other; interfaces depend on both procedural types and pointers.
+
+- [ ] Standalone methods (`procedure P for r: T`)
+- [ ] Pointer receivers (`for c: ^TCat`) and automatic address-of/dereference
+- [ ] Structured return types (functions returning records or arrays)
+- [ ] Interfaces and `implement` blocks
+- [ ] Unicode character constants (`#u`)
+
+## Compiler Diagnostics
+
+- [x] `Error:` tag, first error is fatal, exit via `proc_exit(1)`
+- [ ] `Warning:`, `Info:`, `Debug:` tags
+- [ ] `Progress: done/total` protocol
+
+The error text currently uses the form `Error: [line:col] message`. The
+Language Reference specifies `Error: line:col: message`. One of the two needs
+to change before hosts can parse compiler output reliably.
 
 ## Not Planned
 
