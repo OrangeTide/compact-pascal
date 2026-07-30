@@ -689,7 +689,7 @@ All compiler errors halt immediately with a diagnostic written to stderr:
 ```pascal
 procedure Error(msg: string);
 begin
-  writeln(stderr, 'Error: [', srcLine, ':', srcCol, '] ', msg);
+  writeln(stderr, 'Error: ', srcLine, ':', srcCol, ': ', msg);
   halt(1);
 end;
 ```
@@ -3084,17 +3084,19 @@ The compiler reports errors with line and column numbers, then halts immediately
 ```pascal
 procedure Error(msg: string);
 begin
-  writeln(stderr, 'Error: [', srcLine, ':', srcCol, '] ', msg);
+  writeln(stderr, 'Error: ', srcLine, ':', srcCol, ': ', msg);
   halt(1);
 end;
 ```
 
 This is a consequence of single-pass compilation — when the compiler encounters an error, it cannot meaningfully continue because the parser state, symbol table, and code emission are all tightly coupled. Turbo Pascal took the same approach: one error, then stop.
 
-The `[line:col]` tag format makes errors easy to locate. A typical error message:
+The `Error: line:col:` tag format makes errors easy to locate, and it matches
+what `cpas` itself emits, so the same tooling reads both. A typical error
+message:
 
 ```
-Error: [15:7] undeclared identifier: foo
+Error: 15:7: undeclared identifier: foo
 ```
 
 ### The Test Suite

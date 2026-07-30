@@ -528,7 +528,7 @@ var
 
 procedure Error(msg: string);
 begin
-  writeln(StdErr, 'Error: [', srcLine, ':', srcCol, '] ', msg);
+  writeln(StdErr, 'Error: ', srcLine, ':', srcCol, ': ', msg);
   halt(1);
 end;
 
@@ -4201,7 +4201,7 @@ procedure ParseTypeSpec(var outTyp, outTypeIdx, outSize, outStrMax: longint); fo
 procedure Expect(kind: longint);
 begin
   if tokKind <> kind then begin
-    writeln(StdErr, 'Error: [', srcLine, ':', srcCol, '] expected token ',
+    writeln(StdErr, 'Error: ', srcLine, ':', srcCol, ': expected token ',
             kind, ' got ', tokKind);
     halt(1);
   end;

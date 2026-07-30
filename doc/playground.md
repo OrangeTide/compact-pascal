@@ -417,11 +417,11 @@ tabs and can be edited, saved, or downloaded.
 The compiler emits errors to stderr in a consistent format:
 
 ```
-Error: [LINE:COL] message
+Error: LINE:COL: message
 ```
 
-The output pane can pattern-match `\[(\d+):(\d+)\]` to make errors
-clickable — clicking jumps the editor cursor to that line and column.
+The output pane can pattern-match `^Error: (\d+):(\d+): ` to make errors
+clickable. Clicking jumps the editor cursor to that line and column.
 
 ## Syntax Highlighting
 

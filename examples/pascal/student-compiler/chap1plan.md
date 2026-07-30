@@ -81,8 +81,9 @@ Output file:
 procedure Error(msg: string);
 ```
 
-Writes `Error: [line:col] msg` to stderr and calls `halt(1)`. All error paths in
-the compiler funnel through this.
+Writes `Error: line:col: msg` to stderr and calls `halt(1)`. All error paths in
+the compiler funnel through this. This is the format the Language Reference
+specifies for `cpas`, so both compilers report errors the same way.
 
 ### 5. Buffer Procedures
 
