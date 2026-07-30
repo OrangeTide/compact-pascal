@@ -115,9 +115,9 @@ other; interfaces depend on both procedural types and pointers.
 - [ ] `Warning:`, `Info:`, `Debug:` tags
 - [ ] `Progress: done/total` protocol
 
-The error text currently uses the form `Error: [line:col] message`. The
-Language Reference specifies `Error: line:col: message`. One of the two needs
-to change before hosts can parse compiler output reliably.
+Errors use the `Error: line:col: message` form specified by the Language
+Reference. Command-line errors (an unknown option) carry the `Error:` tag but
+no source position, since none applies.
 
 ## Not Planned
 

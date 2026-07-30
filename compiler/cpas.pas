@@ -596,13 +596,14 @@ end;
 
   All compiler errors go through here. No recovery is attempted — the
   single-pass design halts on the first error to avoid cascading false
-  positives. Format: "Error: [line:col] msg". }
+  positives. Format: "Error: line:col: msg", as specified by the
+  Language Reference section "Compiler Diagnostics". }
 procedure Error(msg: string);
 var lineStr, colStr: string[11];
 begin
   str(srcLine, lineStr);
   str(srcCol, colStr);
-  WriteErrorLn('Error: [' + lineStr + ':' + colStr + '] ' + msg);
+  WriteErrorLn('Error: ' + lineStr + ':' + colStr + ': ' + msg);
   halt(1);
 end;
 
@@ -10724,7 +10725,7 @@ begin
       DefineSymbol(defArg);
     end
     else begin
-      WriteErrorLn('Unknown option: ' + ParamStr(i));
+      WriteErrorLn('Error: unknown option: ' + ParamStr(i));
       halt(1);
     end;
   end;
