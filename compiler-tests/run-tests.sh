@@ -180,6 +180,62 @@ for src in "$SCRIPT_DIR"/negative/*.pas; do
     fi
 done
 
+# Command-line tests
+# These drive the compiler through its arguments rather than its source
+# input, so they cover diagnostics the positive and negative tests cannot
+# reach. Each test is a pair of files in cli/:
+#   <name>.args   arguments to pass, one line, split on whitespace
+#   <name>.error  regex matched against stderr
+# The run must exit nonzero and leave stdout empty, so a diagnostic that
+# goes to the wrong stream is caught as well as one with the wrong text.
+for args_file in "$SCRIPT_DIR"/cli/*.args; do
+    [ -f "$args_file" ] || continue
+    name="$(basename "$args_file" .args)"
+    error_file="$SCRIPT_DIR/cli/$name.error"
+
+    if [ ! -f "$error_file" ]; then
+        echo "SKIP $name (no .error file)"
+        skip=$((skip + 1))
+        continue
+    fi
+
+    expected_error="$(cat "$error_file")"
+    cli_args=()
+    read -r -a cli_args < "$args_file" || true
+
+    if [ "${#cli_args[@]}" -eq 0 ]; then
+        echo "SKIP $name (empty .args file)"
+        skip=$((skip + 1))
+        continue
+    fi
+
+    # Run - should fail
+    if "$COMPILER" "${cli_args[@]}" < /dev/null \
+            > "$TMPDIR/$name.out" 2>"$TMPDIR/$name.err"; then
+        echo "FAIL $name (should have exited nonzero)"
+        fail=$((fail + 1))
+        continue
+    fi
+
+    if [ -s "$TMPDIR/$name.out" ]; then
+        echo "FAIL $name (wrote to stdout; diagnostics belong on stderr)"
+        echo "  stdout: $(head -c 200 "$TMPDIR/$name.out")"
+        fail=$((fail + 1))
+        continue
+    fi
+
+    # Check error message contains expected substring
+    if grep -qi "$expected_error" "$TMPDIR/$name.err"; then
+        echo "PASS $name"
+        pass=$((pass + 1))
+    else
+        echo "FAIL $name (error message mismatch)"
+        echo "  expected: $expected_error"
+        echo "  got: $(cat "$TMPDIR/$name.err")"
+        fail=$((fail + 1))
+    fi
+done
+
 echo ""
 echo "Results: $pass passed, $fail failed, $skip skipped"
 [ "$fail" -eq 0 ] || exit 1
