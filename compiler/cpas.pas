@@ -523,6 +523,7 @@ var
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
   optProgress: boolean;       (* -progress command-line flag *)
   optVerbose: boolean;        (* -v command-line flag, emits Info: lines *)
+  optDebug: boolean;          (* -debug command-line flag, emits Debug: lines *)
 
   (* Progress reporting state. optProgressTotal is the source line count
      the host passed after -progress; 0 selects stage-based reporting. *)
@@ -646,6 +647,49 @@ procedure Info(msg: string);
 begin
   if optVerbose then
     WriteErrorLn('Info: ' + msg);
+end;
+
+{** Report a compiler trace line. Format: "Debug: msg". Only emitted
+  under -debug.
+
+  Distinct from -dump, which prints a human-readable disassembly of the
+  finished module. Debug lines trace decisions as the single pass makes
+  them, so they interleave with the source being read and show what the
+  compiler did where. }
+procedure Debug(msg: string);
+begin
+  if optDebug then
+    WriteErrorLn('Debug: ' + msg);
+end;
+
+{** Report a trace line carrying the current source position, formatted
+  the same way Error and Warning format theirs. }
+procedure DebugAt(msg: string);
+var lineStr, colStr: string[11];
+begin
+  if optDebug then begin
+    str(srcLine, lineStr);
+    str(srcCol, colStr);
+    WriteErrorLn('Debug: ' + lineStr + ':' + colStr + ': ' + msg);
+  end;
+end;
+
+{** Name of a symbol kind, for trace output.
+
+  An out parameter rather than a string result: cpas does not support
+  string-valued functions, and this unit must compile with itself. }
+procedure SymKindStr(kind: longint; var res: string);
+begin
+  case kind of
+    skConst: res := 'const';
+    skVar:   res := 'var';
+    skType:  res := 'type';
+    skProc:  res := 'procedure';
+    skFunc:  res := 'function';
+    skField: res := 'field';
+  else
+    res := 'symbol';
+  end;
 end;
 
 {** Emit one "Progress: done/total [msg]" line.
@@ -2537,17 +2581,28 @@ end;
   symbol lookup walks backward (most-local first) for Pascal-correct
   shadowing. }
 procedure EnterScope;
+var dbgScope: string[11];
 begin
   scopeDepth := scopeDepth + 1;
   if scopeDepth >= MaxScopes then
     Error('scope nesting too deep');
   scopeBase[scopeDepth] := numSyms;
+  if optDebug then begin
+    str(scopeDepth, dbgScope);
+    DebugAt('enter scope ' + dbgScope);
+  end;
 end;
 
 {** Pop the current scope, discarding all symbols added since
   EnterScope. O(1) — just rewinds numSyms to the saved boundary. }
 procedure LeaveScope;
+var dbgScope, dbgCount: string[11];
 begin
+  if optDebug then begin
+    str(scopeDepth, dbgScope);
+    str(numSyms - scopeBase[scopeDepth], dbgCount);
+    DebugAt('leave scope ' + dbgScope + ', discarding ' + dbgCount + ' symbols');
+  end;
   numSyms := scopeBase[scopeDepth];
   scopeDepth := scopeDepth - 1;
 end;
@@ -2575,6 +2630,9 @@ end;
   remaining fields (typeIdx, offset, size, strMax, VAR/CONST param
   flags). Halts on overflow. }
 function AddSym(const name: string; kind, typ: longint): longint;
+var
+  dbgKind: string;
+  dbgScope, dbgLevel: string[11];
 begin
   if numSyms >= MaxSyms then
     Error('symbol table full');
@@ -2590,6 +2648,19 @@ begin
   syms[numSyms].isConstParam := false;
   AddSym := numSyms;
   numSyms := numSyms + 1;
+  if optDebug then begin
+    SymKindStr(kind, dbgKind);
+    if scopeDepth = 0 then
+      { Scope 0 holds the predefined types and constants. No source
+        position applies: nothing has been read yet. }
+      Debug('built-in ' + dbgKind + ' ' + name)
+    else begin
+      str(scopeDepth, dbgScope);
+      str(curNestLevel, dbgLevel);
+      DebugAt('declare ' + dbgKind + ' ' + name +
+              ' at scope ' + dbgScope + ', level ' + dbgLevel);
+    end;
+  end;
 end;
 
 {** Populate the outermost scope with built-in types and constants
@@ -6727,6 +6798,7 @@ var
   savedNumVarInits: longint;
   savedVarInitOffset: array[0..15] of longint;
   savedVarInitVal: array[0..15] of longint;
+  dbgParams, dbgLocals, dbgBytes: string[11];
   savedVarInitIsStr: array[0..15] of boolean;
   savedVarInitStrMax: array[0..15] of longint;
   localImportMod: string[63];
@@ -7190,6 +7262,13 @@ begin
   funcs[funcIdx].bodyLen := startCode.len;
   funcs[funcIdx].nlocals := nlocals;
   funcs[funcIdx].nparams := nparams;
+  if optDebug then begin
+    str(nparams, dbgParams);
+    str(nlocals, dbgLocals);
+    str(startCode.len, dbgBytes);
+    DebugAt('body of ' + funcs[funcIdx].name + ': ' + dbgParams +
+            ' params, ' + dbgLocals + ' locals, ' + dbgBytes + ' bytes');
+  end;
   for i := 0 to np - 1 do begin
     funcs[funcIdx].varParams[i] := paramIsVar[i];
     funcs[funcIdx].constParams[i] := paramIsConst[i];
@@ -10839,6 +10918,7 @@ begin
   optDump := false;
   optProgress := false;
   optVerbose := false;
+  optDebug := false;
   optProgressTotal := 0;
   progressStep := 1;
   progressNextLine := 1;
@@ -10857,6 +10937,8 @@ begin
       optDump := true
     else if ParamStr(i) = '-v' then
       optVerbose := true
+    else if ParamStr(i) = '-debug' then
+      optDebug := true
     else if ParamStr(i) = '-progress' then begin
       optProgress := true;
       { An all-digits argument after -progress is the source line count,

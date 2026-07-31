@@ -105,7 +105,10 @@ other; interfaces depend on both procedural types and pointers.
 
 - [ ] Standalone methods (`procedure P for r: T`)
 - [ ] Pointer receivers (`for c: ^TCat`) and automatic address-of/dereference
-- [ ] Structured return types (functions returning records or arrays)
+- [ ] Structured return types (functions returning records or arrays).
+      This covers `string` as well: `function F: string` is rejected with
+      "return type expected", so a helper that builds a message has to
+      take a `var` parameter instead of returning one.
 - [ ] Interfaces and `implement` blocks
 - [ ] Unicode character constants (`#u`)
 
@@ -115,9 +118,11 @@ other; interfaces depend on both procedural types and pointers.
 - [x] `Warning: line:col: message`, non-fatal, compilation continues
 - [x] `Progress: done/total [message]`, under `-progress`
 - [x] `Info: message`, under `-v`
+- [x] `Debug: message` and `Debug: line:col: message`, under `-debug`
 - [x] All diagnostics on stderr (fd 2), never stdout
 - [x] First error is fatal, exit via `proc_exit(1)`
-- [ ] `Debug:` tag
+
+Every tag the Language Reference defines is now implemented.
 
 One warning is emitted today: an unrecognized compiler directive. `{$MODE}`
 is exempt, since the compiler's own source carries it for the fpc bootstrap.
@@ -127,7 +132,9 @@ nothing. `-progress` alone reports at compilation stage boundaries;
 `-progress N`, where N is the source line count the host is about to send,
 reports as the scanner advances and gives a bar proportional to real work.
 `-v` reports source lines, imports, user functions, and module size after a
-successful compile.
+successful compile. `-debug` traces scope entry and exit, symbol
+declarations, and compiled body sizes as the single pass runs, which is
+different from `-dump`: that disassembles the finished module.
 
 Command-line errors, such as an unrecognized option, carry the `Error:` tag
 but no source position, since none applies.

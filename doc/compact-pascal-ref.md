@@ -589,7 +589,7 @@ When a program uses `write`/`writeln`, `read`/`readln`, or `halt`, the compiler 
 | `fd_write` | `(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) → errno: i32` | Program uses `write`/`writeln` |
 | `proc_exit` | `(code: i32) → noreturn` | Program uses `halt` |
 
-> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-progress`, `-O0`, `-O1`, and `-dSYMBOL`. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
+> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-debug`, `-progress`, `-O0`, `-O1`, and `-dSYMBOL`. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
 
 Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The generated code always passes a single iovec (`iovs_len = 1`).
 
@@ -782,7 +782,7 @@ The compiler writes all diagnostics to stderr (fd 2). Every line is prefixed wit
 | `Debug:` | Verbose debugging output | `Debug: message` |
 | `Progress:` | Compilation progress | `Progress: done/total [message]` |
 
-Phase 1 uses `Error:` and `Warning:` by default, plus `Progress:` and `Info:` when the corresponding command-line flag is given. `Debug:` is not yet emitted.
+Phase 1 uses `Error:` and `Warning:` by default, plus `Progress:`, `Info:`, and `Debug:` when the corresponding command-line flag is given. All five tags are implemented.
 
 A `Warning:` is not fatal. The compiler reports it, continues, and still exits 0 if nothing else goes wrong, so a host must not treat the presence of output on stderr as a failure. Use the process exit status for that.
 
@@ -815,6 +815,24 @@ Info: 5 imports
 Info: 188 user functions
 Info: 146081 bytes written
 ```
+
+### Debug Tag
+
+`Debug:` lines trace what the compiler does as it does it, and are emitted only under the `-debug` flag. Lines that correspond to a point in the source carry a position, formatted as `Error:` and `Warning:` format theirs. Lines that do not, such as the predefined symbols installed before reading begins, carry no position:
+
+```
+Debug: built-in type INTEGER
+Debug: 2:6: enter scope 1
+Debug: 3:0: declare const LIMIT at scope 1, level 0
+Debug: 7:4: declare function DOUBLE at scope 1, level 0
+Debug: 7:4: enter scope 2
+Debug: 14:0: leave scope 2, discarding 2 symbols
+Debug: 14:0: body of DOUBLE: 1 params, 2 locals, 54 bytes
+```
+
+The traced events are scope entry and exit, symbol declarations, and the size of each compiled procedure or function body. Because the compiler is single-pass with one token of lookahead, a position can sit slightly past the construct it describes: the scanner has already read ahead by the time the event fires. `Error:` positions behave the same way.
+
+`-debug` is distinct from `-dump`. `-dump` prints a human-readable disassembly of the finished module; `-debug` traces decisions as they are made, interleaved with the reading of the source.
 
 ### Error Format
 
