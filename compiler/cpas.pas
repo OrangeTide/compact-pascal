@@ -485,7 +485,7 @@ var
   addrCopyTemp: longint;         { 256-byte temp for copy() result }
   needsCopyTemp: boolean;        { whether copy temp was allocated }
   concatPieces: longint;         { compile-time count of saved concat pieces }
-  addrConcatScratch: longint;    { data segment addr of 16-slot scratch array }
+  addrConcatScratch: longint;    { data segment addr of 17-slot scratch array }
   addrConcatTemp: longint;       { 256-byte temp string for concat result }
   needsConcatScratch: boolean;   { whether scratch was allocated }
   startNlocals: longint;         { extra locals for _start (0 or 1) }
@@ -3271,8 +3271,10 @@ var j: longint;
 begin
   if not needsConcatScratch then begin
     needsConcatScratch := true;
-    addrConcatScratch := AllocDataAligned(64, 4); { 16 slots x 4 bytes }
-    for j := 1 to 64 do DataBufEmit(secData, 0);
+    { 17 slots x 4 bytes: 16 concat pieces, plus one for the final piece
+      when writing a concatenation to stderr (see ParseWriteArgs). }
+    addrConcatScratch := AllocDataAligned(68, 4);
+    for j := 1 to 68 do DataBufEmit(secData, 0);
     addrConcatTemp := AllocDataAligned(256, 4);   { temp string for concat result }
     for j := 1 to 256 do DataBufEmit(secData, 0);
   end;
@@ -4901,21 +4903,28 @@ begin
             { Concat expression: save last piece, emit write for each }
             curFuncNeedsStringTemp := true;
             EmitLocalSet(curStringTempIdx);
+            if fd <> 1 then begin
+              { Park the final piece in scratch memory. EmitInlineWriteStr
+                below uses curStringTempIdx as its own scratch and would
+                otherwise overwrite the address before we get to it. }
+              EmitI32Const(addrConcatScratch + concatPieces * 4);
+              EmitLocalGet(curStringTempIdx);
+              EmitI32Store(2, 0);
+            end;
             for i := 0 to concatPieces - 1 do begin
               EmitI32Const(addrConcatScratch + i * 4);
               EmitI32Load(2, 0);
               if fd = 1 then
                 EmitCall(EnsureWriteStr)
-              else begin
-                curFuncNeedsStringTemp := true;
+              else
                 EmitInlineWriteStr(fd, curStringTempIdx);
-              end;
             end;
-            EmitLocalGet(curStringTempIdx);
-            if fd = 1 then
-              EmitCall(EnsureWriteStr)
-            else begin
-              curFuncNeedsStringTemp := true;
+            if fd = 1 then begin
+              EmitLocalGet(curStringTempIdx);
+              EmitCall(EnsureWriteStr);
+            end else begin
+              EmitI32Const(addrConcatScratch + concatPieces * 4);
+              EmitI32Load(2, 0);
               EmitInlineWriteStr(fd, curStringTempIdx);
             end;
             concatPieces := 0;
