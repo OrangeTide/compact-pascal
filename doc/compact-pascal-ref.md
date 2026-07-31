@@ -639,6 +639,8 @@ Compiler directives use the same syntax as Free Pascal: `{$DIRECTIVE}` or `{$DIR
 
 Directives are either **global** (must appear before the first declaration or statement in a compilation unit) or **local** (may appear anywhere and take effect from the point they appear).
 
+An unrecognized directive is skipped and reported with a `Warning:` diagnostic. Skipping keeps sources portable across dialects, and the warning keeps a misspelled directive from silently doing nothing. The one exception is `{$MODE}`, which is accepted and ignored without a warning: Compact Pascal has a single dialect, and the compiler's own source carries the directive for the fpc bootstrap.
+
 ### Syntax
 
 ```ebnf
@@ -780,7 +782,9 @@ The compiler writes all diagnostics to stderr (fd 2). Every line is prefixed wit
 | `Debug:` | Verbose debugging output | `Debug: message` |
 | `Progress:` | Compilation progress | `Progress: done/total [message]` |
 
-Phase 1 uses at minimum `Error:`. Additional tags may be introduced as the compiler matures.
+Phase 1 uses `Error:` and `Warning:`. Additional tags may be introduced as the compiler matures.
+
+A `Warning:` is not fatal. The compiler reports it, continues, and still exits 0 if nothing else goes wrong, so a host must not treat the presence of output on stderr as a failure. Use the process exit status for that.
 
 ### Progress Tag
 

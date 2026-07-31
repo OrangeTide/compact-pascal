@@ -92,9 +92,28 @@ for src in "$SCRIPT_DIR"/positive/*.pas; do
     fi
 
     # Compile
-    if ! "$COMPILER" < "$src" > "$wasm" 2>"$TMPDIR/$name.err"; then
+    if ! "$COMPILER" < "$src" > "$wasm" 2>"$TMPDIR/$name.cerr"; then
         echo "FAIL $name (compilation failed)"
-        cat "$TMPDIR/$name.err"
+        cat "$TMPDIR/$name.cerr"
+        fail=$((fail + 1))
+        continue
+    fi
+
+    # Check compiler stderr. A .warning file holds a regex that must match;
+    # with no such file the compiler is expected to say nothing at all, so
+    # stray diagnostics are caught rather than ignored.
+    warning_file="$SCRIPT_DIR/positive/$name.warning"
+    if [ -f "$warning_file" ]; then
+        if ! grep -qi "$(cat "$warning_file")" "$TMPDIR/$name.cerr"; then
+            echo "FAIL $name (warning mismatch)"
+            echo "  expected: $(cat "$warning_file")"
+            echo "  got: $(cat "$TMPDIR/$name.cerr")"
+            fail=$((fail + 1))
+            continue
+        fi
+    elif [ -s "$TMPDIR/$name.cerr" ]; then
+        echo "FAIL $name (unexpected compiler output on stderr)"
+        cat "$TMPDIR/$name.cerr"
         fail=$((fail + 1))
         continue
     fi

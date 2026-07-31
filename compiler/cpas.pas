@@ -607,6 +607,19 @@ begin
   halt(1);
 end;
 
+{** Report a non-fatal diagnostic at the current source position.
+
+  Compilation continues and the exit status is unaffected. Format:
+  "Warning: line:col: msg", as specified by the Language Reference
+  section "Compiler Diagnostics". }
+procedure Warning(msg: string);
+var lineStr, colStr: string[11];
+begin
+  str(srcLine, lineStr);
+  str(srcCol, colStr);
+  WriteErrorLn('Warning: ' + lineStr + ':' + colStr + ': ' + msg);
+end;
+
 {** Report a "<what> expected" error at the current source position. }
 procedure Expected(what: string);
 begin
@@ -1076,8 +1089,17 @@ begin
       if ifdefDepth = 0 then
         Error('{$ENDIF} without {$IFDEF}');
       dec(ifdefDepth);
+    end else if directive = 'MODE' then begin
+      { fpc dialect selector. The compiler's own source carries a MODE TP
+        directive for the bootstrap build; cpas has one dialect, so accept
+        and ignore it rather than warning on every self-compile. }
+      while (not atEof) and (ch <> '}') do
+        ReadCh;
     end else begin
-      { Unknown directive - skip rest as comment }
+      { Unknown directive. Skipping it silently turns a typo such as
+        RANGECHEKS into a directive that quietly does nothing, so say
+        something and carry on. }
+      Warning('unknown compiler directive: ' + directive);
       while (not atEof) and (ch <> '}') do
         ReadCh;
     end;
