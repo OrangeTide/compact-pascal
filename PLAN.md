@@ -1023,3 +1023,227 @@ type
 - No new runtime support needed. All ops reuse existing small/large-set codegen.
 - Risk: the anchor-at-0 decision means `set of 200..255` reserves 32 bytes even though only 56 bits are meaningful. Acceptable at Phase 1; revisit if memory pressure shows up in real programs.
 - Risk: `{$R+}` range-check extension must subtract `arrLo` only at the *diagnostic* level (reject out-of-range), not at the encoding level. Guard this in the checker design so we don't regress the trivial membership-test codegen.
+
+---
+
+# Roadmap to Production (Phases A–I)
+
+Adopted 2026-07-31. Supersedes the phase numbering above for all work after
+Phase 1c; the older Phase 2–9 entries remain as background but the sequence
+below is what gets executed.
+
+Produced by a five-dimension survey of the repo (spec, compiler, test/release,
+embedding, docs) followed by three competing roadmaps and an adversarial
+judging pass. Risk-first sequencing won: phases are capped at three weeks so
+estimation error stays bounded, and the decisions that cannot be walked back
+once users exist are made first.
+
+**Target: 1.0 declared at the end of Phase F. Roughly 16 weeks solo.**
+
+## Decisions made up front
+
+These were settled before any code, because each is expensive or impossible to
+reverse later.
+
+**1. FFI snapshot hang: fix in `cpas.pas`.** Not a documented workaround. The
+hypothesis is already recorded below (FPC RTL text-mode I/O) with a planned
+fix (migrate to `BlockRead`/`BlockWrite`), so Phase B is validating a stated
+hypothesis rather than open-ended debugging. If the root cause turns out to sit
+in the FPC RTL and is genuinely unreachable from `cpas.pas`, fall back to
+documenting it and move on, but do not budget for that outcome.
+
+**2. C embedding library deferred past 1.0. Zig dropped entirely.** Three
+libraries in flight means three incomplete ones; Rust is the proof that the
+embedding story works, and C follows only if that proof holds. Zig is not
+deferred, it is removed: the Zig project adopted a no-AI-contribution policy,
+and this compiler is substantially machine-written, so a Zig binding cannot be
+contributed in good faith. Public docs should state plainly that Zig support is
+not planned, without editorializing about the reason.
+
+**3. Tutorial is maintained best-effort and is not up for archival.** The
+judging pass recommended archiving the student compiler as a duplication
+liability. Rejected. The tutorial is the project's strongest adoption asset,
+and building a second compiler against the language is the best pressure test
+the design gets — it has already caught real problems that the main compiler's
+own test suite did not. Best-effort means: update it when a phase changes
+something it teaches, do not gate merges on it, and accept bounded drift.
+
+**4. 1.0 is declared at the end of Phase F.** Spec closed, CI gated, FFI
+reliable, safety instrumentation in place, Rust library production-grade. The
+method/module work in Phases H–I is 1.0.x and beyond, not a prerequisite.
+
+**5. The self-hosting fixpoint stays byte-identical.** Never relaxed to
+semantic equivalence. This forecloses non-deterministic optimization passes:
+any optimizer must be deterministic and idempotent, or stay behind a compile
+-time flag as the peephole pass already does.
+
+## Phases
+
+### Phase A: Specification closure — 3 weeks
+
+Close every semantic gap while the spec is still cheap to change. Once users
+exist, a spec change is a breaking change.
+
+- [ ] Four methods/interfaces gaps from `notes/spec-review-methods-interfaces.md`:
+      receiver addressability (forbid pointer-receiver calls on temporaries),
+      field/method name collision (forbid), the standalone-vs-implement-block
+      seam, interface value lifetime.
+- [ ] Publish the frame-size constraint: frame size is fixed before body
+      codegen (`cpas.pas:7743`), why that blocks caller-allocated temporaries,
+      and what Phase D does about it.
+- [ ] Specify the currently-unstated semantics: integer overflow, uninitialized
+      variable contents, implicit conversions, identifier shadowing, parameter
+      aliasing, forward-declaration mismatch, string comparison ordering, set
+      bound errors.
+- [ ] Conformance statement: what a conforming implementation must do, what is
+      an error, what is undefined.
+- [ ] Stability policy: CalVer 26.x is beta, 1.0 is the first stable series,
+      breaking changes announced one release ahead.
+- [ ] Verify the EBNF appendix matches the prose and is actually LL(1).
+
+**Exit:** no TODO markers in the reference; every gap above has an explicit
+rule; an external reviewer reads it end to end with no open questions.
+
+### Phase B: FFI snapshot hang — 1.5 weeks, hard cap
+
+- [ ] Reproduce with a minimal `{$IMPORT}` + `external` source.
+- [ ] Validate the text-mode I/O hypothesis by diffing the WASI path between
+      the FPC-built and WASM-built compilers.
+- [ ] Migrate compiler I/O to `BlockRead`/`BlockWrite` (binary), removing the
+      FPC RTL text-mode dependency.
+- [ ] Regression test `c006_import_external` compiling in under 5 seconds.
+
+**Exit:** the WASM snapshot compiles import-bearing sources in under 5s;
+`compile_native()` is no longer needed as a workaround in the Rust tests.
+
+**Stop rule:** if the root cause is not identified within one week, stop
+investigating, document the workaround, and proceed. Do not let this reach
+week three.
+
+### Phase C: CI and fixpoint gating — 1.5 weeks
+
+- [ ] `.github/workflows/test.yml`: full suite plus byte-for-byte fixpoint
+      check on every push and PR.
+- [ ] Platform matrix: Linux (blocking), macOS (blocking), win32 under Wine
+      (blocking). Wine makes win32 cheap enough to gate on rather than defer.
+- [ ] Local `make test-all` running the same matrix a developer can reproduce.
+- [ ] Pin `fpc`, `wasmtime`, and `wasm-validate` versions. A `-Mtp` regression
+      in a minor fpc release would stall the entire pipeline silently.
+- [ ] Branch protection: no merge without green CI.
+- [ ] Publish `ROADMAP.md` (public; `PLAN.md` is the working document) and fix
+      the README, which still advertises Rust + Zig + C embedding.
+
+**Exit:** a commit that breaks the fixpoint by one byte cannot be merged.
+
+### Phase D: Runtime safety instrumentation — 1 week
+
+The load-bearing phase. Debugging silent memory corruption costs more than the
+instructions these checks add, and the frame-balance work here is what unblocks
+caller-allocated temporaries (structured and string returns) later.
+
+- [ ] **Stack overflow guard.** The stack grows down from memory top with no
+      guard; deep recursion currently walks through the heap and data segment
+      into the nil guard, silently. Prologue traps if SP drops below the data
+      end. Roughly five instructions per frame.
+- [ ] **Frame balance.** Save entry SP in a local at prologue; restore *from
+      that local* at epilogue instead of the current relative `SP += frameSize`
+      (`cpas.pas:7830`). This is not only a check: it makes an unbalanced stack
+      allocation self-healing at function return rather than desynchronizing SP
+      for the rest of the program. Assert the expected value before restoring
+      and trap on mismatch.
+- [ ] New `{$S+/-}` directive, default **ON** pre-1.0. Silent corruption is
+      worse than the code size. Revisit the default at 1.0.
+- [ ] Run the whole suite twice in CI, checks on and checks off.
+- [ ] Flip `{$R+}` on for the test suite even though the language default stays
+      off.
+
+**Exit:** suite passes in both configurations; a deliberately over-deep
+recursion traps instead of corrupting; a deliberately leaked stack allocation
+is contained to its function.
+
+**Why before pointers:** pointers add new corruption modes, and this phase is
+what makes them debuggable rather than mysterious.
+
+### Phase E: Pointer types — 2 weeks
+
+Scoped deliberately to what does *not* need frame allocation. Pointers that
+only reference existing storage (`@x`, `p^`, `nil` comparison, pointer
+parameters, pointers in records) are implementable and testable without
+touching the frame convention, even though a pointer type with no heap behind
+it is not yet useful on its own. `New`/`Dispose` and the heap stay in a later
+phase.
+
+- [ ] `^T` type declarations, `p^` dereference, `@x` address-of.
+- [ ] `nil` literal, comparison, and the nil guard check under `{$S+}`.
+- [ ] Pointers as parameters, record fields, and array elements.
+- [ ] Negative tests: dereferencing nil traps under `{$S+}`, type mismatch
+      rejected.
+
+**Exit:** pointer tests pass in both check configurations; fixpoint holds.
+
+### Phase F: Rust embedding to production grade — 3 weeks — **1.0 here**
+
+- [ ] Complete the WASI bridge: `fd_read`, `fd_write`, `proc_exit`, args.
+- [ ] Error handling returning `Result` with actionable diagnostics, parsing
+      the tagged `Error:`/`Warning:` stream the compiler now emits.
+- [ ] Three end-to-end examples: hello, calculator, host callback.
+- [ ] `EMBEDDING-GUIDE.md` and a published API stability policy.
+- [ ] Governance: `SECURITY.md` with a disclosure process, `CHANGELOG.md`,
+      contribution guide, license clarity.
+- [ ] Zig removal: delete the Makefile targets and README/doc references.
+
+**Exit:** a third party can add the crate, compile and run a Pascal program,
+get a useful error from a bad one, and file a bug against a documented process.
+Declare 1.0.0.
+
+### Phase G: C library decision gate — 0.5 to 3 weeks
+
+Decide, with the Rust library in real use, whether the C library ships. Record
+the decision and its rationale publicly either way. Deferring silently is the
+failure mode to avoid.
+
+### Phase H: Method pointers — 1.5 weeks
+
+Procedural types and method pointers, preparing for interfaces without
+committing to the full interface system.
+
+### Phase I: Module system design, specification only — 1 week
+
+Design and specify. No implementation. Unblocks planning for separate
+compilation without opening the scope.
+
+## Standing invariants
+
+Checked at every phase boundary without exception. A violation means the phase
+is not done.
+
+1. **Fixpoint is byte-identical.** fpc-built and self-compiled snapshots match
+   exactly. One byte of divergence is a regression until proven otherwise.
+2. **No test regressions**, in both check configurations after Phase D.
+3. **CI is green** on Linux, macOS, and win32-under-Wine.
+4. **The spec is self-consistent**: grammar matches prose, examples compile.
+5. **Diagnostics stay on stderr.** The module goes to stdout; a diagnostic on
+   the wrong stream corrupts output rather than merely looking untidy.
+6. **No stray compiler output.** Positive tests without a `.warning` file must
+   compile with nothing on stderr at all.
+
+## Leading indicators that this is going wrong
+
+- Fixpoint diverges and the cause is not found same-day. Roll back rather than
+  investigate forward.
+- A phase passes its estimate by more than half. Cut scope, do not extend.
+- Phase B reaches week two without a root cause. Take the fallback.
+- The tutorial has not been touched across two consecutive phases that changed
+  language behavior. Best-effort has quietly become never.
+- Checks-on and checks-off configurations start disagreeing. That is a real
+  codegen bug, not a test problem.
+
+## Deliberately not doing
+
+Recorded so these do not get relitigated: Zig bindings (dropped), C library
+before 1.0 (deferred), LSP and editor extensions (the playground suffices),
+source-level debugger (WASM traps are acceptable), exception handling
+(incompatible with single-pass), dynamic arrays and generics, `real` and
+floating point, `rune` and Unicode, separate compilation before Phase I,
+shipping the peephole optimizer on by default (0.04% code size on
+self-compilation does not justify it; keep it behind `-dPEEPHOLE`).
