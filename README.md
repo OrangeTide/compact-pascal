@@ -71,7 +71,7 @@ try instance.call("main", &.{});
 
 ## Status
 
-**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 104 tests (97 positive, 7 negative). A browser playground is shipped. The C embedding library is partially implemented. See the [project plan](PLAN.md) for the phased roadmap.
+**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 109 tests (99 positive, 10 negative). A browser playground is shipped. The C embedding library is partially implemented. See the [project plan](PLAN.md) for the phased roadmap.
 
 **Standalone usage (no embedding library needed):**
 
@@ -169,7 +169,7 @@ wasmtime run hello.wasm
 
 ```
 compiler/       — Pascal source for the compiler (cpas.pas, ~10k lines)
-compiler-tests/ — test suite (97 positive, 7 negative, shell runner)
+compiler-tests/ — test suite (99 positive, 10 negative, shell runner)
 src/
   c/            — C embedding library (compact_pascal.h/.c, vtable-based)
   rust/         — Rust crate source (not yet started)
