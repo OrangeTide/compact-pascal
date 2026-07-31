@@ -57,7 +57,7 @@ const
 
   { WASM type indices }
   TypeVoidVoid = 0;  { () -> ()   used for _start }
-  TypeI32Void  = 1;  { (i32) -> () used for proc_exit and __write_int }
+  TypeI32Void  = 1;  { (i32) -> () used for proc_exit and __read_int }
   TypeFdWrite  = 2;  { (i32,i32,i32,i32) -> i32  used for fd_write }
   TypeI32I32   = 7;  { (i32) -> i32 used for abs and sqr }
 
@@ -712,7 +712,7 @@ begin
   SmallEmitULEB128(secFunc, numDefinedFuncs);
   SmallBufEmit(secFunc, TypeVoidVoid);            { _start: () -> () }
   if needWriteInt then
-    SmallBufEmit(secFunc, TypeI32Void);           { __write_int: (i32) -> () }
+    SmallBufEmit(secFunc, TypeII_V);              { __write_int: (i32, i32) -> () }
   if strHelpersReserved then begin
     SmallBufEmit(secFunc, TypeIII_V);  { __str_assign (dst, max_len, src) -> void }
     SmallBufEmit(secFunc, TypeI32Void); { __write_str (addr) -> void }
@@ -732,7 +732,7 @@ begin
   if needSqr then
     SmallBufEmit(secFunc, TypeI32I32);            { __sqr: (i32) -> i32 }
   if needWriteChar then
-    SmallBufEmit(secFunc, TypeI32Void);           { __write_char: (i32) -> () }
+    SmallBufEmit(secFunc, TypeII_V);              { __write_char: (i32, i32) -> () }
   if needIntToStr then
     SmallBufEmit(secFunc, TypeII_V);              { __int_to_str: (i32, i32) -> () }
   if needCheckedAdd then
@@ -2329,14 +2329,14 @@ begin
   bufEnd := addrIntBuf + 20;
 
   { pos = bufEnd }
-  HI32Const(bufEnd); HLocalSet(1);
+  HI32Const(bufEnd); HLocalSet(2);
   { neg = 0 }
-  HI32Const(0); HLocalSet(2);
+  HI32Const(0); HLocalSet(3);
 
   { if value < 0: neg=1, value=-value }
   HLocalGet(0); HI32Const(0); HEmit(OpI32LtS);
   HEmit(OpIf); HEmit(WasmVoid);
-    HI32Const(1); HLocalSet(2);
+    HI32Const(1); HLocalSet(3);
     HI32Const(0); HLocalGet(0); HEmit(OpI32Sub); HLocalSet(0);
   HEmit(OpEnd);
 
@@ -2344,15 +2344,15 @@ begin
   HLocalGet(0); HEmit(OpI32Eqz);
   HEmit(OpIf); HEmit(WasmVoid);
     { zero case: write single '0' digit }
-    HLocalGet(1); HI32Const(1); HEmit(OpI32Sub); HLocalSet(1);
-    HLocalGet(1); HI32Const(48); HEmit(OpI32Store8); HEmit(0); HEmit(0);
+    HLocalGet(2); HI32Const(1); HEmit(OpI32Sub); HLocalSet(2);
+    HLocalGet(2); HI32Const(48); HEmit(OpI32Store8); HEmit(0); HEmit(0);
   HEmit(OpElse);
     { nonzero: extract digits right-to-left }
     HEmit(OpBlock); HEmit(WasmVoid);
       HEmit(OpLoop); HEmit(WasmVoid);
         HLocalGet(0); HEmit(OpI32Eqz); HEmit(OpBrIf); HEmit(1);
-        HLocalGet(1); HI32Const(1); HEmit(OpI32Sub); HLocalSet(1);
-        HLocalGet(1);
+        HLocalGet(2); HI32Const(1); HEmit(OpI32Sub); HLocalSet(2);
+        HLocalGet(2);
         HLocalGet(0); HI32Const(10); HEmit(OpI32RemS);
         HI32Const(48); HEmit(OpI32Add);
         HEmit(OpI32Store8); HEmit(0); HEmit(0);
@@ -2363,21 +2363,21 @@ begin
   HEmit(OpEnd);      { if/else }
 
   { if neg: prepend '-' }
-  HLocalGet(2);
+  HLocalGet(3);
   HEmit(OpIf); HEmit(WasmVoid);
-    HLocalGet(1); HI32Const(1); HEmit(OpI32Sub); HLocalSet(1);
-    HLocalGet(1); HI32Const(45); HEmit(OpI32Store8); HEmit(0); HEmit(0);
+    HLocalGet(2); HI32Const(1); HEmit(OpI32Sub); HLocalSet(2);
+    HLocalGet(2); HI32Const(45); HEmit(OpI32Store8); HEmit(0); HEmit(0);
   HEmit(OpEnd);
 
   { set iovec.buf = pos }
-  HI32Const(addrIovec); HLocalGet(1);
+  HI32Const(addrIovec); HLocalGet(2);
   HEmit(OpI32Store); HEmit(2); HEmit(0);
   { set iovec.len = bufEnd - pos }
   HI32Const(addrIovec + 4);
-  HI32Const(bufEnd); HLocalGet(1); HEmit(OpI32Sub);
+  HI32Const(bufEnd); HLocalGet(2); HEmit(OpI32Sub);
   HEmit(OpI32Store); HEmit(2); HEmit(0);
-  { fd_write(1, addrIovec, 1, addrNwritten) }
-  HI32Const(1);
+  { fd_write(fd, addrIovec, 1, addrNwritten) }
+  HLocalGet(1);
   HI32Const(addrIovec);
   HI32Const(1);
   HI32Const(addrNwritten);
@@ -2385,7 +2385,9 @@ begin
   HEmit(OpDrop);
 end;
 
-procedure EmitWriteString(addr, len: longint);
+procedure EmitWriteStringFd(fd, addr, len: longint);
+{ Write len bytes of data at addr to the given file descriptor.
+  fd 1 is stdout, fd 2 is stderr. }
 begin
   EnsureIOBuffers;
   { iovec.buf = addr }
@@ -2396,8 +2398,8 @@ begin
   EmitI32Const(addrIovec + 4);
   EmitI32Const(len);
   EmitI32Store(2, 0);
-  { fd_write(1, iovec, 1, nwritten) }
-  EmitI32Const(1);
+  { fd_write(fd, iovec, 1, nwritten) }
+  EmitI32Const(fd);
   EmitI32Const(addrIovec);
   EmitI32Const(1);
   EmitI32Const(addrNwritten);
@@ -2405,19 +2407,33 @@ begin
   EmitOp(OpDrop);
 end;
 
-procedure EmitWriteNewline;
+procedure EmitWriteString(addr, len: longint);
 begin
-  EnsureIOBuffers;
-  EmitWriteString(addrNewline, 1);
+  EmitWriteStringFd(1, addr, len);
 end;
 
-procedure EmitWriteChar;
+procedure EmitWriteNewlineFd(fd: longint);
 begin
+  EnsureIOBuffers;
+  EmitWriteStringFd(fd, addrNewline, 1);
+end;
+
+procedure EmitWriteNewline;
+begin
+  EmitWriteNewlineFd(1);
+end;
+
+procedure EmitWriteChar(fd: longint);
+{ Call __write_char(value, fd). The character is already on the stack. }
+begin
+  EmitI32Const(fd);
   EmitCall(EnsureWriteChar);
 end;
 
-procedure EmitWriteInt;
+procedure EmitWriteInt(fd: longint);
+{ Call __write_int(value, fd). The integer is already on the stack. }
 begin
+  EmitI32Const(fd);
   EmitCall(EnsureWriteInt);
 end;
 
@@ -2679,8 +2695,8 @@ begin
   HEmit(OpI32Const); HEmitSLEB128(addrIovec + 4);
   HEmit(OpI32Const); HEmitSLEB128(1);
   HEmit(OpI32Store); HEmitULEB128(2); HEmitULEB128(0);
-  { fd_write(1, iovec, 1, nwritten) }
-  HEmit(OpI32Const); HEmitSLEB128(1);
+  { fd_write(fd, iovec, 1, nwritten) }
+  HEmit(OpLocalGet); HEmitULEB128(1);
   HEmit(OpI32Const); HEmitSLEB128(addrIovec);
   HEmit(OpI32Const); HEmitSLEB128(1);
   HEmit(OpI32Const); HEmitSLEB128(addrNwritten);
@@ -4009,7 +4025,9 @@ procedure EnsureConcatScratch;
 begin
   if addrConcatScratch < 0 then begin
     EnsureStringHelpers;
-    addrConcatScratch := AllocData(64);
+    { 17 slots: up to 16 concat pieces, plus one for the final piece
+      when writing a concatenation to stderr (see ParseWriteArgs). }
+    addrConcatScratch := AllocData(68);
     addrConcatTemp := AllocData(256);
   end;
 end;
@@ -4051,6 +4069,33 @@ procedure EmitLocalSet(idx: longint);
 begin
   EmitOp(OpLocalSet);
   EmitULEB128(startCode, idx);
+end;
+
+procedure EmitInlineWriteStr(fd, localIdx: longint);
+{ Write a Pascal string to a given fd. The string address is on the WASM
+  operand stack; localIdx is scratch used to hold it. The __write_str helper
+  hardcodes fd 1, so stderr writes are emitted inline instead. }
+begin
+  EnsureIOBuffers;
+  EmitLocalSet(localIdx);
+  { iovec.buf = addr + 1, skipping the length byte }
+  EmitI32Const(addrIovec);
+  EmitLocalGet(localIdx);
+  EmitI32Const(1);
+  EmitOp(OpI32Add);
+  EmitI32Store(2, 0);
+  { iovec.len = addr[0], the length byte }
+  EmitI32Const(addrIovec + 4);
+  EmitLocalGet(localIdx);
+  EmitI32Load8u(0, 0);
+  EmitI32Store(2, 0);
+  { fd_write(fd, iovec, 1, nwritten) }
+  EmitI32Const(fd);
+  EmitI32Const(addrIovec);
+  EmitI32Const(1);
+  EmitI32Const(addrNwritten);
+  EmitCall(EnsureFdWrite);
+  EmitOp(OpDrop);
 end;
 
 procedure EmitExportEntry(name: string; funcIdx: longint);
@@ -5410,51 +5455,93 @@ procedure ParseWriteArgs(withNewline: boolean);
 { Parses the argument list for write/writeln (already consumed the keyword).
   Strings are stored in the data segment and written with fd_write.
   Expressions are evaluated onto the WASM stack and passed to __write_int.
-  String variables are passed to __write_str. }
+  String variables are passed to __write_str.
+
+  An optional leading StdErr argument selects fd 2. __write_int and
+  __write_char take the fd as a second parameter. __write_str does not:
+  it lives in the reserved block of ten string helpers, so strings go to
+  stderr through inline code instead. }
 var
   addr: longint;
   len:  longint;
   s:    longint;
   i:    longint;
+  fd:   longint;
+
+  procedure NeedStrTemp;
+  begin
+    curNeedsStrTemp := true;
+    if curNestLevel = 0 then startNeedsStrTemp := true;
+  end;
+
 begin
+  fd := 1;  { default: stdout }
   if tokKind = tkLParen then begin
     NextToken;
-    { Optional leading file argument (e.g. StdErr): skip it }
+    { Optional leading file argument: StdErr selects fd 2 }
     if (tokKind = tkIdent) and (tokStr = 'STDERR') then begin
+      fd := 2;
       NextToken;
-      if tokKind = tkComma then NextToken;
+      if tokKind = tkComma then
+        NextToken
+      else begin
+        { writeln(StdErr) with no further arguments }
+        Expect(tkRParen);
+        if withNewline then
+          EmitWriteNewlineFd(fd);
+        exit;
+      end;
     end;
     repeat
       if tokKind = tkString then begin
         addr := EmitDataString(tokStr);
         len  := length(tokStr);
-        EmitWriteString(addr, len);
+        EmitWriteStringFd(fd, addr, len);
         NextToken;
       end else begin
         ParseExpression(PrecNone);
         if lastExprType = tyString then begin
           if concatPieces > 0 then begin
-            curNeedsStrTemp := true;
-            if curNestLevel = 0 then startNeedsStrTemp := true;
+            NeedStrTemp;
             EmitLocalSet(curStrTempIdx);
+            if fd <> 1 then begin
+              { Park the final piece in scratch memory. EmitInlineWriteStr
+                below uses curStrTempIdx as its own scratch and would
+                otherwise overwrite the address before we get to it. }
+              EmitI32Const(addrConcatScratch + concatPieces * 4);
+              EmitLocalGet(curStrTempIdx);
+              EmitI32Store(2, 0);
+            end;
             for i := 0 to concatPieces - 1 do begin
               EmitI32Const(addrConcatScratch + i * 4);
               EmitI32Load(2, 0);
+              if fd = 1 then begin
+                EnsureWriteStr;
+                EmitCall(idxWriteStr);
+              end else
+                EmitInlineWriteStr(fd, curStrTempIdx);
+            end;
+            if fd = 1 then begin
+              EmitLocalGet(curStrTempIdx);
               EnsureWriteStr;
               EmitCall(idxWriteStr);
+            end else begin
+              EmitI32Const(addrConcatScratch + concatPieces * 4);
+              EmitI32Load(2, 0);
+              EmitInlineWriteStr(fd, curStrTempIdx);
             end;
-            EmitLocalGet(curStrTempIdx);
-            EnsureWriteStr;
-            EmitCall(idxWriteStr);
             concatPieces := 0;
-          end else begin
+          end else if fd = 1 then begin
             EnsureWriteStr;
             EmitCall(idxWriteStr);
+          end else begin
+            NeedStrTemp;
+            EmitInlineWriteStr(fd, curStrTempIdx);
           end;
         end else if lastExprType = tyChar then
-          EmitWriteChar
+          EmitWriteChar(fd)
         else
-          EmitWriteInt;
+          EmitWriteInt(fd);
       end;
       if tokKind = tkComma then
         NextToken
@@ -5464,7 +5551,7 @@ begin
     Expect(tkRParen);
   end;
   if withNewline then
-    EmitWriteNewline;
+    EmitWriteNewlineFd(fd);
 end;
 
 procedure ParseTypeSpec(var outTyp, outTypeIdx, outSize, outStrMax: longint);
