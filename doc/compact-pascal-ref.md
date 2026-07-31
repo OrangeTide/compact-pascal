@@ -589,7 +589,7 @@ When a program uses `write`/`writeln`, `read`/`readln`, or `halt`, the compiler 
 | `fd_write` | `(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) → errno: i32` | Program uses `write`/`writeln` |
 | `proc_exit` | `(code: i32) → noreturn` | Program uses `halt` |
 
-> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-O0`, `-O1`, and `-dSYMBOL`. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
+> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-progress`, `-O0`, `-O1`, and `-dSYMBOL`. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
 
 Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The generated code always passes a single iovec (`iovs_len = 1`).
 
@@ -782,7 +782,7 @@ The compiler writes all diagnostics to stderr (fd 2). Every line is prefixed wit
 | `Debug:` | Verbose debugging output | `Debug: message` |
 | `Progress:` | Compilation progress | `Progress: done/total [message]` |
 
-Phase 1 uses `Error:` and `Warning:`. Additional tags may be introduced as the compiler matures.
+Phase 1 uses `Error:` and `Warning:` by default, plus `Progress:` and `Info:` when the corresponding command-line flag is given. `Debug:` is not yet emitted.
 
 A `Warning:` is not fatal. The compiler reports it, continues, and still exits 0 if nothing else goes wrong, so a host must not treat the presence of output on stderr as a failure. Use the process exit status for that.
 
@@ -794,6 +794,26 @@ The `Progress:` tag uses a fixed `done/total` format (both integers) so the host
 Progress: 0/123
 Progress: 20/100 Analyzing...
 Progress: 100/100 Done
+```
+
+Progress reporting is off unless the `-progress` flag is given, so it never interferes with a host that does not want it. The compiler reads its source as a stream and never learns the total size on its own, which gives the flag two forms:
+
+| Invocation | `total` means | Behavior |
+|---|---|---|
+| `-progress` | A fixed count of compilation stages | Reports at each stage boundary. Needs nothing from the host, but parsing is a single stage and dominates the run, so the ratio sits still for most of a large compile. |
+| `-progress N` | The source line count, supplied by the host | Reports as the scanner advances, at most about 100 times over the whole source. Smooth and proportional to real work. |
+
+The host writes the source to the compiler's stdin, so it already knows the line count and can pass it. `done` is clamped to `total`, and reporting stops once the scanner passes `total`, so a low `N` cannot drive a ratio above 1. Both forms end with a `Done` line at `total/total`.
+
+### Info Tag
+
+`Info:` lines carry no source position and are emitted only under the `-v` flag. After a successful compile the compiler reports the source line count, the number of imports, the number of user functions, and the size of the module written:
+
+```
+Info: 10984 source lines
+Info: 5 imports
+Info: 188 user functions
+Info: 146081 bytes written
 ```
 
 ### Error Format

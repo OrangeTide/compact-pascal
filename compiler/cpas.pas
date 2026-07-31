@@ -32,6 +32,11 @@ const
   MaxIfdefDepth = 8;  { max nested IFDEF levels }
   MaxDefines    = 32; (* max conditional symbols: predefined + DEFINE + -d *)
 
+  { Stage count reported by -progress when the host gives no line count.
+    Parsing start and end, one per assembled WASM section, then Done. }
+  ProgressStages = 10;
+  ProgressReports = 100; { max line-mode reports over the whole source }
+
   { Command-line args (WASI args_get) }
   MaxArgs     = 16;    { max command-line args (including argv[0]) }
   ArgSlotSize = 256;   { per-arg short-string slot: length byte + up to 255 chars }
@@ -516,6 +521,15 @@ var
   optAlign: longint;          (* ALIGN n, record field alignment in bytes (1,2,4,8), default 4 *)
   optDump: boolean;           (* -dump command-line flag *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
+  optProgress: boolean;       (* -progress command-line flag *)
+  optVerbose: boolean;        (* -v command-line flag, emits Info: lines *)
+
+  (* Progress reporting state. optProgressTotal is the source line count
+     the host passed after -progress; 0 selects stage-based reporting. *)
+  optProgressTotal: longint;
+  progressStep: longint;      (* lines between reports in line mode *)
+  progressNextLine: longint;  (* next source line that triggers a report *)
+  infoNum: string[11];        (* scratch for formatting Info: counts *)
 
   { Pending compiler directives }
   hasPendingImport: boolean;
@@ -626,6 +640,81 @@ begin
   Error(what + ' expected');
 end;
 
+{** Report an informational line. No source position applies. Format:
+  "Info: msg". Only emitted under -v. }
+procedure Info(msg: string);
+begin
+  if optVerbose then
+    WriteErrorLn('Info: ' + msg);
+end;
+
+{** Emit one "Progress: done/total [msg]" line.
+
+  Both counts are integers so a host can compute a percentage without
+  parsing free text. done is clamped to total: a host that passes a line
+  count lower than the real one would otherwise drive a progress bar
+  past 100%. }
+procedure ProgressReport(done, total: longint; msg: string);
+var doneStr, totalStr: string[11];
+begin
+  if done > total then
+    done := total;
+  str(done, doneStr);
+  str(total, totalStr);
+  if msg = '' then
+    WriteErrorLn('Progress: ' + doneStr + '/' + totalStr)
+  else
+    WriteErrorLn('Progress: ' + doneStr + '/' + totalStr + ' ' + msg);
+end;
+
+{** Report completion of compilation stage n (stage mode only).
+
+  Stage mode is what -progress gives with no line count. The stages are
+  coarse and parsing dominates the run, so the bar sits at 1/9 for most
+  of a large compile. A host that knows the source size should pass it
+  and get line-based reporting instead. }
+procedure ProgressStage(n: longint; msg: string);
+begin
+  if optProgress and (optProgressTotal = 0) then
+    ProgressReport(n, ProgressStages, msg);
+end;
+
+{** Report scanner position (line mode only). Called as each source line
+  is completed. Reports at most ~100 times over the whole file so the
+  cost stays negligible on the hot scanning path. }
+procedure ProgressLine;
+begin
+  { Past the host's line count the ratio would be pinned at 1 and every
+    further line would repeat the same output, so stop reporting and let
+    the closing Done line finish the sequence. }
+  if optProgress and (optProgressTotal > 0) and (srcLine >= progressNextLine)
+      and (srcLine <= optProgressTotal) then begin
+    ProgressReport(srcLine, optProgressTotal, '');
+    progressNextLine := srcLine + progressStep;
+  end;
+end;
+
+{** Convert an all-digits command-line argument to a positive integer.
+  Returns 0 if s is empty or holds anything other than digits, which the
+  caller treats as "not a count". }
+function ArgToInt(s: string): longint;
+var i, n: longint;
+begin
+  n := 0;
+  if length(s) = 0 then begin
+    ArgToInt := 0;
+    exit;
+  end;
+  for i := 1 to length(s) do begin
+    if not (s[i] in ['0'..'9']) then begin
+      ArgToInt := 0;
+      exit;
+    end;
+    n := n * 10 + (ord(s[i]) - ord('0'));
+  end;
+  ArgToInt := n;
+end;
+
 { ---- Character I/O ---- }
 
 var
@@ -654,6 +743,7 @@ begin
     if ch = #10 then begin
       srcLine := srcLine + 1;
       srcCol := 0;
+      ProgressLine;
     end else
       srcCol := srcCol + 1;
   end;
@@ -674,6 +764,7 @@ begin
     if ch = #10 then begin
       srcLine := srcLine + 1;
       srcCol := 0;
+      ProgressLine;
     end else
       srcCol := srcCol + 1;
   end;
@@ -10554,12 +10645,19 @@ begin
 
   { Assemble all sections }
   AssembleTypeSection;
+  ProgressStage(2, 'Types');
   AssembleImportSection;
+  ProgressStage(3, 'Imports');
   AssembleFunctionSection;
+  ProgressStage(4, 'Functions');
   AssembleMemorySection;
+  ProgressStage(5, 'Memory');
   AssembleGlobalSection;
+  ProgressStage(6, 'Globals');
   AssembleExportSection;
+  ProgressStage(7, 'Exports');
   AssembleCodeSectionFixed;
+  ProgressStage(8, 'Code');
 
   { Write WASM header }
   WriteOutputByte($00);  { \0 }
@@ -10580,6 +10678,7 @@ begin
   WriteSmallSection(SecIdExport, secExport);
   WriteCodeSection(SecIdCode, secCode);
   AssembleDataSection; { writes directly to outBuf }
+  ProgressStage(9, 'Data');
 
   { Write description custom section if set }
   if optDescription <> '' then begin
@@ -10617,6 +10716,8 @@ procedure Init;
 var
   i: longint;
   defArg: string;
+  argCount: longint;
+  skipArg: boolean;
 begin
   { Initialize all state }
   SmallBufInit(secType);
@@ -10736,6 +10837,12 @@ begin
   optExtLiterals := false;
   optAlign := 4;
   optDump := false;
+  optProgress := false;
+  optVerbose := false;
+  optProgressTotal := 0;
+  progressStep := 1;
+  progressNextLine := 1;
+  skipArg := false;
   optLevel := 1;
   numDefined := 0;
   DefineSymbol('CPAS');
@@ -10744,8 +10851,29 @@ begin
     RTL ParamCount/ParamStr; under self-hosted cpas these are intrinsics
     backed by WASI args_sizes_get/args_get. }
   for i := 1 to ParamCount do begin
-    if ParamStr(i) = '-dump' then
+    if skipArg then
+      skipArg := false
+    else if ParamStr(i) = '-dump' then
       optDump := true
+    else if ParamStr(i) = '-v' then
+      optVerbose := true
+    else if ParamStr(i) = '-progress' then begin
+      optProgress := true;
+      { An all-digits argument after -progress is the source line count,
+        which selects line-based reporting. Anything else is left for the
+        next iteration to handle as its own option. }
+      if i < ParamCount then begin
+        argCount := ArgToInt(ParamStr(i + 1));
+        if argCount > 0 then begin
+          optProgressTotal := argCount;
+          progressStep := optProgressTotal div ProgressReports;
+          if progressStep < 1 then
+            progressStep := 1;
+          progressNextLine := progressStep;
+          skipArg := true;
+        end;
+      end;
+    end
     else if ParamStr(i) = '-O0' then
       optLevel := 0
     else if ParamStr(i) = '-O1' then
@@ -10776,6 +10904,10 @@ end;
 begin
   Init;
 
+  ProgressStage(0, 'Parsing');
+  if optProgress and (optProgressTotal > 0) then
+    ProgressReport(0, optProgressTotal, 'Parsing');
+
   { Read first character }
   ReadCh;
 
@@ -10805,6 +10937,10 @@ begin
 
   LeaveScope;
 
+  ProgressStage(1, 'Parsed');
+  if optProgress and (optProgressTotal > 0) then
+    ProgressReport(srcLine, optProgressTotal, 'Parsed');
+
   { Set _start locals based on whether string/case temps were needed }
   if curFuncNeedsCaseTemp then
     startNlocals := startNlocals + 2  { string temp + case temp }
@@ -10819,6 +10955,27 @@ begin
 
   { Assemble and write WASM module }
   WriteModule;
+
+  { Final progress line. In line mode the count is forced to the total so
+    a host sees the ratio reach 1 even if it passed a high line count. }
+  if optProgress then begin
+    if optProgressTotal > 0 then
+      ProgressReport(optProgressTotal, optProgressTotal, 'Done')
+    else
+      ProgressReport(ProgressStages, ProgressStages, 'Done');
+  end;
+
+  { Summary for -v }
+  if optVerbose then begin
+    str(srcLine, infoNum);
+    Info(infoNum + ' source lines');
+    str(numImports, infoNum);
+    Info(infoNum + ' imports');
+    str(numFuncs, infoNum);
+    Info(infoNum + ' user functions');
+    str(outBuf.len, infoNum);
+    Info(infoNum + ' bytes written');
+  end;
 
   { Dump instructions if -dump flag was given }
   if optDump then

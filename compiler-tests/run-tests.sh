@@ -202,23 +202,32 @@ done
 # Command-line tests
 # These drive the compiler through its arguments rather than its source
 # input, so they cover diagnostics the positive and negative tests cannot
-# reach. Each test is a pair of files in cli/:
-#   <name>.args   arguments to pass, one line, split on whitespace
-#   <name>.error  regex matched against stderr
-# The run must exit nonzero and leave stdout empty, so a diagnostic that
-# goes to the wrong stream is caught as well as one with the wrong text.
+# reach. Files in cli/, all keyed on <name>:
+#   <name>.args   arguments to pass, one line, split on whitespace (required)
+#   <name>.pas    source fed on stdin; /dev/null when absent
+#   <name>.error  the run must fail: this regex matches stderr and stdout
+#                 must be empty, so a diagnostic on the wrong stream fails
+#   <name>.diag   the run must succeed: one regex per line, every one must
+#                 match stderr, and stdout must be a valid WASM module
+# Exactly one of .error or .diag is required.
 for args_file in "$SCRIPT_DIR"/cli/*.args; do
     [ -f "$args_file" ] || continue
     name="$(basename "$args_file" .args)"
     error_file="$SCRIPT_DIR/cli/$name.error"
+    diag_file="$SCRIPT_DIR/cli/$name.diag"
+    src_file="$SCRIPT_DIR/cli/$name.pas"
 
-    if [ ! -f "$error_file" ]; then
-        echo "SKIP $name (no .error file)"
+    if [ -f "$error_file" ] && [ -f "$diag_file" ]; then
+        echo "SKIP $name (has both .error and .diag)"
+        skip=$((skip + 1))
+        continue
+    fi
+    if [ ! -f "$error_file" ] && [ ! -f "$diag_file" ]; then
+        echo "SKIP $name (no .error or .diag file)"
         skip=$((skip + 1))
         continue
     fi
 
-    expected_error="$(cat "$error_file")"
     cli_args=()
     read -r -a cli_args < "$args_file" || true
 
@@ -228,29 +237,72 @@ for args_file in "$SCRIPT_DIR"/cli/*.args; do
         continue
     fi
 
-    # Run - should fail
-    if "$COMPILER" "${cli_args[@]}" < /dev/null \
-            > "$TMPDIR/$name.out" 2>"$TMPDIR/$name.err"; then
-        echo "FAIL $name (should have exited nonzero)"
+    [ -f "$src_file" ] || src_file=/dev/null
+
+    cli_status=0
+    "$COMPILER" "${cli_args[@]}" < "$src_file" \
+        > "$TMPDIR/$name.out" 2>"$TMPDIR/$name.err" || cli_status=$?
+
+    if [ -f "$error_file" ]; then
+        # Failing run: nonzero exit, nothing on stdout, message on stderr
+        if [ "$cli_status" -eq 0 ]; then
+            echo "FAIL $name (should have exited nonzero)"
+            fail=$((fail + 1))
+            continue
+        fi
+
+        if [ -s "$TMPDIR/$name.out" ]; then
+            echo "FAIL $name (wrote to stdout; diagnostics belong on stderr)"
+            echo "  stdout: $(head -c 200 "$TMPDIR/$name.out")"
+            fail=$((fail + 1))
+            continue
+        fi
+
+        expected_error="$(cat "$error_file")"
+        if grep -qi "$expected_error" "$TMPDIR/$name.err"; then
+            echo "PASS $name"
+            pass=$((pass + 1))
+        else
+            echo "FAIL $name (error message mismatch)"
+            echo "  expected: $expected_error"
+            echo "  got: $(cat "$TMPDIR/$name.err")"
+            fail=$((fail + 1))
+        fi
+        continue
+    fi
+
+    # Succeeding run: the module must still be well-formed, and every
+    # pattern in the .diag file must appear on stderr
+    if [ "$cli_status" -ne 0 ]; then
+        echo "FAIL $name (compilation failed)"
+        cat "$TMPDIR/$name.err"
         fail=$((fail + 1))
         continue
     fi
 
-    if [ -s "$TMPDIR/$name.out" ]; then
-        echo "FAIL $name (wrote to stdout; diagnostics belong on stderr)"
-        echo "  stdout: $(head -c 200 "$TMPDIR/$name.out")"
+    if ! wasm-validate "$TMPDIR/$name.out" 2>"$TMPDIR/$name.verr"; then
+        echo "FAIL $name (wasm-validate failed; stdout may be corrupted)"
+        cat "$TMPDIR/$name.verr"
         fail=$((fail + 1))
         continue
     fi
 
-    # Check error message contains expected substring
-    if grep -qi "$expected_error" "$TMPDIR/$name.err"; then
+    diag_ok=1
+    while IFS= read -r pattern; do
+        [ -n "$pattern" ] || continue
+        if ! grep -q "$pattern" "$TMPDIR/$name.err"; then
+            echo "FAIL $name (no stderr line matching: $pattern)"
+            diag_ok=0
+            break
+        fi
+    done < "$diag_file"
+
+    if [ "$diag_ok" -eq 1 ]; then
         echo "PASS $name"
         pass=$((pass + 1))
     else
-        echo "FAIL $name (error message mismatch)"
-        echo "  expected: $expected_error"
-        echo "  got: $(cat "$TMPDIR/$name.err")"
+        echo "  got:"
+        sed 's/^/    /' "$TMPDIR/$name.err"
         fail=$((fail + 1))
     fi
 done

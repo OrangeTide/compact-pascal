@@ -113,13 +113,21 @@ other; interfaces depend on both procedural types and pointers.
 
 - [x] `Error: line:col: message`, the form the Language Reference specifies
 - [x] `Warning: line:col: message`, non-fatal, compilation continues
+- [x] `Progress: done/total [message]`, under `-progress`
+- [x] `Info: message`, under `-v`
 - [x] All diagnostics on stderr (fd 2), never stdout
 - [x] First error is fatal, exit via `proc_exit(1)`
-- [ ] `Info:`, `Debug:` tags
-- [ ] `Progress: done/total` protocol
+- [ ] `Debug:` tag
 
 One warning is emitted today: an unrecognized compiler directive. `{$MODE}`
 is exempt, since the compiler's own source carries it for the fpc bootstrap.
+
+`Progress:` and `Info:` are off by default, so a host that wants neither sees
+nothing. `-progress` alone reports at compilation stage boundaries;
+`-progress N`, where N is the source line count the host is about to send,
+reports as the scanner advances and gives a bar proportional to real work.
+`-v` reports source lines, imports, user functions, and module size after a
+successful compile.
 
 Command-line errors, such as an unrecognized option, carry the `Error:` tag
 but no source position, since none applies.
@@ -128,12 +136,15 @@ Keeping diagnostics off stdout is not cosmetic. The compiler writes the
 compiled module to stdout, so a message on the wrong stream corrupts the
 output rather than merely looking untidy.
 
-Three tests guard this. `negative/n010_error_format` matches an anchored
+Six tests guard this. `negative/n010_error_format` matches an anchored
 `^Error: 9:13: undeclared identifier: BOGUS$`, which pins the tag, the
 position, and the separators. `cli/c001_unknown_option` runs the compiler
 with a bad flag and requires a nonzero exit, the tagged message on stderr,
 and an empty stdout. `positive/t100_warning_unknown_directive` pins the
-warning line and checks that compilation still succeeds.
+warning line and checks that compilation still succeeds. `cli/c002`, `c003`,
+and `c004` cover the two progress forms and the `-v` summary; each one also
+runs `wasm-validate` on stdout, so a diagnostic leaking onto the wrong stream
+fails the test.
 
 Positive tests without a `.warning` file must compile with nothing on
 stderr at all, so a stray diagnostic fails the suite rather than passing
