@@ -1174,10 +1174,16 @@ it, which is why these surfaced now rather than from a failing test.
       now documents the alias behavior, so this is a deliberate decision either
       way, not a silent contradiction. Enforcing would mean range checks on
       assignment under `{$R+}` and a storage-size decision for records.
-- [ ] Conformance statement: what a conforming implementation must do, what is
-      an error, what is undefined.
-- [ ] Stability policy: CalVer 26.x is beta, 1.0 is the first stable series,
-      breaking changes announced one release ahead.
+- [x] Conformance statement: what a conforming implementation must do, what is
+      an error, what is undefined. Reference gained a "Conformance" section with
+      requirements, the error/trap/undefined distinction, and a minimum-limits
+      table. Every limit in the table was verified by compiling at and over it.
+- [x] Stability policy: CalVer 26.x is beta, 1.0 is the first stable series,
+      breaking changes announced one release ahead. Reference gained a
+      "Versioning and Stability" section naming what the 1.x promise covers
+      (syntax and semantics, diagnostic format, CLI, module contract) and what
+      it does not (emitted bytes, internal helpers, performance, deferred
+      features).
 - [ ] Verify the EBNF appendix matches the prose and is actually LL(1).
 
 **Exit:** no TODO markers in the reference; every gap above has an explicit

@@ -16,6 +16,28 @@ Compact Pascal is a new language in the Pascal family, rooted in ISO 7185 (Stand
 
 This is a living document. The version number follows [Calendar Versioning](https://calver.org/) using the YY.MM.minor scheme. The minor version increments for changes within the same month.
 
+## Versioning and Stability
+
+**Compact Pascal is pre-1.0 and the language is not yet stable.** The 26.x series is a beta. Anything in this document may change, including syntax and semantics of features that already work, and changes may arrive without a deprecation period. Pin an exact version if you depend on current behavior.
+
+Version 1.0 will be the first stable release. From 1.0 onward the following are covered by a compatibility promise for the life of the 1.x series:
+
+- **Language syntax and semantics.** A program that compiles under 1.x continues to compile, and continues to mean the same thing, under every later 1.x. See [Defined and Undefined Behavior](#defined-and-undefined-behavior) for what "the same thing" covers: behavior this document leaves undefined may change between any two releases.
+- **The diagnostic format.** The tags and their layouts, so host tooling that parses compiler output keeps working. See [Compiler Diagnostics](#compiler-diagnostics).
+- **The command-line interface.** Existing flags keep their meaning. New flags may be added.
+- **The module contract.** The `_start` export, the WASI imports the compiler emits and the conditions under which it emits them, and the linear memory layout that `{$MEMORY}`, `{$MAXMEMORY}`, and `{$STACKSIZE}` control.
+
+These are explicitly **not** covered, and may change in any release including a patch:
+
+- **The exact bytes emitted.** Two compiler versions given identical source may produce different modules. Only the behavior of the compiled program is promised, not its encoding, so byte-for-byte reproducibility holds within one compiler version, not across versions.
+- **Internal helper functions.** Their names, indices, and presence are an implementation detail, even though they appear in the module's function table.
+- **Performance,** of the compiler or of compiled code.
+- **Anything this document marks as a future extension or as deferred.**
+
+Breaking changes to the covered surface require a major version. Where a change is known in advance, it is announced at least one release before it lands, and the outgoing behavior keeps working with a `Warning:` diagnostic during that release.
+
+The embedding libraries version independently of the language and carry their own stability statements. A stable language does not imply a stable embedding API.
+
 ## Source Encoding
 
 Source files must be encoded in **UTF-8**. The compiler treats source as a sequence of bytes; only ASCII-range bytes (0x00–0x7F) are significant to the lexer. Bytes 0x80–0xFF may appear in string literals and comments and are preserved verbatim. The compiler does not validate, decode, or normalize UTF-8 sequences.
@@ -733,6 +755,58 @@ Range checking is off by default and enabled with `{$R+}`.
 - **A `case` selector matching no branch, with no `else`, falls through**
   silently to the statement after `end`. This is Turbo Pascal behavior and is
   intentional; ISO 7185 makes it an error.
+
+## Conformance
+
+This section states what an implementation must do to call itself Compact Pascal. It exists so that a second implementation is possible, and so that a program can say what it relies on.
+
+### Requirements
+
+A conforming implementation:
+
+- **Accepts every program this document defines** and rejects every program this document says is an error. Where the document says an error is reported at a particular point, such as a `forward` header mismatch at the definition, it is reported there.
+- **Emits WASM 1.0 (MVP)** with no post-MVP proposals. A module it produces runs on any compliant WASM 1.0 runtime.
+- **Uses WASI preview 1** for I/O and termination, emitting only the imports listed under [Implicit WASI Imports](#implicit-wasi-imports), and only when the program uses the corresponding feature. A program using no I/O and no `halt` must produce a module with no imports.
+- **Writes the compiled module to standard output and every diagnostic to standard error**, in the formats given under [Compiler Diagnostics](#compiler-diagnostics). Nothing else may reach standard output.
+- **Halts on the first error** with a nonzero exit status. Error recovery and multi-error reporting are not permitted, because a program's meaning after the first error is not defined.
+- **Is deterministic.** The same source, the same flags, and the same implementation version produce byte-identical output. Nothing may depend on the time, the filesystem, the environment, or address-space layout.
+
+Two conforming implementations may produce different modules from the same source. Only observable program behavior is required to agree.
+
+### Errors and Undefined Behavior
+
+The document uses three categories, and the difference matters:
+
+- **An error** must be detected and reported, and compilation must stop. Example: assigning to a `const` parameter.
+- **A trap** is detected at runtime and terminates the program. Traps are not catchable. Example: division by zero, or an out-of-range array index under `{$R+}`.
+- **Undefined behavior** is not detected. The implementation may do anything, and different implementations may differ. Example: reading a local before assigning it, or an out-of-range array index under `{$R-}`.
+
+A program that stays clear of undefined behavior and does not exceed the limits below behaves identically on every conforming implementation and every compliant runtime. That is the portability guarantee, and it is the whole of it.
+
+### Minimum Limits
+
+An implementation may impose limits, but not below these. A program staying within them is portable; the reference compiler's own limits are listed for reference and are what a program can currently rely on.
+
+| Resource | Minimum | Reference compiler |
+|---|---|---|
+| Live symbols | 1024 | 1024 |
+| Nested scopes | 32 | 32 |
+| User-defined procedures and functions | 256 | 256 |
+| Distinct named types | 256 | 256 |
+| Record fields, all records combined | 512 | 512 |
+| Parameters per procedure or function | 16 | 16 |
+| Procedure nesting depth | 8 | 8 |
+| Nested `with` statements | 8 | 8 |
+| Exported symbols | 32 | 32 |
+| Conditional symbols defined at once | 32 | 32 |
+| `{$IFDEF}` nesting depth | 8 | 8 |
+| Operands in one string concatenation | 16 | 17 |
+| String length | 255 | 255 |
+| Set base type values | 256 | 256 |
+
+Exceeding a limit is an error and must be reported as one. It is never undefined behavior.
+
+Where the two columns differ, a program using the larger value compiles today but is not portable. The concatenation diagnostic counts saved pieces rather than operands, so it reports a maximum of 16 while accepting 17 operands; the operand count is what a program author sees, and it is what the table gives.
 
 ## Compiler Directives
 
