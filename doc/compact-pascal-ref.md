@@ -33,10 +33,12 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 ### Types
 
 - `integer` — signed 32-bit integer (mapped to WASM `i32`).
-- `byte` — unsigned 8-bit integer (0..255).
-- `shortint` — signed 8-bit integer (-128..127).
-- `word` — unsigned 16-bit integer (0..65535).
+- `byte` — nominally an unsigned 8-bit integer (0..255).
+- `shortint` — nominally a signed 8-bit integer (-128..127).
+- `word` — nominally an unsigned 16-bit integer (0..65535).
 - `longint` — signed 32-bit integer.
+
+  The four names above are currently aliases for `integer`: all are 32-bit, `sizeof` reports 4, and the nominal ranges are not enforced. See [Types and Conversion](#types-and-conversion).
 - `boolean` — `true` or `false`.
 - `char` — single byte (0..255). Represents one byte of text, not a Unicode codepoint. See [Source Encoding](#source-encoding).
 - `string` — TP-style short string (length byte + up to 255 characters). `string[n]` for a maximum length of `n`. See [String Representation](#string-representation).
@@ -637,6 +639,113 @@ If the program reaches the final `end.` without calling `halt`, execution return
 ### Nested Procedures
 
 Nested procedures that access enclosing scope variables use Dijkstra's display technique. Eight WASM globals (`display[0]` through `display[7]`) hold frame pointers for each nesting level. Accessing an upvalue at any depth is O(1) — two loads. Top-level procedures emit no display code. Maximum nesting depth is 8.
+
+## Defined and Undefined Behavior
+
+Every rule below was verified against the compiler rather than inferred from the
+implementation's intent. Where the compiler does not currently do what this
+section says it should, that is called out explicitly.
+
+### Evaluation Order
+
+Binary operands are evaluated **left to right**. In `F + G`, `F` runs first.
+Argument lists are likewise evaluated left to right. Programs may rely on this.
+
+`and then` and `or else` short-circuit and are the only operators that may skip
+evaluating an operand. Plain `and` and `or` always evaluate both sides, as in
+ISO 7185.
+
+### Integer Arithmetic
+
+- **Overflow wraps** on two's complement, silently, by default. `maxint + 1` is
+  `-2147483648`. With `{$Q+}` an overflowing `+`, `-`, or `*` traps instead.
+- **Division by zero traps**, always, regardless of directive settings. `div`
+  and `mod` both trap on a zero divisor. This is a WASM trap, not a catchable
+  Pascal error, and terminates the program.
+- **`div` truncates toward zero.** `7 div 2 = 3`, `-7 div 2 = -3`.
+- **`mod` takes the sign of the dividend.** `7 mod 2 = 1`, `-7 mod 2 = -1`,
+  `7 mod -2 = 1`. This is C's `%`, not the always-non-negative modulus of ISO
+  7185, where `mod` with a negative left operand is an error.
+
+### Initialization
+
+- **Global variables are zero.** The data segment is zeroed, so an integer
+  global reads 0, a boolean reads `false`, and a string reads as empty before
+  any assignment.
+- **Local variables are arbitrary.** Locals live in the stack frame, which is
+  not cleared on entry. A local holds whatever the previous call at that depth
+  left behind, which is reproducible but meaningless. Reading a local before
+  assigning it is a bug the language does not detect.
+- **An unassigned function result is zero.** If a function returns without
+  assigning its result, the caller receives 0, `false`, or an empty string
+  rather than arbitrary data. This is a consequence of WASM locals being
+  zero-initialized and may be relied upon, though assigning the result on every
+  path is better style.
+
+### Types and Conversion
+
+- `char` converts to `integer` implicitly in an assignment or expression, and
+  `boolean` converts to `integer` as 0 or 1. Conversion in the other direction
+  requires an explicit cast: `char(65)`, `boolean(1)`.
+- `chr(n)` **truncates to the low byte**. `chr(300)` is `chr(44)`. It does not
+  trap and is not checked under `{$R+}`.
+- **`byte`, `word`, `shortint`, and `longint` are aliases for `integer`.** They
+  are 32-bit, `sizeof` returns 4 for each, and assigning out of the nominal
+  range neither truncates nor errors: `b: byte; b := 300` leaves `b` as 300,
+  even under `{$R+}`. The names document intent and aid porting; they do not
+  currently constrain values. See [Types](#types), which describes the nominal
+  ranges those names imply.
+
+### Scope and Aliasing
+
+- **An inner declaration shadows an outer one** of the same name for the rest of
+  the inner scope. Shadowing is legal and silent.
+- **`var` parameters may alias each other and may alias globals.** The language
+  does not detect it. Assignments through aliased parameters take effect in
+  order, so `Bump(g, g)` with a body of `a := a + 1; b := b + 10` leaves `g` at
+  11, not 1 or 10. Code that must not alias should say so in its documentation.
+
+### Strings
+
+- **Assignment truncates silently.** Assigning a longer string to `string[n]`
+  keeps the first `n` bytes and sets the length accordingly. No error, no
+  diagnostic, at any directive setting.
+- **Comparison is lexicographic over unsigned bytes.** `'abc' < 'abd'`. When one
+  string is a prefix of the other, the shorter sorts first: `'ab' < 'abc'`, and
+  the empty string sorts before everything. Because comparison is by byte,
+  ordering follows ASCII for ASCII text, so `'Z' < 'a'`, and UTF-8 text sorts by
+  code unit rather than by any linguistic collation.
+
+### Range Errors
+
+Range checking is off by default and enabled with `{$R+}`.
+
+- **An out-of-range array index is undefined behavior** with `{$R-}`. The access
+  is performed at the computed address. Depending on how far out of range it is,
+  the program may read or write an unrelated variable and continue with
+  corrupted data, or fault if the address leaves linear memory. With `{$R+}` it
+  traps.
+- **A `case` selector matching no branch, with no `else`, falls through**
+  silently to the statement after `end`. This is Turbo Pascal behavior and is
+  intentional; ISO 7185 makes it an error.
+
+### Known Deviations
+
+The following are compiler defects, not design decisions. They are recorded here
+because the behavior is observable and a program may encounter it before the fix
+lands.
+
+- **Set membership with an out-of-range ordinal gives a wrong answer rather than
+  `false`.** For a set with a 32-bit representation the test shifts by the
+  ordinal, and WASM masks a shift count to five bits, so the ordinal aliases to
+  `ordinal mod 32`. With `s: set of 0..7` holding `[1,3]`, the expression
+  `99 in s` yields `true` because 99 aliases to bit 3. It should yield `false`.
+- **A `forward` declaration whose header disagrees with the definition is not
+  diagnosed.** A differing parameter count produces a module that fails WASM
+  validation, so the error surfaces from the runtime rather than the compiler. A
+  differing return type is accepted silently and the caller reads the result as
+  the declared type. The reference requires the full header to be repeated;
+  the compiler does not yet check that it matches.
 
 ## Compiler Directives
 

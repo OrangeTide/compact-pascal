@@ -1140,10 +1140,37 @@ exist, a spec change is a breaking change.
       codegen (`cpas.pas:7743`), why that blocks caller-allocated temporaries,
       and what Phase D does about it. In the reference under Runtime Model /
       Stack, with the absence of stack overflow detection stated alongside it.
-- [ ] Specify the currently-unstated semantics: integer overflow, uninitialized
+- [x] Specify the currently-unstated semantics: integer overflow, uninitialized
       variable contents, implicit conversions, identifier shadowing, parameter
       aliasing, forward-declaration mismatch, string comparison ordering, set
-      bound errors.
+      bound errors. Reference gained a "Defined and Undefined Behavior" section;
+      every rule was verified against the compiler, not inferred. Turned up four
+      defects, one fixed and three open. See below.
+
+**Defects found while verifying semantics.** Documenting behavior meant running
+it, which is why these surfaced now rather than from a failing test.
+
+- [x] `writeln` and `str` formatted -2147483648 as digit characters below `'0'`.
+      Both formatters negated a negative value first, and `0 - INT_MIN`
+      overflows back to itself. Fixed in a1fc117; both now carry a sign
+      multiplier instead. Test t101.
+- [ ] Set membership with an out-of-range ordinal returns a wrong answer, not
+      `false`. WASM masks a shift count to five bits, so with `s: set of 0..7`
+      holding `[1,3]`, `99 in s` aliases to bit 3 and yields `true`. Needs a
+      range test before the shift, or a masked ordinal compared against the set
+      bounds.
+- [ ] A `forward` header that disagrees with the definition is not diagnosed. A
+      differing parameter count emits a module that fails WASM validation, so
+      the error arrives from the runtime. A differing return type is accepted
+      silently and the caller reads the result as the declared type. The
+      reference already requires the full header to be repeated; the compiler
+      needs to compare it.
+- [ ] Decide whether `byte`, `word`, and `shortint` should enforce their nominal
+      ranges. Today all four narrow names are aliases for `integer`: `sizeof`
+      is 4 and `b: byte; b := 300` holds 300 even under `{$R+}`. The reference
+      now documents the alias behavior, so this is a deliberate decision either
+      way, not a silent contradiction. Enforcing would mean range checks on
+      assignment under `{$R+}` and a storage-size decision for records.
 - [ ] Conformance statement: what a conforming implementation must do, what is
       an error, what is undefined.
 - [ ] Stability policy: CalVer 26.x is beta, 1.0 is the first stable series,
