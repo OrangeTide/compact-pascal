@@ -437,5 +437,5 @@ The compiler core (steps 1-5) is roughly 10 Pascal units totalling ~2,600 lines 
   *Software — Practice and Experience*, Vol. 13, pp. 273–285, 1983.
 - M.P. Atkinson, W.P. Cockshott, K.J. Chisholm, "NEPAL — The New Edinburgh Persistent
   Algorithmic Language," DATABASE Infotech State of the Art Report, 9,8 pp. 299–318, 1982.
-- Local papers: ~/Documents/Papers/PS-Algol/ (ABC+83b.pdf, Algorithms_for_a_Persistent_Heap.pdf)
-- Local implementation: ~/Documents/Papers/PS-Algol/ibmatsalgol.zip
+- Papers held locally: ABC+83b.pdf, Algorithms_for_a_Persistent_Heap.pdf
+- Implementation held locally: ibmatsalgol.zip (IBM AT S-algol)
