@@ -76,7 +76,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 # ── Top-level targets ────────────────────────────────────────────
 
 .PHONY: help all all-c all-zig all-rust pdf html clean clean-c clean-zig clean-rust
-.PHONY: bootstrap test check-paths deploy-playground bump-version
+.PHONY: bootstrap test check-private deploy-playground bump-version
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -92,7 +92,7 @@ help:
 	@echo "  bootstrap            Rebuild snapshot/compiler.wasm from source (requires fpc)"
 	@echo "  test                 Run compiler test suite (requires fpc + WASM runtime)"
 	@echo "  deploy-playground    Copy compiler.wasm into pages/playground/"
-	@echo "  check-paths          Fail if tracked files record local filesystem paths"
+	@echo "  check-private        Fail if tracked files leak local paths or private info"
 	@echo "  bump-version VERSION=YY.MM.PATCH"
 	@echo "                       Update version in compiler and docs, commit"
 
@@ -214,9 +214,9 @@ $(SNAPSHOT): $(CPAS_BIN) $(CPAS_SRC)
 test: $(CPAS_BIN)
 	bash compiler-tests/run-tests.sh
 
-# Fail if a tracked file records a path from a contributor's own machine.
-check-paths:
-	@bash compiler-tests/check-no-local-paths.sh
+# Fail if a tracked file leaks private info (local paths, personal domains).
+check-private:
+	@bash compiler-tests/check-private-info.sh
 
 # ── Deploy ───────────────────────────────────────────────────────
 
