@@ -734,19 +734,6 @@ Range checking is off by default and enabled with `{$R+}`.
   silently to the statement after `end`. This is Turbo Pascal behavior and is
   intentional; ISO 7185 makes it an error.
 
-### Known Deviations
-
-The following are compiler defects, not design decisions. They are recorded here
-because the behavior is observable and a program may encounter it before the fix
-lands.
-
-- **A `forward` declaration whose header disagrees with the definition is not
-  diagnosed.** A differing parameter count produces a module that fails WASM
-  validation, so the error surfaces from the runtime rather than the compiler. A
-  differing return type is accepted silently and the caller reads the result as
-  the declared type. The reference requires the full header to be repeated;
-  the compiler does not yet check that it matches.
-
 ## Compiler Directives
 
 Compiler directives use the same syntax as Free Pascal: `{$DIRECTIVE}` or `{$DIRECTIVE VALUE}`. They appear inside comments and control compiler behavior. The alternative syntax `(*$DIRECTIVE*)` is also accepted.
@@ -1319,6 +1306,8 @@ end;
 ```
 
 This differs from Turbo Pascal, where the forward body omits the parameter list. Compact Pascal follows the IP Pascal convention of repeating the full header, which keeps the parameter list visible at the definition site and avoids the need to look up the forward declaration to understand the body's signature.
+
+The repeated header must **match** the forward declaration: same parameter count, same parameter types, same `var` and `const` markers, and the same return type. A procedure may not be defined as a function, or the reverse. Any disagreement is a compile error at the definition.
 
 ```ebnf
 FormalParams     = '(' FormalParam { ';' FormalParam } ')' .

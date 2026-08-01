@@ -337,6 +337,8 @@ type
     nparams: longint;     { number of WASM parameters }
     varParams: array[0..15] of boolean; { which params are var (by-reference) }
     constParams: array[0..15] of boolean; { which params are const (string by-ref, read-only) }
+    paramTyp: array[0..15] of longint;    { param type tags, for forward-header checking }
+    paramTypeIdx: array[0..15] of longint; { types[] index per param, -1 for simple }
   end;
 
 { ---- Global Variables ---- }
@@ -6788,6 +6790,7 @@ var
   funcIdx: longint;
   retTyp: longint;
   retTypSym: longint;
+  mismatchA, mismatchB: string[11];  { forward-header mismatch messages }
   nlocals: longint;
   nparams: longint;
   typIdx: longint;
@@ -6984,6 +6987,8 @@ begin
     begin
       funcs[numFuncs].varParams[i] := false; { imports have no var params }
       funcs[numFuncs].constParams[i] := false;
+      funcs[numFuncs].paramTyp[i] := paramTypes[i];
+      funcs[numFuncs].paramTypeIdx[i] := paramTypeIdx[i];
     end;
 
     { Add symbol - offset is the import index (absolute function index) }
@@ -7030,6 +7035,8 @@ begin
     for i := 0 to np - 1 do begin
       funcs[numFuncs].varParams[i] := paramIsVar[i];
       funcs[numFuncs].constParams[i] := paramIsConst[i];
+      funcs[numFuncs].paramTyp[i] := paramTypes[i];
+      funcs[numFuncs].paramTypeIdx[i] := paramTypeIdx[i];
     end;
 
     { Add symbol }
@@ -7053,6 +7060,43 @@ begin
     funcIdx := syms[sym].size; { funcs[] index }
     if funcs[funcIdx].bodyStart >= 0 then
       Error('duplicate definition of ' + procName);
+
+    { The header must repeat the forward declaration exactly. Without this
+      check a differing parameter count emits a module that fails WASM
+      validation, and a differing return type is accepted silently, leaving
+      the caller to read the result as whatever the forward declared. }
+    if funcs[funcIdx].bodyStart = -2 then
+      Error('external ' + procName + ' cannot have a body');
+    if isFunc <> (syms[sym].kind = skFunc) then begin
+      if isFunc then
+        Error(procName + ' was declared as a procedure, defined as a function')
+      else
+        Error(procName + ' was declared as a function, defined as a procedure');
+    end;
+    if np <> funcs[funcIdx].nparams then begin
+      str(funcs[funcIdx].nparams, mismatchA);
+      str(np, mismatchB);
+      Error('header of ' + procName + ' does not match its forward declaration: '
+            + mismatchA + ' parameters declared, ' + mismatchB + ' defined');
+    end;
+    for i := 0 to np - 1 do begin
+      str(i + 1, mismatchA);
+      if paramTypes[i] <> funcs[funcIdx].paramTyp[i] then
+        Error('parameter ' + mismatchA + ' of ' + procName +
+              ' has a different type than its forward declaration');
+      if paramTypeIdx[i] <> funcs[funcIdx].paramTypeIdx[i] then
+        Error('parameter ' + mismatchA + ' of ' + procName +
+              ' has a different type than its forward declaration');
+      if paramIsVar[i] <> funcs[funcIdx].varParams[i] then
+        Error('parameter ' + mismatchA + ' of ' + procName +
+              ' differs in var/const from its forward declaration');
+      if paramIsConst[i] <> funcs[funcIdx].constParams[i] then
+        Error('parameter ' + mismatchA + ' of ' + procName +
+              ' differs in var/const from its forward declaration');
+    end;
+    if isFunc and (retTyp <> syms[sym].typ) then
+      Error('return type of ' + procName +
+            ' does not match its forward declaration');
   end else begin
     { New declaration - allocate slot }
     slot := numDefinedFuncs;
@@ -7081,6 +7125,8 @@ begin
     for i := 0 to np - 1 do begin
       funcs[numFuncs].varParams[i] := paramIsVar[i];
       funcs[numFuncs].constParams[i] := paramIsConst[i];
+      funcs[numFuncs].paramTyp[i] := paramTypes[i];
+      funcs[numFuncs].paramTypeIdx[i] := paramTypeIdx[i];
     end;
     numFuncs := numFuncs + 1;
 

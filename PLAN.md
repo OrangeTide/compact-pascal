@@ -1161,12 +1161,13 @@ it, which is why these surfaced now rather than from a failing test.
       masking the result with an unsigned range test, which also rejects
       negatives. Branchless, and the large-set load can no longer leave the
       set. Test t102.
-- [ ] A `forward` header that disagrees with the definition is not diagnosed. A
-      differing parameter count emits a module that fails WASM validation, so
-      the error arrives from the runtime. A differing return type is accepted
-      silently and the caller reads the result as the declared type. The
-      reference already requires the full header to be repeated; the compiler
-      needs to compare it.
+- [x] A `forward` header that disagreed with the definition was not diagnosed.
+      A differing parameter count emitted a module that failed WASM validation;
+      a differing return type was accepted silently. TFuncEntry now retains
+      each parameter's type and type index alongside the var/const flags, and
+      the definition compares parameter count, types, var/const markers, return
+      type, and procedure-versus-function against the forward. Tests n011, n012.
+      Both remaining semantics defects are now closed.
 - [ ] Decide whether `byte`, `word`, and `shortint` should enforce their nominal
       ranges. Today all four narrow names are aliases for `integer`: `sizeof`
       is 4 and `b: byte; b := 300` holds 300 even under `{$R+}`. The reference
