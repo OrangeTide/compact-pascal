@@ -18,7 +18,7 @@ Each of these is workable today by filling the array by index at startup (`InitF
 
 A working Light's Out puzzle that runs in a browser, written in Compact Pascal and compiled to WASM, using JavaScript only as a thin host for canvas, audio, and pointer events. The example demonstrates the full Phase 1 FFI pipeline: `{$IMPORT}`, `{$EXPORT}`, arrays, constants, and a frame-driven game loop. Target reader: someone skimming the repo to decide whether Compact Pascal is real.
 
-Based on Jon's 2009 X11/Cairo implementation at [lightout.git](git//ocelot.rm-f.net/~jon/game/lightout.git). This browser port drops the dirty-rect tracking, shaped-window masks, and keyboard input — the game loop shrinks by roughly half.
+Based on an earlier X11/Cairo implementation from 2009. This browser port drops the dirty-rect tracking, shaped-window masks, and keyboard input — the game loop shrinks by roughly half.
 
 ## Scope
 

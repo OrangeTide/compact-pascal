@@ -2,8 +2,10 @@
 # Fail if any tracked file records a path from a contributor's own machine.
 #
 # Absolute home directories and tilde paths identify whoever committed them and
-# are meaningless to everyone else. Describe the resource instead: "held
-# locally: foo.pdf" rather than "~/Documents/Papers/foo.pdf".
+# are meaningless to everyone else. Name the resource instead of saying where it
+# sits: "held locally: foo.pdf" rather than a path under someone's home
+# directory. (No literal example here: this script greps tracked files, itself
+# included, so an example would trip its own check.)
 #
 # Run standalone or via `make check-paths`. Intended to be wired into CI.
 #
