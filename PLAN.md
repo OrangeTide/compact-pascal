@@ -1130,10 +1130,23 @@ week three.
 - [ ] Pin `fpc`, `wasmtime`, and `wasm-validate` versions. A `-Mtp` regression
       in a minor fpc release would stall the entire pipeline silently.
 - [ ] Branch protection: no merge without green CI.
+- [ ] Run `make check-private` in CI so no commit can add a local filesystem
+      path. Blocking, and cheap: it is a `git grep` over tracked files.
+- [ ] Decide how the personal layer of that guard reaches CI, or accept that
+      it does not. `compiler-tests/check-private-info.sh` reads per-clone
+      patterns from `.git/info/private-patterns`, which is deliberately never
+      committed: writing a personal domain into a tracked file in order to
+      block it would publish the string it is meant to keep out. CI therefore
+      runs the generic layer only unless the list is injected from a repository
+      secret. Recommendation: leave CI generic-only. The personal layer catches
+      a mistake on the machine that would make it, which is where the mistake
+      happens; a secret buys little and adds a way for the pattern list itself
+      to leak through CI logs.
 - [ ] Publish `ROADMAP.md` (public; `PLAN.md` is the working document) and fix
       the README, which still advertises Rust + Zig + C embedding.
 
-**Exit:** a commit that breaks the fixpoint by one byte cannot be merged.
+**Exit:** a commit that breaks the fixpoint by one byte cannot be merged, and
+one that adds a home-directory path fails the same way.
 
 ### Phase D: Runtime safety instrumentation — 1 week
 
