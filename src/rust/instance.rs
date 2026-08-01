@@ -377,25 +377,30 @@ mod tests {
         Ok(())
     }
 
+    /// The snapshot once hung compiling any source carrying both {$IMPORT}
+    /// and `external`, so the FFI tests below shelled out to the native
+    /// compiler instead. The cause was for-loop `continue` codegen dropping
+    /// the increment, fixed in ee481a9; it was never an I/O problem. This
+    /// test pins the wasmi path so the workaround cannot creep back.
+    #[test]
+    fn snapshot_compiles_import_bearing_source() {
+        let source = r#"program T;
+{$IMPORT 'host' log}
+procedure Log(x: integer); external;
+begin
+  Log(42);
+end.
+"#;
+        let wasm = compile_source(source);
+        assert!(!wasm.is_empty(), "compiler produced no output");
+        assert_eq!(&wasm[0..4], b"\0asm", "output is not a WASM module");
+    }
+
     fn compile_source(source: &str) -> Vec<u8> {
         let compiler = crate::compiler::Compiler::new();
         compiler.compile(source).expect("compilation failed").wasm
     }
 
-    fn compile_native(source: &str) -> Vec<u8> {
-        use std::process::{Command, Stdio};
-        use std::io::Write;
-        let mut child = Command::new(env!("CARGO_MANIFEST_DIR").to_string() + "/compiler/cpas")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("native compiler not found — run: fpc -Mtp compiler/cpas.pas");
-        child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "native compiler failed: {}", String::from_utf8_lossy(&output.stderr));
-        output.stdout
-    }
 
     #[test]
     fn test_builder_no_imports() -> Result<(), RuntimeError> {
@@ -412,7 +417,7 @@ procedure MyProc(x: integer); external;
 begin
     MyProc(42)
 end."#;
-        let wasm = compile_native(source);
+        let wasm = compile_source(source);
 
         let called = Arc::new(std::sync::Mutex::new(None));
         let called2 = called.clone();
@@ -440,7 +445,7 @@ begin
     r := AddTen(5);
     writeln(r)
 end."#;
-        let wasm = compile_native(source);
+        let wasm = compile_source(source);
 
         let mut builder = InstanceBuilder::new()?;
         builder.register_import("host", "addTen", 1, true, |args| {
@@ -462,7 +467,7 @@ begin
     r := Add3(1, 2, 3);
     writeln(r)
 end."#;
-        let wasm = compile_native(source);
+        let wasm = compile_source(source);
 
         let mut builder = InstanceBuilder::new()?;
         builder.register_import("host", "add3", 3, true, |args| {
@@ -530,7 +535,7 @@ begin
 end;
 begin
 end."#;
-        let wasm = compile_native(source);
+        let wasm = compile_source(source);
 
         let mut builder = InstanceBuilder::new()?;
         builder.register_import("host", "hostAdd", 2, true, |args| {
@@ -545,3 +550,4 @@ end."#;
         Ok(())
     }
 }
+

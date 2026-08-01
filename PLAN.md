@@ -673,7 +673,7 @@ This is simpler than the earlier `fpRead`/`fpWrite` via `BaseUnix` design: no `u
 
 **Zig WASM runtime: wasm3 via C interop.** wasm3 (C library) chosen for Zig side. Zig-native interpreters are immature. Zig's `@cImport` makes C interop trivial. Parallels Rust's wasmi choice. **Risk:** wasm3 development has slowed significantly. If the project becomes unmaintained, alternatives include writing a minimal WASM interpreter in Zig or switching to another C-based runtime.
 
-**WASM snapshot hangs on `{$IMPORT}` + `external` sources.** The WASM compiler snapshot (compiler.wasm running in wasmi) enters an infinite computation loop when compiling Pascal sources that contain both `{$IMPORT 'module' name}` and `procedure/function ... external;`. No `fd_read` calls occur — the hang is pure computation, not an I/O stall. The native FPC-compiled compiler handles the same sources correctly. Export-only sources (`{$EXPORT}`) compile fine through the WASM snapshot. Root cause is unknown but likely in the FPC RTL's WASI text-mode I/O path. **Workaround:** Rust FFI tests that need import-bearing WASM use `compile_native()` which shells out to the FPC-built `compiler/cpas` binary. This will be resolved when the compiler migrates to `BlockRead`/`BlockWrite` (binary I/O), eliminating the FPC RTL text-mode dependency.
+**WASM snapshot hung on `{$IMPORT}` + `external` sources. RESOLVED.** The WASM compiler snapshot entered an infinite computation loop compiling any source carrying both `{$IMPORT 'module' name}` and `procedure/function ... external;`. No `fd_read` calls occurred, so it was pure computation rather than an I/O stall, and export-only sources compiled fine. **The root cause was not the FPC RTL, and not I/O at all.** It was the for-loop `continue` codegen bug fixed in `ee481a9`: `continue` branched past the loop increment, so any `for` loop containing it ran forever. Import handling reaches such a loop; export handling does not, which is why only import-bearing sources hung. Confirmed by bisecting the checked-in snapshots: the snapshot at `fff708d`, the commit that recorded this finding, still hangs on a minimal import source and compiles an export-only source fine, exactly as described. The snapshot at `ee481a9`, the very next commit, compiles both. The planned `BlockRead`/`BlockWrite` migration was chasing the wrong hypothesis and is not needed for this. The `compile_native` workaround in the Rust tests is removed; all four FFI tests now go through wasmi, and `snapshot_compiles_import_bearing_source` pins it.
 
 **Dynamic allocation: deferred to Phase 6.** `New`/`Dispose` and heap allocation deferred from Phase 1 to keep the core compiler minimal. Phase 1 uses stack-only allocation. Baker's Treadmill GC is a good fit for WASM (non-moving, incremental) but requires a shadow stack for root tracking — deferred further until after `New`/`Dispose` is working.
 
@@ -1224,14 +1224,22 @@ it, which is why these surfaced now rather than from a failing test.
 **Exit:** no TODO markers in the reference; every gap above has an explicit
 rule; an external reviewer reads it end to end with no open questions.
 
-### Phase B: FFI snapshot hang — 1.5 weeks, hard cap
+### Phase B: FFI snapshot hang — DONE, well inside the 1.5-week cap
 
-- [ ] Reproduce with a minimal `{$IMPORT}` + `external` source.
-- [ ] Validate the text-mode I/O hypothesis by diffing the WASI path between
-      the FPC-built and WASM-built compilers.
-- [ ] Migrate compiler I/O to `BlockRead`/`BlockWrite` (binary), removing the
-      FPC RTL text-mode dependency.
-- [ ] Regression test `c006_import_external` compiling in under 5 seconds.
+- [x] Reproduce with a minimal `{$IMPORT}` + `external` source. Does not
+      reproduce on any current snapshot, under wasmtime or wasmi, in any of
+      six source shapes tried.
+- [x] Validate the text-mode I/O hypothesis. **Rejected.** The snapshot is
+      built by cpas, not fpc, so it contains no FPC RTL to blame. Bisecting the
+      checked-in snapshots put the fix at `ee481a9`, the for-loop `continue`
+      codegen fix, and the snapshot one commit earlier reproduces the hang
+      exactly as recorded.
+- [x] ~~Migrate compiler I/O to `BlockRead`/`BlockWrite`~~. Not needed for this
+      defect. Worth doing on its own merits some day, but it is not Phase B and
+      should not be justified by this finding.
+- [x] Remove the `compile_native` workaround. All four Rust FFI tests now
+      compile through wasmi; `snapshot_compiles_import_bearing_source` pins the
+      scenario so the workaround cannot return.
 
 **Exit:** the WASM snapshot compiles import-bearing sources in under 5s;
 `compile_native()` is no longer needed as a workaround in the Rust tests.
