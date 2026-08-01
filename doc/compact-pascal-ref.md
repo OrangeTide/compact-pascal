@@ -1255,17 +1255,34 @@ ConstDef         = Identifier '=' ConstExpr ';'
                  | Identifier ':' Type '=' Initializer ';' .
                  (* First form is an untyped constant.
                     Second form is a typed constant / initialized variable.
-                    ConstExpr is evaluated at compile time. *)
+                    ConstExpr is evaluated at compile time.
+                    LL(2): both alternatives begin with Identifier; peek for
+                    '=' versus ':' to choose. *)
 
 Initializer      = ConstExpr
                  | ArrayInitializer
-                 | StringLiteral .
-                 (* StringLiteral is accepted as a shortcut for
-                    array[lo..hi] of char; its length must equal hi-lo+1. *)
+                 | RecordInitializer
+                 | SetInitializer
+                 | STRING_LITERAL .
+                 (* STRING_LITERAL is accepted as a shortcut for
+                    array[lo..hi] of char; its length must equal hi-lo+1.
+                    LL(2): ArrayInitializer and RecordInitializer both begin
+                    with '('; peek for Identifier ':' to tell a record from an
+                    array. *)
 
 ArrayInitializer = '(' Initializer { ',' Initializer } ')' .
                  (* Element count must equal the array's declared length.
                     Nested arrays use nested parenthesized initializers. *)
+
+RecordInitializer = '(' FieldInit { ';' FieldInit } [ ';' ] ')' .
+FieldInit        = Identifier ':' Initializer .
+                 (* Fields must appear in declaration order and every field of
+                    the fixed part must be given. A variant record is
+                    initialized through its tag field followed by the fields of
+                    the selected variant. *)
+
+SetInitializer   = '[' [ SetElem { ',' SetElem } ] ']' .
+SetElem          = ConstExpr [ '..' ConstExpr ] .
 
 ConstExpr        = Expression .
                  (* A ConstExpr is syntactically identical to Expression but
@@ -1308,18 +1325,34 @@ Type             = SimpleType
 SimpleType       = TypeIdentifier
                  | EnumType
                  | SubrangeType .
+                 (* LL(2): TypeIdentifier and SubrangeType both begin with
+                    Identifier. Peek past it for '..' (subrange) or '(' (typed
+                    subrange); anything else is a plain type name. EnumType is
+                    distinguished by its leading '(' in the first position. *)
 
 TypeIdentifier   = Identifier .
                  (* built-in: integer, boolean, char, real,
                     byte, shortint, word, longint *)
 StringType       = 'string' [ '[' Constant ']' ] .
-                 (* 'string' alone is 'string[255]' *)
+                 (* 'string' alone is 'string[255]'.
+                    The reference compiler currently requires an
+                    INTEGER_LITERAL here rather than a general Constant, so a
+                    named constant is rejected as a string length. *)
 
 EnumType         = '(' IdentList ')' .
 SubrangeType     = Constant '..' Constant
                  | Identifier '(' Constant '..' Constant ')' .
-                 (* second form: typed subrange with explicit base type,
-                    e.g. Day(Mon..Fri). Base type is verified semantically. *)
+                 (* Second form: typed subrange with explicit base type,
+                    e.g. Day(Mon..Fri).
+                    Not decidable by fixed lookahead. A Constant is a full
+                    ConstExpr, so the first form may itself begin with a call:
+                    chr(65)..chr(90) and Day(Mon..Fri) agree through
+                    Identifier '(' and diverge only at the matching ')', which
+                    is an unbounded distance away. The parser resolves it
+                    semantically instead: an Identifier followed by '(' starts
+                    the second form when that identifier names a type, and is
+                    otherwise a constant expression. Declare-before-use makes
+                    the symbol table authoritative at this point. *)
 
 ArrayType        = 'array' '[' SubrangeType { ',' SubrangeType } ']' 'of' Type .
 
@@ -1328,6 +1361,9 @@ FieldList        = [ FieldDecl { ';' FieldDecl } ] .
 FieldDecl        = IdentList ':' Type .
 VariantPart      = 'case' [ Identifier ':' ] TypeIdentifier 'of'
                    Variant { ';' Variant } .
+                 (* LL(2): the optional tag name and the following
+                    TypeIdentifier are both Identifier. Peek for ':' to tell a
+                    tagged variant from a tagless one. *)
 Variant          = CaseLabelList ':' '(' FieldList ')' .
 
 SetType          = 'set' 'of' SimpleType .
@@ -1429,6 +1465,9 @@ Statement        = [ AssignOrCallStmt
                    | WithStmt
                    | BreakStmt
                    | ContinueStmt ] .
+                 (* The whole alternation is optional, so a Statement may be
+                    empty. That is deliberate: it admits the empty statement
+                    Pascal allows before 'end' and between semicolons. *)
 
 BreakStmt        = 'break' .
 ContinueStmt     = 'continue' .
@@ -1516,7 +1555,10 @@ StringElement    = "'" { CHARACTER | "''" } "'"
                  (* "''" is an escaped single quote within a string *)
                  (* '#' followed by 0..255 produces a byte; values > 255 are an error *)
 RUNE_LITERAL     = '#u' HEX_DIGIT { HEX_DIGIT } .
-                 (* produces a rune value — a 32-bit Unicode codepoint *)
+                 (* Produces a rune value — a 32-bit Unicode codepoint.
+                    Future extension: no production references it yet. When
+                    'rune' lands it belongs in Factor and in case labels, so
+                    check Constant and Factor at that point. *)
 
 LETTER           = 'a'..'z' | 'A'..'Z' .
 DIGIT            = '0'..'9' .
@@ -1558,7 +1600,13 @@ The language is **case-insensitive** — reserved words and identifiers are matc
 
 ### Comments and Compiler Directives
 
+The productions in this subsection, together with `CHARACTER` and `EOL` above,
+describe the scanner rather than the parser. They are deliberately not reachable
+from `Program`: comments and directives are consumed lexically and never reach a
+parse rule.
+
 ```ebnf
+EOL              = (* end of line, or end of input *) .
 Comment          = '{' Commentary '}'
                  | '(*' Commentary '*)'
                  | '//' { CHARACTER } EOL .

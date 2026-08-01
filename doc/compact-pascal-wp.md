@@ -400,8 +400,8 @@ Initializer      = ConstExpr
                  | ArrayInitializer
                  | RecordInitializer
                  | SetInitializer
-                 | StringLiteral .
-                 (* StringLiteral is a shortcut for array[lo..hi] of char;
+                 | STRING_LITERAL .
+                 (* STRING_LITERAL is a shortcut for array[lo..hi] of char;
                     its length must equal hi-lo+1. *)
 
 ArrayInitializer = '(' Initializer { ',' Initializer } ')' .
@@ -410,9 +410,10 @@ ArrayInitializer = '(' Initializer { ',' Initializer } ')' .
 
 RecordInitializer = '(' FieldInit { ';' FieldInit } [ ';' ] ')' .
 FieldInit        = Identifier ':' Initializer .
-                 (* Fields must appear in declaration order;
-                    every field of the record must be specified.
-                    Variant records are not supported. *)
+                 (* Fields must appear in declaration order and every field
+                    of the fixed part must be given. A variant record is
+                    initialized through its tag field followed by the fields of
+                    the selected variant. *)
 
 SetInitializer   = '[' [ SetElem { ',' SetElem } ] ']' .
 SetElem          = ConstExpr [ '..' ConstExpr ] .
@@ -505,7 +506,7 @@ FuncDecl         = 'function'  Identifier
 FormalParams     = '(' FormalParam { ';' FormalParam } ')' .
 FormalParam      = [ 'var' | 'const' ] IdentList ':' Type .
 
-Receiver         = Identifier ':' Type .
+Receiver         = '(' Identifier ':' Type ')' .
                  (* Type may be a value type or '^TypeIdentifier' for pointer receiver *)
 ```
 
@@ -580,7 +581,6 @@ MulOp            = '*' | 'div' | 'mod' | 'and' | 'shl' | 'shr' .
 Factor           = INTEGER_LITERAL
                  | REAL_LITERAL
                  | STRING_LITERAL
-                 | 'true' | 'false'
                  | 'nil'
                  | Designator
                  | '(' Expression ')'

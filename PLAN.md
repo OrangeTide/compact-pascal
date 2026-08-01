@@ -1184,7 +1184,42 @@ it, which is why these surfaced now rather than from a failing test.
       (syntax and semantics, diagnostic format, CLI, module contract) and what
       it does not (emitted bytes, internal helpers, performance, deferred
       features).
-- [ ] Verify the EBNF appendix matches the prose and is actually LL(1).
+- [x] Verify the EBNF appendix matches the prose and is actually LL(1). Done
+      against the skill's verification procedure. Structural integrity is now
+      clean: no undefined non-terminals, no left recursion, and the nine
+      unreachable productions are all scanner-level and documented as such.
+
+**Grammar audit findings.**
+
+- Two undefined non-terminals: `Initializer` referenced `StringLiteral` where
+  the token is `STRING_LITERAL`, and `EOL` was used by `Comment` but never
+  defined. Both fixed.
+- `SubrangeType` is **not decidable by fixed lookahead**. A `Constant` is a full
+  `ConstExpr`, so `chr(65)..chr(90)` and `Day(Mon..Fri)` agree through
+  `Identifier '('` and diverge only at the matching `')'`. The compiler resolves
+  it semantically, by asking whether the identifier names a type, which
+  declare-before-use makes reliable. Now documented rather than claimed LL(1).
+- Four LL(2) productions were undocumented: `SimpleType`, `ConstDef`,
+  `VariantPart`, and the new `Initializer`. All annotated. With `AddOp` and
+  `MulOp`, which were already annotated, that is six LL(2) productions in a
+  grammar that is otherwise LL(1).
+- The reference's `Initializer` was **missing `RecordInitializer` and
+  `SetInitializer`** even though record and set typed constants are implemented
+  and tested (t091, t092, t097, t099). The white paper had them and the
+  authoritative document did not. Added, with `FieldInit` and `SetElem`.
+- White paper divergence, now synced: it still had the pre-parenthesis
+  `Receiver`, listed `'true'`/`'false'` as `Factor` terminals where the
+  reference treats them as built-in identifiers, claimed variant records cannot
+  be initialized, and shared the `StringLiteral` casing bug. Production names
+  now match exactly across both documents.
+- Prose-versus-implementation gaps found by parsing probes, left as documented
+  restrictions rather than silently wrong grammar: `StringType` allows a general
+  `Constant` but the compiler requires an `INTEGER_LITERAL`, so `string[N]` with
+  a named constant is rejected. `PointerType`, `ProceduralType`, `InterfaceType`
+  and named subrange types are in the grammar and unimplemented, which is
+  expected and tracked in cpas-status.md.
+- `RUNE_LITERAL` is defined but unreferenced. Correct for a future extension;
+  annotated with where it will need to be wired in.
 
 **Exit:** no TODO markers in the reference; every gap above has an explicit
 rule; an external reviewer reads it end to end with no open questions.
