@@ -308,6 +308,53 @@ before Run, passed as a blob). See Findings.
 
 ### Language design
 
+**Method receiver is parenthesized: `for (r: TRect)`.** The original form put
+two colons of different meaning next to each other (`function Area for r:
+TRect: integer`). It parses fine and stays LL(1), but humans misread it. Go
+reached the same place. Changed before anyone writes code against the published
+form; after Phase F this would be a breaking change.
+
+**A method may not share a name with a field of its receiver type.** Compile
+error at the method declaration. The alternative, fields shadow methods,
+resolves the ambiguity equally well but breaks at a distance: adding a field to
+a record silently makes an existing method uncallable, and the error surfaces
+wherever the method was called rather than where the field was added. Erroring
+at the declaration puts the diagnostic where the author can act on it. Accepted
+cost: a library adding a field can break a downstream method of the same name.
+
+**The `implement` block declares conformance, it is not a second definition
+site.** When the block closes, each interface signature resolves first to a
+method defined in the block, otherwise to an existing standalone method of the
+receiver type. Only genuinely missing signatures need a body, so a block can be
+empty. This removes the duplication the original design forced on any type
+wanting both a dot-callable method and interface conformance. It stays
+single-pass: declare-before-use guarantees every candidate has already been
+seen when the block closes, so no lookahead is needed. It also answers the
+reverse question cleanly, and the reference now states it: implement-block
+methods are not dot-callable on the concrete type. Standalone methods declare
+the type's own surface; the block declares conformance.
+
+**Pointer-receiver methods require an addressable operand.** Variables, fields,
+array elements, and dereferences qualify; function results, casts, and other
+temporaries do not. Without the rule, `Origin.Rename('X')` on a function result
+mutates a temporary and discards it silently. Go forbids exactly this case.
+Value receivers are unrestricted, since they copy.
+
+**An interface value does not keep its concrete data alive.** `Self` can
+dangle: store the interface in a global, or return one referring to a local,
+and the pointer outlives the data. The language does not detect it. Same rule
+Pascal already applies to `@x` and `var` parameters, stated explicitly because
+an interface value hides the pointer and the hazard is less visible than with
+an explicit `^T`.
+
+**Interfaces are not structurally typed, and the reference said they were.**
+Signatures are matched structurally, but conformance is declared in an
+`implement` block and verified at that single point. The accurate comparison is
+Rust's `impl Trait for Type`, not Go's implicit satisfaction. This is also the
+better design for a declare-before-use language, since a type cannot conform by
+accident, so the old label undersold it.
+
+
 **Language naming.** Renamed from "Pascaline-Plus" to "Compact Pascal" — a new language in the Pascal family, not a superset of any existing dialect. "Fermat" (after Pascal's collaborator) was the runner-up.
 
 **Case sensitivity.** Compact Pascal is case-insensitive, as in standard Pascal. Identifiers, keywords, and type names are matched without regard to case. The sole exception is WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives, which are case-sensitive because they refer to external WASM symbols.
@@ -1084,13 +1131,15 @@ any optimizer must be deterministic and idempotent, or stay behind a compile
 Close every semantic gap while the spec is still cheap to change. Once users
 exist, a spec change is a breaking change.
 
-- [ ] Four methods/interfaces gaps from `notes/spec-review-methods-interfaces.md`:
+- [x] Four methods/interfaces gaps from `notes/spec-review-methods-interfaces.md`:
       receiver addressability (forbid pointer-receiver calls on temporaries),
       field/method name collision (forbid), the standalone-vs-implement-block
-      seam, interface value lifetime.
-- [ ] Publish the frame-size constraint: frame size is fixed before body
+      seam, interface value lifetime. Also corrected the "structural typing"
+      label and parenthesized the method receiver. See Findings.
+- [x] Publish the frame-size constraint: frame size is fixed before body
       codegen (`cpas.pas:7743`), why that blocks caller-allocated temporaries,
-      and what Phase D does about it.
+      and what Phase D does about it. In the reference under Runtime Model /
+      Stack, with the absence of stack overflow detection stated alongside it.
 - [ ] Specify the currently-unstated semantics: integer overflow, uninitialized
       variable contents, implicit conversions, identifier shadowing, parameter
       aliasing, forward-declaration mismatch, string comparison ordering, set

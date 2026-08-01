@@ -123,7 +123,7 @@ Compact Pascal includes standard functions and procedures as compiler intrinsics
 
 ### Language Extensions
 
-- **Structural interfaces and methods (planned):** Go-style interfaces with `implement` blocks, designed for single-pass compilation.
+- **Interfaces and methods (planned):** structurally matched signatures with conformance declared explicitly in an `implement` block, closer to Rust's `impl Trait for Type` than to Go's implicit satisfaction. Designed for single-pass compilation: conformance is verified at the point the block closes.
 
 The full language specification is maintained in the Compact Pascal Language Reference (`doc/compact-pascal-ref.md`).
 

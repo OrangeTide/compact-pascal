@@ -860,13 +860,13 @@ type TCat = record
   Name: string;
 end;
 
-procedure Purr for c: TCat;
+procedure Purr for (c: TCat);
 begin
   { c is the receiver — a value of type TCat }
 end;
 ```
 
-The receiver appears after the `for` keyword as `name: Type`. It becomes the first implicit (hidden) argument of the method.
+The receiver appears after the `for` keyword in parentheses, as `(name: Type)`. It becomes the first implicit (hidden) argument of the method. The parentheses keep the receiver visually distinct from the return type: without them a function method reads `function Area for r: TRect: integer`, with two colons of different meaning in sequence.
 
 #### Receiver Types
 
@@ -875,7 +875,7 @@ There are two types of method receivers:
 - **Value receiver** — the receiver is passed by value (copied). Intended for small, immutable types. The method cannot modify the caller's copy.
 
   ```pascal
-  function Area for r: TRect: integer;
+  function Area for (r: TRect): integer;
   begin
     Area := r.Width * r.Height;
   end;
@@ -884,7 +884,7 @@ There are two types of method receivers:
 - **Pointer receiver** — the receiver is passed as a pointer, giving the method reference semantics. It operates on the original data and can modify internal state. Preferred for large records or when mutation is needed.
 
   ```pascal
-  procedure Rename for c: ^TCat (const NewName: string);
+  procedure Rename for (c: ^TCat) (const NewName: string);
   begin
     c^.Name := NewName;
   end;
@@ -904,6 +904,26 @@ end;
 ```
 
 When calling a pointer-receiver method on a value, the compiler automatically takes the address. When calling a value-receiver method on a pointer, the compiler automatically dereferences.
+
+**The automatic address-of applies only to addressable operands.** An operand is addressable if it is a variable, a field of an addressable record, an element of an addressable array, or a pointer dereference. A function result, a type cast, a constant, and any other temporary are not addressable. Calling a pointer-receiver method on a temporary is a compile error:
+
+```pascal
+function Origin: TPoint; { returns a temporary }
+
+Origin.Rename('X');   { ERROR: Rename needs an addressable receiver }
+```
+
+Without this rule the mutation would land in a temporary and be discarded with no diagnostic. Value-receiver methods have no such restriction: they copy, so a temporary receiver is harmless.
+
+**A method may not share a name with a field of its receiver type.** The collision is reported at the method declaration, not at the call:
+
+```pascal
+type TCat = record Name: string; end;
+
+function Name for (c: TCat): string;  { ERROR: TCat already has a field Name }
+```
+
+This keeps `MyCat.Name` unambiguous. The alternative, letting fields shadow methods, resolves the ambiguity just as well but breaks at a distance: adding a field to a record silently makes an existing method uncallable, and the error surfaces wherever the method was used rather than where the field was added.
 
 ### Structured Return Types
 
@@ -970,8 +990,33 @@ end;
 Rules for `implement` blocks:
 - The receiver is implicit — individual methods do not use the `for` keyword.
 - `Self` refers to the receiver inside the block.
-- When the compiler reaches the closing `end;`, it verifies that all methods declared in the interface are implemented with compatible signatures.
+- When the compiler reaches the closing `end;`, it verifies that every method declared in the interface is satisfied with a compatible signature.
 - A type may implement multiple interfaces via separate `implement` blocks.
+
+#### The Block Declares Conformance
+
+An `implement` block is a **conformance declaration**, not a second place to define methods. When the block closes, each interface signature is resolved in this order:
+
+1. A method of that name defined inside the block.
+2. Otherwise, a standalone method already declared for the receiver type.
+
+Only signatures with no matching standalone method need a body in the block. A type that already has the method it needs writes nothing:
+
+```pascal
+procedure Greet for (c: TCat) (const HumanName: string);
+begin
+  WriteLn('Meow, ', HumanName);
+end;
+
+implement IPet for TCat;
+  { Greet is satisfied by the standalone method above.
+    Only genuinely missing signatures are written here. }
+end;
+```
+
+This resolution is still single-pass. Declare-before-use guarantees every candidate standalone method has already been seen by the time the block closes, so no lookahead is needed.
+
+Methods defined inside an `implement` block are **not** dot-callable on the concrete type. The two forms have distinct jobs: a standalone method declares part of the type's own surface, while the block declares that the type conforms to an interface. A method that should be callable both ways is written once as a standalone method and then simply satisfies the interface.
 
 #### Implicit Conversion
 
@@ -1008,6 +1053,8 @@ An interface value is stored as an inline record containing:
 - One procedural field per interface method, filled with pointers to the concrete implementations.
 
 This is an inline vtable. A future optimization could use shared interface tables (itables) per (concrete type, interface type) pair to reduce memory when many interface values share the same concrete type.
+
+**The `Self` pointer does not keep the concrete value alive.** An interface value is only valid while the data it points at is. Storing one in a global, returning one from the function whose local it refers to, or keeping one past the end of the block that declared the concrete variable all leave `Self` dangling, and the language does not detect it. This is the same rule Pascal already applies to `@x` and to `var` parameters: the programmer owns the lifetime. It is stated here because an interface value hides the pointer, so the hazard is less visible than it is with an explicit `^T`.
 
 #### Future Extensions
 
@@ -1138,6 +1185,9 @@ FuncDecl         = 'function'  Identifier
                    ( 'for' Receiver [ FormalParams ] ':' Type ';' Block ';'
                    | [ FormalParams ] ':' Type ';' ( Block ';' | 'forward' ';' | 'external' ';' ) ) .
                  (* 'for' Receiver marks a standalone method — see Extensions.
+                    The production left-factors on 'for', so one token of
+                    lookahead after the identifier decides between a method
+                    and an ordinary procedure. LL(1) is preserved.
                     'external' is used with {$IMPORT} for WASM host-provided procedures.
                     Return type is any Type, including arrays and records —
                     see Structured Return Types under Extensions. *)
@@ -1165,8 +1215,11 @@ This differs from Turbo Pascal, where the forward body omits the parameter list.
 FormalParams     = '(' FormalParam { ';' FormalParam } ')' .
 FormalParam      = [ 'var' | 'const' ] IdentList ':' Type .
 
-Receiver         = Identifier ':' Type .
-                 (* Type may be a value type or '^TypeIdentifier' for pointer receiver *)
+Receiver         = '(' Identifier ':' Type ')' .
+                 (* Type may be a value type or '^TypeIdentifier' for pointer receiver.
+                    The parentheses separate the receiver from a function's
+                    return type, which would otherwise put two colons of
+                    different meaning next to each other. *)
 ```
 
 ### Implement Blocks (Extension)
@@ -1179,7 +1232,12 @@ ImplementBlock   = 'implement' TypeIdentifier 'for' TypeIdentifier ';'
 ImplMethod       = ImplProcDecl | ImplFuncDecl .
 ImplProcDecl     = 'procedure' Identifier [ FormalParams ] ';' Block ';' .
 ImplFuncDecl     = 'function'  Identifier [ FormalParams ] ':' Type ';' Block ';' .
-                 (* Self is implicitly available inside the block *)
+                 (* Self is implicitly available inside the block.
+                    The block declares conformance: an interface signature with
+                    no ImplMethod here is satisfied by a standalone method of
+                    the receiver type, so the block may legitimately be empty.
+                    ImplMethods are not dot-callable on the concrete type.
+                    See Interfaces under Extensions. *)
 ```
 
 ### Statements
