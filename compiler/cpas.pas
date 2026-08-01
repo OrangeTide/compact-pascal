@@ -8199,22 +8199,18 @@ begin
   EmitHelperI32Const(addrIntBuf + 19);
   EmitHelperLocalSet(1);
 
-  (* neg_flag = 0 *)
-  EmitHelperI32Const(0);
+  (* sign = 1.  Local 2 holds a multiplier, not a flag: the value is never
+     negated, because 0 - (-2147483648) overflows back to itself and the
+     digit loop would then produce negative digits. *)
+  EmitHelperI32Const(1);
   EmitHelperLocalSet(2);
 
-  (* if value < 0 *)
+  (* if value < 0 then sign = -1.  value stays negative. *)
   EmitHelperLocalGet(0);
   EmitHelperI32Const(0);
   EmitHelper(OpI32LtS);
   EmitHelper(OpIf); EmitHelper(WasmVoid);
-    (* value = 0 - value *)
-    EmitHelperI32Const(0);
-    EmitHelperLocalGet(0);
-    EmitHelper(OpI32Sub);
-    EmitHelperLocalSet(0);
-    (* neg_flag = 1 *)
-    EmitHelperI32Const(1);
+    EmitHelperI32Const(-1);
     EmitHelperLocalSet(2);
   EmitHelper(OpEnd);
 
@@ -8234,11 +8230,14 @@ begin
   EmitHelper(OpElse);
     (* loop: extract digits *)
     EmitHelper(OpLoop); EmitHelper(WasmVoid);
-      (* digit = value % 10 + '0' *)
+      (* digit = (value % 10) * sign + '0'.  i32.rem_s follows the sign of
+         the dividend, so the product is always 0..9 for either sign. *)
       EmitHelperLocalGet(1);  (* pos = store address *)
       EmitHelperLocalGet(0);  (* value *)
       EmitHelperI32Const(10);
       EmitHelper(OpI32RemS);
+      EmitHelperLocalGet(2);  (* sign *)
+      EmitHelper(OpI32Mul);
       EmitHelperI32Const(ord('0'));
       EmitHelper(OpI32Add);
       EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
@@ -8263,8 +8262,10 @@ begin
     EmitHelper(OpEnd); (* end loop *)
   EmitHelper(OpEnd); (* end if/else *)
 
-  (* if negative: store '-' *)
+  (* if negative (sign < 0): store '-' *)
   EmitHelperLocalGet(2);
+  EmitHelperI32Const(0);
+  EmitHelper(OpI32LtS);
   EmitHelper(OpIf); EmitHelper(WasmVoid);
     EmitHelperLocalGet(1);
     EmitHelperI32Const(ord('-'));
@@ -8357,22 +8358,17 @@ begin
   EmitHelperI32Const(addrIntBuf + 19);
   EmitHelperLocalSet(2);
 
-  (* neg_flag = 0 *)
-  EmitHelperI32Const(0);
+  (* sign = 1.  Local 3 is a multiplier, not a flag: negating the value
+     would overflow for -2147483648.  Same fix as __write_int. *)
+  EmitHelperI32Const(1);
   EmitHelperLocalSet(3);
 
-  (* if value < 0 *)
+  (* if value < 0 then sign = -1.  value stays negative. *)
   EmitHelperLocalGet(0);
   EmitHelperI32Const(0);
   EmitHelper(OpI32LtS);
   EmitHelper(OpIf); EmitHelper(WasmVoid);
-    (* value = 0 - value *)
-    EmitHelperI32Const(0);
-    EmitHelperLocalGet(0);
-    EmitHelper(OpI32Sub);
-    EmitHelperLocalSet(0);
-    (* neg_flag = 1 *)
-    EmitHelperI32Const(1);
+    EmitHelperI32Const(-1);
     EmitHelperLocalSet(3);
   EmitHelper(OpEnd);
 
@@ -8390,10 +8386,13 @@ begin
   EmitHelper(OpElse);
     (* loop: extract digits right to left *)
     EmitHelper(OpLoop); EmitHelper(WasmVoid);
+      (* digit = (value % 10) * sign + '0' *)
       EmitHelperLocalGet(2);
       EmitHelperLocalGet(0);
       EmitHelperI32Const(10);
       EmitHelper(OpI32RemS);
+      EmitHelperLocalGet(3);
+      EmitHelper(OpI32Mul);
       EmitHelperI32Const(ord('0'));
       EmitHelper(OpI32Add);
       EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
@@ -8415,8 +8414,10 @@ begin
     EmitHelper(OpEnd);
   EmitHelper(OpEnd);
 
-  (* if negative: store '-' *)
+  (* if negative (sign < 0): store '-' *)
   EmitHelperLocalGet(3);
+  EmitHelperI32Const(0);
+  EmitHelper(OpI32LtS);
   EmitHelper(OpIf); EmitHelper(WasmVoid);
     EmitHelperLocalGet(2);
     EmitHelperI32Const(ord('-'));
