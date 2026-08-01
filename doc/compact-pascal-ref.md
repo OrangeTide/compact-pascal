@@ -619,6 +619,11 @@ The initial memory size is controlled by `{$MEMORY}` (default: 1 page = 64 KB). 
 
 The stack pointer is a mutable WASM global, initialized to the top of memory. Each procedure call subtracts the frame size on entry and adds it back on exit. Local variables, including short strings and records, are allocated on the stack.
 
+**Frame size is fixed before the body is compiled.** The compiler is single-pass: it emits the prologue that reserves the frame, with the size as an immediate operand, before it has read a single statement of the body. Nothing later in the body can enlarge the frame. Two consequences follow, and both are properties of the language as specified, not passing implementation details:
+
+- A construct needing caller-allocated temporaries whose count is not known from the declarations alone cannot be given frame storage. This is why a function returning a structured type, including `string`, is not yet available: the caller must supply the result buffer, and it cannot reserve one per call site after the fact.
+- There is no stack overflow detection. A deep enough recursion walks the stack pointer down through the heap and the data segment without trapping, corrupting whatever it passes. Programs that recurse to a data-dependent depth should bound that depth themselves. A checked mode is planned.
+
 ### Entry Point
 
 The program's main `begin...end.` block (the statement part following all declarations) is compiled as the WASI `_start` export — a function with no parameters and no return value. This is the program's entry point. WASI-compatible runtimes call `_start` automatically:
@@ -927,7 +932,7 @@ The compiler implements this via a hidden pointer parameter: the caller allocate
 
 ### Interfaces
 
-An interface defines a set of method signatures that a concrete type can satisfy. Interfaces use structural typing — there is no explicit inheritance.
+An interface defines a set of method signatures that a concrete type can satisfy. There is no inheritance. Signatures are matched structurally, but conformance is declared explicitly in an implement block and verified at that single point, in one pass. This is closer to Rust's `impl Trait for Type` than to Go, where a type satisfies an interface implicitly and conformance is discoverable only by tooling. Explicit conformance suits a declare-before-use language: the compiler can check it the moment the block closes, and a type cannot satisfy an interface by accident.
 
 #### Declaring Interfaces
 
