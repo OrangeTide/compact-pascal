@@ -1154,11 +1154,13 @@ it, which is why these surfaced now rather than from a failing test.
       Both formatters negated a negative value first, and `0 - INT_MIN`
       overflows back to itself. Fixed in a1fc117; both now carry a sign
       multiplier instead. Test t101.
-- [ ] Set membership with an out-of-range ordinal returns a wrong answer, not
-      `false`. WASM masks a shift count to five bits, so with `s: set of 0..7`
-      holding `[1,3]`, `99 in s` aliases to bit 3 and yields `true`. Needs a
-      range test before the shift, or a masked ordinal compared against the set
-      bounds.
+- [x] Set membership with an out-of-range ordinal returned a wrong answer
+      instead of `false`. Both representations were affected: the small set
+      aliased via WASM's five-bit shift mask, and the large set read past its
+      own storage. Fixed by clamping the ordinal to 0 for the access and
+      masking the result with an unsigned range test, which also rejects
+      negatives. Branchless, and the large-set load can no longer leave the
+      set. Test t102.
 - [ ] A `forward` header that disagrees with the definition is not diagnosed. A
       differing parameter count emits a module that fails WASM validation, so
       the error arrives from the runtime. A differing return type is accepted

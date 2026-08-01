@@ -4890,15 +4890,29 @@ begin
         curFuncNeedsStringTemp := true;
         EmitLocalSet(curCaseTempIdx);   { save set_addr }
         EmitLocalSet(curStringTempIdx);  { save elem }
-        { Compute set_addr + (elem div 8) }
+        { An ordinal outside the set's storage must test false, not read
+          past the set. elem is forced to 0 when out of range, so the load
+          always lands inside the set, and the result is masked to 0 at the
+          end. Unsigned compare rejects negatives in the same test. }
+        { Compute set_addr + (clamped div 8). The clamped ordinal is
+          recomputed rather than stored, so curStringTempIdx keeps the
+          original value for the range mask at the end. }
         EmitLocalGet(curCaseTempIdx);
         EmitLocalGet(curStringTempIdx);
+        EmitLocalGet(curStringTempIdx);
+        EmitI32Const(exprSetSize * 8);
+        EmitOp(OpI32LtU);
+        EmitOp(OpI32Mul);   { elem, or 0 when out of range }
         EmitI32Const(3);
         EmitOp(OpI32ShrU);  { elem div 8 = elem >> 3 }
         EmitOp(OpI32Add);   { set_addr + byte_index }
         EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0); { load byte, align=0, offset=0 }
-        { Shift right by (elem mod 8) and test bit 0 }
+        { Shift right by (clamped mod 8) and test bit 0 }
         EmitLocalGet(curStringTempIdx);
+        EmitLocalGet(curStringTempIdx);
+        EmitI32Const(exprSetSize * 8);
+        EmitOp(OpI32LtU);
+        EmitOp(OpI32Mul);
         EmitI32Const(7);
         EmitOp(OpI32And);   { elem mod 8 }
         EmitOp(OpI32ShrU);  { byte >> bit_pos }
@@ -4911,14 +4925,31 @@ begin
         EmitLocalSet(curCaseTempIdx);  { save set }
         curFuncNeedsStringTemp := true;
         EmitLocalSet(curStringTempIdx);
+        { WASM masks a shift count to five bits, so without a range test
+          "99 in s" would alias to bit 3 and report true. Force the shift
+          to 0 when the ordinal is out of range, then mask the result to
+          false. Unsigned compare rejects negatives in the same test. }
         EmitI32Const(1);
         EmitLocalGet(curStringTempIdx);
+        EmitLocalGet(curStringTempIdx);
+        EmitI32Const(32);
+        EmitOp(OpI32LtU);
+        EmitOp(OpI32Mul);     { elem, or 0 when out of range }
         EmitOp(OpI32Shl);     { 1 << elem }
         EmitLocalGet(curCaseTempIdx);
         EmitOp(OpI32And);
         EmitI32Const(0);
         EmitOp(OpI32Ne);
       end;
+      { Mask the membership result to false when the ordinal was out of
+        range for the set's representation. }
+      EmitLocalGet(curStringTempIdx);
+      if exprSetSize > 4 then
+        EmitI32Const(exprSetSize * 8)
+      else
+        EmitI32Const(32);
+      EmitOp(OpI32LtU);
+      EmitOp(OpI32And);
       exprType := tyBoolean;
     end
     else if (leftType = tySet) and (op in [tkPlus, tkMinus, tkStar,

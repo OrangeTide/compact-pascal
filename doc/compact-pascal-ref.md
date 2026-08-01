@@ -725,6 +725,11 @@ Range checking is off by default and enabled with `{$R+}`.
   the program may read or write an unrelated variable and continue with
   corrupted data, or fault if the address leaves linear memory. With `{$R+}` it
   traps.
+- **Set membership outside the set's representation is `false`**, never an
+  error and never a wrong answer. `99 in s` where `s: set of 0..7` is `false`,
+  and so is a negative ordinal. This holds at any directive setting: the test is
+  range-guarded rather than range-checked, so `{$R+}` does not turn it into a
+  trap.
 - **A `case` selector matching no branch, with no `else`, falls through**
   silently to the statement after `end`. This is Turbo Pascal behavior and is
   intentional; ISO 7185 makes it an error.
@@ -735,11 +740,6 @@ The following are compiler defects, not design decisions. They are recorded here
 because the behavior is observable and a program may encounter it before the fix
 lands.
 
-- **Set membership with an out-of-range ordinal gives a wrong answer rather than
-  `false`.** For a set with a 32-bit representation the test shifts by the
-  ordinal, and WASM masks a shift count to five bits, so the ordinal aliases to
-  `ordinal mod 32`. With `s: set of 0..7` holding `[1,3]`, the expression
-  `99 in s` yields `true` because 99 aliases to bit 3. It should yield `false`.
 - **A `forward` declaration whose header disagrees with the definition is not
   diagnosed.** A differing parameter count produces a module that fails WASM
   validation, so the error surfaces from the runtime rather than the compiler. A
