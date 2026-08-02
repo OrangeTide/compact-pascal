@@ -1505,7 +1505,8 @@ Small, tracked so they are not lost. None blocks a phase.
   Found in the Phase A grammar audit and recorded as a restriction.
 - **When to bump the CalVer version.** Held at 26.04.1 through all of Phase A
   and B per the rule about waiting for an explicit publish, though the
-  reference has changed substantially.
+  reference has changed substantially. Bumped to 26.08.0 when Phase C was
+  tagged as a release.
 
 ## Standing invariants
 

@@ -15,10 +15,10 @@ program cpas;
 { ---- Constants ---- }
 
 const
-  Version = '26.04.1';
+  Version = '26.08.0';
   VersionYear = 26;
-  VersionMonth = 04;
-  VersionPatch = 1;
+  VersionMonth = 08;
+  VersionPatch = 0;
 
   { Section buffer sizes }
   SmallBufMax = 4095;    { 4 KB for small sections }

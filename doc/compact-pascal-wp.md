@@ -11,7 +11,7 @@ header-includes:
     ```
 ---
 
-**Version 26.04.1** (CalVer: YY.MM.minor)
+**Version 26.08.0** (CalVer: YY.MM.minor)
 
 ## Abstract
 
