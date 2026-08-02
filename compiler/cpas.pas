@@ -11076,6 +11076,24 @@ begin
   { Read first character }
   ReadCh;
 
+  { Skip a UTF-8 byte order mark (EF BB BF) if the file starts with one.
+    A BOM is valid UTF-8 and Windows editors write one by default, so
+    rejecting it turns an ordinary save into "unexpected character" on
+    line 1 with nothing to act on. Only a leading BOM is skipped; one
+    appearing later is still an error. }
+  if (not atEof) and (ch = #$EF) then begin
+    ReadCh;
+    if (not atEof) and (ch = #$BB) then begin
+      ReadCh;
+      if (not atEof) and (ch = #$BF) then begin
+        ReadCh;
+        srcCol := 0;
+      end else
+        Error('unexpected character in byte order mark');
+    end else
+      Error('unexpected character in byte order mark');
+  end;
+
   { Skip shebang line (e.g., #!/usr/bin/env cpas) }
   if (not atEof) and (ch = '#') then
     while (not atEof) and (ch <> #10) do

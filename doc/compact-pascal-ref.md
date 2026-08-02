@@ -44,6 +44,10 @@ Source files must be encoded in **UTF-8**. The compiler treats source as a seque
 
 This means `char` is a **byte**, not a Unicode codepoint. `length('café')` returns the byte length (5 in UTF-8, not 4), and `s[i]` indexes by byte. Programs that work with multi-byte characters must account for this, just as in C or Go's `[]byte`. Full Unicode-aware string operations are a library concern, not a language primitive.
 
+A leading UTF-8 byte order mark (`EF BB BF`) is accepted and skipped. Many Windows editors write one by default, so rejecting it would turn an ordinary save into an error on line 1. A BOM anywhere other than the first three bytes is not special and is an error. The mark may be followed by a `#!` line; both are consumed before tokenizing.
+
+Line endings may be LF, CRLF, or CR. All three are accepted, so a file edited on Windows compiles unchanged.
+
 Legacy Turbo Pascal source files encoded in CP437 or other 8-bit code pages must be converted to UTF-8 before compilation. This is a one-time conversion performed by standard tools or libraries (e.g., `iconv`, Rust's `encoding_rs` crate, or a simple 128-entry lookup table in Zig).
 
 ## Core Language
