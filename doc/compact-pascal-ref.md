@@ -645,7 +645,9 @@ The initial memory size is controlled by `{$MEMORY}` (default: 1 page = 64 KB). 
 
 ### Stack
 
-The stack pointer is a mutable WASM global, initialized to the top of memory. Each procedure call subtracts the frame size on entry and adds it back on exit. Local variables, including short strings and records, are allocated on the stack.
+The stack pointer is a mutable WASM global, initialized to the top of memory. Each procedure call subtracts the frame size on entry and records the resulting frame base. On exit the stack pointer is restored from that recorded base rather than by adding the frame size back to its current value. The difference matters when something inside the body moves the stack pointer without moving it back: restoring from the base contains the damage to that one call instead of leaving the stack pointer wrong for the remainder of the program. Local variables, including short strings and records, are allocated on the stack.
+
+Under `{$S+}` the epilogue also compares the stack pointer against the recorded base and traps on a mismatch, so an unbalanced allocation is reported at the function that caused it.
 
 **Frame size is fixed before the body is compiled.** The compiler is single-pass: it emits the prologue that reserves the frame, with the size as an immediate operand, before it has read a single statement of the body. Nothing later in the body can enlarge the frame. Two consequences follow, and both are properties of the language as specified, not passing implementation details:
 
@@ -854,7 +856,7 @@ Local directives may appear anywhere in the source. They take effect from the po
 |---|---|---|---|
 | `{$RANGECHECKS ON/OFF}` | `{$R+/-}` | OFF | Emit runtime range checks for array indexing and subrange assignments. |
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
-| `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue. |
+| `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue, and a frame balance check in every epilogue. |
 | `{$ALIGN n}` | — | 4 | Record field alignment in bytes (1, 2, 4, or 8). Each field within a record is placed at the next multiple of `n`; the total record size is padded to a multiple of `n`. |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |

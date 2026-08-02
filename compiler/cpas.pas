@@ -7936,18 +7936,46 @@ begin
   { End body block (exit branches here) }
   EmitOp(OpEnd);
 
-  { Restore display[N] before frame deallocation (procedures only) }
-  if displayLocalIdx >= 0 then begin
-    EmitLocalGet(displayLocalIdx);
-    EmitGlobalSet(curNestLevel + 1); { display[N] = global N+1 }
+  { Frame balance check.
+    display[N] holds this frame's base. The prologue set it from $sp after
+    the allocation, so it is the entry $sp minus the frame size, and it
+    survives recursion because a recursive call saves and restores it.
+    WAT: global.get $sp
+         global.get $display[N]
+         i32.ne
+         if
+           unreachable
+         end
+    Nothing but a balanced call should have moved $sp between the prologue
+    and here. The body does allocate scratch for string concat in const
+    argument position and free it after the call, so this is a live check on
+    that bookkeeping, not a placeholder for future features. }
+  if optStackChecks then begin
+    EmitGlobalGet(0);
+    EmitGlobalGet(curNestLevel + 1); { display[N] = global N+1 }
+    EmitOp(OpI32Ne);
+    EmitOp(OpIf); EmitOp(WasmVoid);
+      EmitOp(OpUnreachable);
+    EmitOp(OpEnd);
   end;
 
-  { Emit frame epilogue: $sp += frameSize }
+  { Emit frame epilogue: $sp := display[N] + frameSize.
+    Restoring from the recorded frame base rather than adding frameSize to
+    whatever $sp happens to hold makes an unbalanced allocation inside the
+    body self-healing at return. Without it a single leaked allocation
+    desynchronizes $sp for the rest of the program, and the damage shows up
+    somewhere unrelated. Same instruction count as the relative form. }
   if curFrameSize > 0 then begin
-    EmitGlobalGet(0);
+    EmitGlobalGet(curNestLevel + 1); { display[N] = global N+1 }
     EmitI32Const(curFrameSize);
     EmitOp(OpI32Add);
     EmitGlobalSet(0);
+  end;
+
+  { Restore display[N] after the frame is released (procedures only) }
+  if displayLocalIdx >= 0 then begin
+    EmitLocalGet(displayLocalIdx);
+    EmitGlobalSet(curNestLevel + 1); { display[N] = global N+1 }
   end;
 
   curFrameSize := savedFrameSize;

@@ -518,7 +518,7 @@ accident, so the old label undersold it.
 - **Data segment** at low addresses — global variables, string literals, typed constants. Laid out by the compiler during compilation.
 - **Heap** grows upward from end of data segment (Phase 6; unused in Phase 1).
 - **Stack** grows downward from top of memory. In Phase 1, the entire space between data end and memory top is stack.
-- **Stack pointer** is a mutable WASM global (`$sp`), initialized to the top of memory. Frame allocation: `$sp -= frame_size`. Frame deallocation: `$sp += frame_size`.
+- **Stack pointer** is a mutable WASM global (`$sp`), initialized to the top of memory. Frame allocation: `$sp -= frame_size`. Frame deallocation: `$sp := display[level] + frame_size` (see the frame balance finding below).
 
 This layout is battle-tested across WASM toolchains, compatible with debugging/profiling tools, and sets up cleanly for Phase 6 heap allocation (heap and stack grow toward each other).
 
@@ -548,6 +548,16 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 *Maximum nesting depth of 8.* Real Pascal code rarely nests beyond 3-4 levels. The compiler emits a clear error if the limit is exceeded. 8 WASM globals is negligible.
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
+
+**Stack overflow guard compares before subtracting.** The prologue checks `$sp < __stack_limit + frame_size` and traps, rather than subtracting first and checking `$sp < __stack_limit` afterwards. The second form looks simpler and is wrong: a frame large enough to carry `$sp` past zero wraps it to a large unsigned value, which compares as above the limit and sails through. Checking first also leaves `$sp` valid at the trap, so the backtrace is readable. The limit lives in an immutable WASM global (index 10, `__stack_limit`) initialized to the data end. Cost is five instructions per frame and 0.93% of compiler code size. On by default pre-1.0 under `{$S+}`; silent corruption costs more to debug than the instructions cost to run.
+
+The guard does not cover the 256-byte scratch allocations the body makes for string concatenation in const argument position. Those move `$sp` after the prologue check. Small enough not to matter at the depths the guard catches, and Phase H replaces the mechanism.
+
+**Frame balance uses `display[N]`, not a new local.** PLAN originally called for saving entry SP in a WASM local. That is unnecessary: `display[curNestLevel]` already holds the frame base, is set in the prologue immediately after the allocation, and is saved and restored across recursion by the existing display protocol. Restoring `$sp` from it costs the same four instructions as the old relative `$sp += frame_size`, adds no local, and does not disturb the fixed local-index convention (params, return value, saved display, string temp, case temp), which a new local would have shifted.
+
+The value is not primarily the assert. Restoring from a recorded base makes an unbalanced allocation self-healing at return: the damage is contained to the one call instead of desynchronizing `$sp` for the rest of the program, where it surfaces somewhere unrelated. Under `{$S+}` the epilogue also compares `$sp` against the base and traps first, so the bug is reported at the function that caused it. Verified by injecting a stray `$sp -= 16` into every epilogue and confirming the trap. The check is live, not speculative: the concat scratch allocations above are exactly the kind of ad-hoc SP movement it audits. Cost is 1.17% of compiler code size.
+
+The epilogue ordering changed as a consequence. `display[N]` is now restored *after* the frame is released rather than before, because the release reads it.
 
 ### Compiler architecture
 
@@ -1320,12 +1330,14 @@ caller-allocated temporaries (structured and string returns) later.
       symptom at the point it happens. A teaching compiler should have had
       this from the first milestone. Keep it simple; a compare and a trap, no
       guard pages, no red zone.
-- [ ] **Frame balance.** Save entry SP in a local at prologue; restore *from
-      that local* at epilogue instead of the current relative `SP += frameSize`
-      (`cpas.pas:7830`). This is not only a check: it makes an unbalanced stack
-      allocation self-healing at function return rather than desynchronizing SP
-      for the rest of the program. Assert the expected value before restoring
-      and trap on mismatch.
+- [x] **Frame balance.** Restore SP at the epilogue from the recorded frame
+      base instead of the relative `SP += frameSize`. This is not only a
+      check: it makes an unbalanced stack allocation self-healing at function
+      return rather than desynchronizing SP for the rest of the program. Under
+      `{$S+}` the expected value is asserted first and a mismatch traps.
+      Implemented without a new WASM local: `display[curNestLevel]` already
+      holds the frame base, is set in the prologue right after the allocation,
+      and is saved and restored across recursion. See Findings.
 - [x] New `{$S+/-}` directive, default **ON** pre-1.0. Silent corruption is
       worse than the code size. Revisit the default at 1.0.
 - [ ] Run the whole suite twice in CI, checks on and checks off.
