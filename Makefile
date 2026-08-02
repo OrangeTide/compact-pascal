@@ -76,7 +76,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 # ── Top-level targets ────────────────────────────────────────────
 
 .PHONY: help all all-c all-zig all-rust pdf html clean clean-c clean-zig clean-rust
-.PHONY: bootstrap test check-private deploy-playground bump-version
+.PHONY: bootstrap test check-private check-fixpoint test-all deploy-playground bump-version
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -93,6 +93,8 @@ help:
 	@echo "  test                 Run compiler test suite (requires fpc + WASM runtime)"
 	@echo "  deploy-playground    Copy compiler.wasm into pages/playground/"
 	@echo "  check-private        Fail if tracked files leak local paths or private info"
+	@echo "  check-fixpoint       Verify snapshot is current and self-hosting holds"
+	@echo "  test-all             Everything CI runs (check-private test check-fixpoint)"
 	@echo "  bump-version VERSION=YY.MM.PATCH"
 	@echo "                       Update version in compiler and docs, commit"
 
@@ -200,6 +202,10 @@ CPAS_SRC  := compiler/cpas.pas
 CPAS_BIN  := compiler/cpas
 SNAPSHOT  := snapshot/compiler.wasm
 
+# WASM runtime used to execute the snapshot. Override to use wasmer:
+#   make check-fixpoint WASMRUN="wasmer run"
+WASMRUN   := wasmtime run
+
 bootstrap: $(SNAPSHOT)
 
 $(CPAS_BIN): $(CPAS_SRC)
@@ -217,6 +223,21 @@ test: $(CPAS_BIN)
 # Fail if a tracked file leaks private info (local paths, personal domains).
 check-private:
 	@bash compiler-tests/check-private-info.sh
+
+# Verify the committed snapshot is current and self-hosting holds.
+#
+#   fixpoint  the snapshot compiling its own source reproduces itself, byte
+#             for byte.  This is the project's strongest correctness signal.
+#   currency  the committed snapshot matches what the current source builds,
+#             so nobody can land a compiler change and forget to bootstrap.
+#
+# Uses a temp dir so a failure leaves no half-built artifact behind.
+check-fixpoint: $(CPAS_BIN)
+	@tmp=$$(mktemp -d); 	trap 'rm -rf "$$tmp"' EXIT; 	$(CPAS_BIN) < $(CPAS_SRC) > "$$tmp/gen1.wasm"; 	if ! cmp -s "$$tmp/gen1.wasm" $(SNAPSHOT); then 	    echo "check-fixpoint: committed snapshot is stale; run 'make bootstrap'" >&2; 	    exit 1; 	fi; 	$(WASMRUN) $(SNAPSHOT) < $(CPAS_SRC) > "$$tmp/gen2.wasm"; 	if ! cmp -s "$$tmp/gen1.wasm" "$$tmp/gen2.wasm"; then 	    echo "check-fixpoint: fixpoint broken; self-compiled output differs" >&2; 	    exit 1; 	fi; 	echo "check-fixpoint: snapshot current, fixpoint holds"
+
+# Everything CI runs, reproducible locally.
+test-all: check-private test check-fixpoint
+	@echo "test-all: all checks passed"
 
 # ── Deploy ───────────────────────────────────────────────────────
 

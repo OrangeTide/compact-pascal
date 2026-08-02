@@ -1,0 +1,177 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a toolchain release cannot silently change what CI verifies.
+  # FPC_VERSION is asserted rather than installed by version: the distro
+  # package manager decides what lands, and a mismatch must be loud because
+  # a -Mtp regression would break the bootstrap with a confusing error.
+  FPC_VERSION: "3.2.2"
+  WASMTIME_VERSION: "42.0.1"
+  WABT_VERSION: "1.0.34"
+
+jobs:
+  # Cheap checks that need no toolchain. Fails fast and independently.
+  guards:
+    name: Guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: No private information in tracked files
+        run: make check-private
+        # Only the generic layer runs here. The per-clone pattern list lives in
+        # .git/info/private-patterns and is deliberately not committed; see
+        # compiler-tests/check-private-info.sh.
+
+  # The main gate: full suite plus the self-hosting invariants.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Free Pascal (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fpc
+
+      - name: Install Free Pascal (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fpc
+
+      - name: Assert Free Pascal version
+        run: |
+          actual="$(fpc -iV)"
+          echo "fpc $actual"
+          if [ "$actual" != "$FPC_VERSION" ]; then
+            echo "::error::fpc $actual, expected $FPC_VERSION. The bootstrap depends on -Mtp behavior; review before bumping the pin." >&2
+            exit 1
+          fi
+
+      - name: Install wasmtime
+        # Not packaged for these runners, so take the pinned release directly.
+        # The archive member is named exactly rather than globbed, so a change
+        # in the release layout fails here instead of silently installing
+        # nothing.
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then arch=aarch64-macos; else arch=x86_64-linux; fi
+          dir="wasmtime-v${WASMTIME_VERSION}-${arch}"
+          curl -fsSL --retry 3 -o wasmtime.tar.xz \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${dir}.tar.xz"
+          sudo tar -xJf wasmtime.tar.xz --strip-components=1 -C /usr/local/bin "${dir}/wasmtime"
+          rm wasmtime.tar.xz
+          wasmtime --version
+
+      - name: Install wabt (wasm-validate)
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install wabt; else sudo apt-get install -y wabt; fi
+          wasm-validate --version
+
+      - name: Assert runtime versions
+        # Asserted, not installed by version: the point is that a toolchain
+        # change is loud rather than silently altering what CI verifies. The
+        # major version is what matters here, since a WASI or validation
+        # semantics change would land there.
+        run: |
+          wt="$(wasmtime --version | awk '{print $2}')"
+          wv="$(wasm-validate --version | awk '{print $1}')"
+          echo "wasmtime $wt, wasm-validate $wv"
+          [ "${wt%%.*}" = "${WASMTIME_VERSION%%.*}" ] || {
+            echo "::error::wasmtime major version ${wt%%.*}, expected ${WASMTIME_VERSION%%.*}" >&2; exit 1; }
+          [ "${wv%%.*}" = "${WABT_VERSION%%.*}" ] || {
+            echo "::error::wabt major version ${wv%%.*}, expected ${WABT_VERSION%%.*}" >&2; exit 1; }
+
+      - name: Test suite
+        # Builds compiler/cpas as a prerequisite.
+        run: make test
+
+      - name: Snapshot currency and self-hosting fixpoint
+        run: make check-fixpoint
+
+  # The compiler must build and produce identical output on Windows too.
+  # Cross-compiled on Linux and executed under Wine, which is far cheaper
+  # than a windows runner and exercises the same binary a Windows user gets.
+  win32:
+    name: Test (win32 under Wine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # NOT BLOCKING YET. The cross toolchain below could not be verified before
+    # this workflow was written: cross-compiling to win32 needs both the win32
+    # RTL units and an i386 cross-compiler binary, and whether the runner's fpc
+    # package ships the latter is unconfirmed. Landing it blocking would gate
+    # every merge on an unproven job. Flip continue-on-error off once this has
+    # gone green once; that flip is tracked in PLAN.md Phase C.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y fpc fp-units-win-rtl wine wine32 wabt
+
+      - name: Verify the win32 cross toolchain is usable
+        # Separated from the build so a missing cross-compiler reads as a CI
+        # setup problem rather than as a compiler defect.
+        run: |
+          if ! fpc -Twin32 -Pi386 -iV >/dev/null 2>&1; then
+            echo "::error::fpc cannot target win32/i386 on this runner. Adjust the install step (an i386 cross-compiler and the win32 RTL units are both required) rather than assuming the compiler is at fault." >&2
+            exit 1
+          fi
+          echo "win32 cross target available"
+
+      - name: Cross-compile cpas for win32
+        run: fpc -Mtp -Twin32 -Pi386 -FEbuild/win32 compiler/cpas.pas
+
+      - name: Compile the compiler's own source under Wine
+        run: |
+          export WINEDEBUG=-all
+          wine build/win32/cpas.exe < compiler/cpas.pas > win32.wasm
+          wasm-validate win32.wasm
+
+      - name: Output must match the committed snapshot byte for byte
+        run: |
+          if ! cmp win32.wasm snapshot/compiler.wasm; then
+            echo "::error::win32 build produced different output than the committed snapshot. The compiler is host-dependent, which it must not be." >&2
+            exit 1
+          fi
+          echo "win32 output is byte-identical to the snapshot"
+
+  rust:
+    name: Rust embedding
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Build
+        run: cargo build --verbose
+      - name: Test
+        run: cargo test --verbose
