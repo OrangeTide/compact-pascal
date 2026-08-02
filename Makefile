@@ -75,15 +75,14 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 
 # ── Top-level targets ────────────────────────────────────────────
 
-.PHONY: help all all-c all-zig all-rust pdf html clean clean-c clean-zig clean-rust
+.PHONY: help all all-c all-rust pdf html clean clean-c clean-rust
 .PHONY: bootstrap test check-private check-fixpoint test-all deploy-playground bump-version
 
 help:
 	@echo "Compact Pascal build targets:"
 	@echo ""
-	@echo "  all          Build everything (all-c all-zig all-rust)"
+	@echo "  all          Build everything (all-c all-rust)"
 	@echo "  all-c        Build C libraries, tools, tests, and examples"
-	@echo "  all-zig      Build Zig library (not yet implemented)"
 	@echo "  all-rust     Build Rust crate (not yet implemented)"
 	@echo "  pdf          Generate PDF documentation"
 	@echo "  html         Generate HTML documentation"
@@ -98,12 +97,9 @@ help:
 	@echo "  bump-version VERSION=YY.MM.PATCH"
 	@echo "                       Update version in compiler and docs, commit"
 
-all: all-c all-zig all-rust
+all: all-c all-rust
 
 all-c: lib-c lib-wasm3 example-c-hello
-
-all-zig:
-	@echo "all-zig: not yet implemented"
 
 all-rust:
 	@echo "all-rust: not yet implemented"
@@ -280,7 +276,7 @@ bump-version:
 
 # ── Cleanup ──────────────────────────────────────────────────────
 
-clean: clean-c clean-zig clean-rust
+clean: clean-c clean-rust
 
 clean-c:
 	rm -f $(CP_OBJ) $(CP_LIB)
@@ -290,9 +286,6 @@ clean-c:
 	$(if $(wildcard $(BUILD_DIR)),rmdir $(BUILD_DIR),: skipped removing $(BUILD_DIR) directory)
 	rm -f $(HELLO_BIN)
 	rm -f $(CPAS_BIN) compiler/cpas.o
-
-clean-zig:
-	@echo "clean-zig: not yet implemented"
 
 clean-rust:
 	@echo "clean-rust: not yet implemented"

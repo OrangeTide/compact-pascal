@@ -1250,15 +1250,27 @@ week three.
 
 ### Phase C: CI and fixpoint gating — 1.5 weeks
 
-- [ ] `.github/workflows/test.yml`: full suite plus byte-for-byte fixpoint
-      check on every push and PR.
-- [ ] Platform matrix: Linux (blocking), macOS (blocking), win32 under Wine
-      (blocking). Wine makes win32 cheap enough to gate on rather than defer.
-- [ ] Local `make test-all` running the same matrix a developer can reproduce.
-- [ ] Pin `fpc`, `wasmtime`, and `wasm-validate` versions. A `-Mtp` regression
-      in a minor fpc release would stall the entire pipeline silently.
+- [x] `.github/workflows/test.yml`: full suite plus byte-for-byte fixpoint
+      check on every push and PR. Adds `make check-fixpoint`, which also
+      catches a stale committed snapshot, not just a broken fixpoint.
+- [x] Platform matrix: Linux (blocking), macOS (blocking), win32 under Wine
+      (**not blocking yet**). Wine makes win32 cheap enough to gate on rather
+      than defer, but the cross toolchain could not be verified locally: fpc
+      here has no win32 target, and whether a runner's fpc ships an i386
+      cross-compiler alongside the win32 RTL units is unconfirmed. The job
+      carries `continue-on-error: true` and a preflight step so a toolchain gap
+      reads as a CI setup problem rather than a compiler defect.
+- [ ] **Flip the win32 job to blocking** once it has gone green once, or fix its
+      install step if it has not. This is the one Phase C item left open.
+- [x] Local `make test-all` running the same matrix a developer can reproduce.
+      Verified against a fresh clone.
+- [x] Pin `fpc`, `wasmtime`, and `wasm-validate` versions. Implemented as
+      assertions rather than version-locked installs: the protection wanted is
+      that a toolchain change is loud, and asserting gives that without
+      fighting each platform's package manager. fpc is asserted exactly,
+      wasmtime and wabt on major version.
 - [ ] Branch protection: no merge without green CI.
-- [ ] Run `make check-private` in CI so no commit can add a local filesystem
+- [x] Run `make check-private` in CI so no commit can add a local filesystem
       path. Blocking, and cheap: it is a `git grep` over tracked files.
 - [ ] Decide how the personal layer of that guard reaches CI, or accept that
       it does not. `compiler-tests/check-private-info.sh` reads per-clone
@@ -1270,8 +1282,10 @@ week three.
       a mistake on the machine that would make it, which is where the mistake
       happens; a secret buys little and adds a way for the pattern list itself
       to leak through CI logs.
-- [ ] Publish `ROADMAP.md` (public; `PLAN.md` is the working document) and fix
-      the README, which still advertises Rust + Zig + C embedding.
+- [x] Publish `ROADMAP.md` (public; `PLAN.md` is the working document) and fix
+      the README, which still advertised Rust + Zig + C embedding. Zig is gone
+      from the README, the Makefile, and the phase table; the reason is stated
+      in ROADMAP.md without editorializing.
 
 **Exit:** a commit that breaks the fixpoint by one byte cannot be merged, and
 one that adds a home-directory path fails the same way.

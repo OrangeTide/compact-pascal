@@ -9,7 +9,7 @@
 ![WASM Target: 1.0 MVP](https://img.shields.io/badge/WASM-1.0%20MVP-purple)
 [![Human–AI Co-Created](https://dotnetdave.github.io/ai-usage-badges/badges/svg/human-ai-co-created.svg)](https://dotnetdave.github.io/ai-usage-badges/)
 
-An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. Embedding libraries for Rust, Zig, and C let you compile and run Compact Pascal programs from your application — no external Pascal toolchain required.
+An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. Embedding libraries let you compile and run Compact Pascal programs from your application — no external Pascal toolchain required. Rust is the supported target; a C library is planned after it.
 
 ## Overview
 
@@ -25,7 +25,7 @@ Compact Pascal is a new language in the Pascal family. It inherits Pascal's synt
 
 ```
 ┌───────────────────────────────────────────────────┐
-│  Your Application (Rust / Zig / Browser JS)       │
+│  Your Application (Rust / C / Browser JS)         │
 ├───────────────────────────────────────────────────┤
 │  Embedding Library (compact─pascal crate/module)  │
 │  ┌────────────────┐   ┌───────────────────────┐   │
@@ -55,23 +55,9 @@ let instance = runtime.instantiate(&wasm_bytes)?;
 instance.call("main", &[])?;
 ```
 
-### Quick Example (Zig)
-
-```zig
-const cp = @import("compact-pascal");
-
-var compiler = cp.Compiler.init();
-const wasm_bytes = try compiler.compile(pascal_source);
-
-var runtime = cp.Runtime.init();
-try runtime.registerImport("print_int", printInt);
-var instance = try runtime.instantiate(wasm_bytes);
-try instance.call("main", &.{});
-```
-
 ## Status
 
-**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 115 tests (100 positive, 10 negative, 5 command-line). A browser playground is shipped. The C embedding library is partially implemented. See the [project plan](PLAN.md) for the phased roadmap.
+**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 119 tests (102 positive, 12 negative, 5 command-line). A browser playground is shipped. The C embedding library is partially implemented. See the [roadmap](ROADMAP.md) for what is committed, deferred, and not planned; [PLAN.md](PLAN.md) is the working document behind it.
 
 **Standalone usage (no embedding library needed):**
 
@@ -85,7 +71,7 @@ wasmtime run hello.wasm
 | 1 | Compiler (Pascal, bootstrapped with fpc) | Done |
 | 1b | Peephole optimization (optional) | In progress |
 | 1c | Language completeness polish | In progress |
-| 2 | Embedding libraries (Rust + Zig + C) | C partial, Rust/Zig not started |
+| 2 | Embedding libraries (Rust, then C) | Rust working; C partial; Zig not planned |
 | 3 | Self-hosting | Done (fixpoint validated) |
 | 4 | Browser playground | Done |
 | 5 | Playground file I/O | Not started |
@@ -139,7 +125,6 @@ wasmtime run hello.wasm
 ### Future (not yet needed)
 
 - **Rust** (stable) — for the Rust embedding library (Phase 2).
-- **Zig** — for the Zig embedding library (Phase 2).
 
 ### Optional
 
@@ -169,11 +154,10 @@ wasmtime run hello.wasm
 
 ```
 compiler/       — Pascal source for the compiler (cpas.pas, ~10k lines)
-compiler-tests/ — test suite (100 positive, 10 negative, 5 command-line, shell runner)
+compiler-tests/ — test suite (102 positive, 12 negative, 5 command-line, shell runner)
 src/
   c/            — C embedding library (compact_pascal.h/.c, vtable-based)
   rust/         — Rust crate source (not yet started)
-  zig/          — Zig library source (not yet started)
 snapshot/       — compiler WASM blob (compiler.wasm)
 vendor/wasm3/   — wasm3 C source (used by C library)
 examples/
