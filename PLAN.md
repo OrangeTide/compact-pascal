@@ -1087,6 +1087,14 @@ once users exist are made first.
 
 **Target: 1.0 declared at the end of Phase F. Roughly 16 weeks solo.**
 
+1.0 means *trustworthy*, not *capable*: closed specification, gated CI, a proven
+embedding, and failures that are loud rather than silent. It is deliberately
+still stack-only, single-file, and heapless. Phases G through M are what make
+the language capable enough to write arbitrary programs in, and they roughly
+double the total. Naming them here rather than leaving them implied, because
+"when can I allocate memory" and "can a program span files" are the first two
+questions a prospective user asks.
+
 ## Decisions made up front
 
 These were settled before any code, because each is expensive or impossible to
@@ -1261,7 +1269,14 @@ week three.
       carries `continue-on-error: true` and a preflight step so a toolchain gap
       reads as a CI setup problem rather than a compiler defect.
 - [ ] **Flip the win32 job to blocking** once it has gone green once, or fix its
-      install step if it has not. This is the one Phase C item left open.
+      install step if it has not.
+- [ ] **Release artifact.** A CI rule that zips `snapshot/compiler.wasm` with a
+      short README covering `wasmtime run compiler.wasm < prog.pas > prog.wasm`
+      and attaches it to a tag. Least-effort distribution: no packaging, no
+      installer, no platform matrix, just the one file that already works
+      anywhere wasmtime does. Today the answer to "how do I get this" is "clone
+      the repo and install fpc", which is not an answer. Feeds the 1.0 release
+      story in Phase F.
 - [x] Local `make test-all` running the same matrix a developer can reproduce.
       Verified against a fresh clone.
 - [x] Pin `fpc`, `wasmtime`, and `wasm-validate` versions. Implemented as
@@ -1296,10 +1311,15 @@ The load-bearing phase. Debugging silent memory corruption costs more than the
 instructions these checks add, and the frame-balance work here is what unblocks
 caller-allocated temporaries (structured and string returns) later.
 
-- [ ] **Stack overflow guard.** The stack grows down from memory top with no
-      guard; deep recursion currently walks through the heap and data segment
-      into the nil guard, silently. Prologue traps if SP drops below the data
-      end. Roughly five instructions per frame.
+- [ ] **Stack overflow guard. Land this first and alone if the rest slips.**
+      The stack grows down from memory top with no guard; deep recursion
+      currently walks through the heap and data segment into the nil guard,
+      silently. Prologue traps if SP drops below the data end. Roughly five
+      instructions per frame, and the cheapest debugging win available: a few
+      wasted cycles against hours spent chasing corruption that has no
+      symptom at the point it happens. A teaching compiler should have had
+      this from the first milestone. Keep it simple; a compare and a trap, no
+      guard pages, no red zone.
 - [ ] **Frame balance.** Save entry SP in a local at prologue; restore *from
       that local* at epilogue instead of the current relative `SP += frameSize`
       (`cpas.pas:7830`). This is not only a check: it makes an unbalanced stack
@@ -1357,15 +1377,135 @@ Decide, with the Rust library in real use, whether the C library ships. Record
 the decision and its rationale publicly either way. Deferring silently is the
 failure mode to avoid.
 
-### Phase H: Method pointers — 1.5 weeks
+### Phase H: Structured and string return types — 1.5 weeks
 
-Procedural types and method pointers, preparing for interfaces without
-committing to the full interface system.
+Depends on Phase D. `function F: string` is natural Pascal and is currently
+rejected outright with "return type expected"; the reference documents it as an
+unimplemented extension. The blocker was never the parser. A caller-allocated
+result buffer needs stack space whose count is not known when the frame
+prologue is emitted, and a leaked allocation used to desynchronize SP silently.
+Phase D's epilogue change, restoring SP from a saved local, makes such a leak
+self-healing at function return, which is what makes this implementable.
 
-### Phase I: Module system design, specification only — 1 week
+- [ ] Accept `string`, `string[n]`, records, and arrays as return types.
+- [ ] Hidden result pointer as the trailing parameter, which lands on the index
+      the scalar result local already occupies, so the epilogue and
+      `FuncName := expr` need no reindexing.
+- [ ] Caller allocates the buffer from SP and restores at end of statement;
+      `exit`, `break`, and `continue` paths covered by the Phase D epilogue.
+- [ ] Reject a string return on an `external` declaration: the host cannot be
+      handed a buffer this way.
 
-Design and specify. No implementation. Unblocks planning for separate
-compilation without opening the scope.
+**Exit:** a function returning a string can be assigned, passed, concatenated,
+and written; suite passes with checks on and off; fixpoint holds.
+
+### Phase I: Heap — `New` and `Dispose` — 2 weeks
+
+Depends on Phase E. The hard ceiling on what programs are expressible: today
+every size is fixed at compile time, so no list, tree, or growable buffer can
+be written at all.
+
+- [ ] Free-list allocator in linear memory, growing upward from the data
+      segment end toward the stack.
+- [ ] `New(p)` and `Dispose(p)`, sized from the pointer's target type.
+- [ ] Collision detection against the stack pointer, trapping under `{$S+}`
+      rather than silently overlapping. The stack guard from Phase D is the
+      other half of this.
+- [ ] Document the allocator's guarantees: no compaction, no garbage
+      collection, fragmentation is the programmer's problem.
+
+**Exit:** a linked list and a binary tree build, traverse, and free without
+leaking; a deliberate heap-stack collision traps.
+
+### Phase J: File system access and the `text` type — 3 weeks
+
+Two things at once, because they are the same underlying work: the compiler
+needs to read files for `{$I}`, and programs need file I/O for anything real.
+
+Today `{$I}` is expanded by the host before the compiler sees it, so the
+standalone compiler cannot build a multi-file program at all. It silently skips
+the directive and then fails on the undeclared identifier, which is a poor
+diagnostic for what is really a missing capability.
+
+- [ ] WASI file access: `path_open`, `fd_read`, `fd_write`, `fd_close`,
+      `fd_seek`. Host grants a preopened directory; nothing is reachable
+      outside it.
+- [ ] The `text` type, promoted from the two predefined handles to a real type
+      with a handle table.
+- [ ] `Assign`, `Reset`, `Rewrite`, `Close`, `ReadLn`, `WriteLn`, `Eof`,
+      `IOResult`. TP semantics: `IOResult` returns the last error and clears
+      it, and `{$I-}` suppresses the trap so the program can check.
+- [ ] Compiler-side `{$I}`: the compiler resolves and expands includes itself.
+      The host-side path stays supported for embedders that want it, but the
+      standalone CLI stops being single-file-only.
+- [ ] Nesting depth limit and a cycle check on includes, both diagnosed.
+
+**Exit:** the compiler compiles a multi-file program from the CLI with no host
+help; a program opens, writes, reopens, and reads back a file; `IOResult`
+reports a missing file rather than trapping under `{$I-}`.
+
+### Phase K: System units — 2 weeks
+
+A system unit looks like a unit at the use site but is not compiled: it names a
+set of bindings already built into the runtime. This gets the `uses` syntax and
+the name resolution working against a fixed, known set of symbols, before any
+of the separate-compilation machinery exists.
+
+- [ ] `uses` clause parsing and scope injection.
+- [ ] A binding table per system unit, resolved at compile time to existing
+      intrinsics and WASI imports.
+- [ ] Split the current always-on builtins into named units, keeping the
+      current set available without `uses` for compatibility.
+
+**Exit:** a program that says `uses Files;` gets the Phase J file routines and
+a program that does not, does not.
+
+### Phase L: Pascal units — 6 weeks, split
+
+Real separate compilation: write a unit, compile it independently, use it from
+another program. Substantial, and the largest single item on this roadmap. It
+exceeds the three-week phase cap deliberately and is split so the design can be
+reviewed before the implementation starts.
+
+**L1, design and specification, 2 weeks.** Supersedes the old "module system
+design" item.
+
+- [ ] `unit` / `interface` / `implementation` syntax, and how it stays
+      single-pass.
+- [ ] A compiler-generated interface description consumed by importers, rather
+      than a hand-written header. The spec review in `notes/` and Excelsior
+      independently reached the same conclusion, which is decent evidence.
+- [ ] How a unit maps onto a WASM module: one module per unit, or link-time
+      merge. This is the decision that constrains everything after it.
+- [ ] Initialization order, and whether a unit may have an initialization
+      section at all.
+
+**L2, implementation, 4 weeks.** Only after L1 is settled.
+
+**Exit:** a three-unit program compiles from the CLI, each unit compiled
+separately, and recompiling one unit does not require recompiling the others.
+
+### Phase M: Method pointers and interfaces — 3 weeks
+
+Procedural types, then the standalone methods and `implement` blocks whose
+design Phase A settled. Last because it is the only remaining item that nothing
+else depends on.
+
+## Open decisions
+
+Small, tracked so they are not lost. None blocks a phase.
+
+- **Do `byte`, `word`, and `shortint` enforce their nominal ranges?** Today all
+  are aliases for `integer`: `sizeof` is 4 and `b: byte; b := 300` holds 300
+  even under `{$R+}`. The reference documents the alias behavior, so this is a
+  decision either way rather than a silent contradiction. Enforcing means range
+  checks on assignment and a storage-size decision for records.
+- **Should `string[N]` accept a named constant for the length?** The grammar
+  allows a general `Constant`; the compiler requires an `INTEGER_LITERAL`.
+  Found in the Phase A grammar audit and recorded as a restriction.
+- **When to bump the CalVer version.** Held at 26.04.1 through all of Phase A
+  and B per the rule about waiting for an explicit publish, though the
+  reference has changed substantially.
 
 ## Standing invariants
 
