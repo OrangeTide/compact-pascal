@@ -1311,7 +1311,7 @@ The load-bearing phase. Debugging silent memory corruption costs more than the
 instructions these checks add, and the frame-balance work here is what unblocks
 caller-allocated temporaries (structured and string returns) later.
 
-- [ ] **Stack overflow guard. Land this first and alone if the rest slips.**
+- [x] **Stack overflow guard. Land this first and alone if the rest slips.**
       The stack grows down from memory top with no guard; deep recursion
       currently walks through the heap and data segment into the nil guard,
       silently. Prologue traps if SP drops below the data end. Roughly five
@@ -1326,7 +1326,7 @@ caller-allocated temporaries (structured and string returns) later.
       allocation self-healing at function return rather than desynchronizing SP
       for the rest of the program. Assert the expected value before restoring
       and trap on mismatch.
-- [ ] New `{$S+/-}` directive, default **ON** pre-1.0. Silent corruption is
+- [x] New `{$S+/-}` directive, default **ON** pre-1.0. Silent corruption is
       worse than the code size. Revisit the default at 1.0.
 - [ ] Run the whole suite twice in CI, checks on and checks off.
 - [ ] Flip `{$R+}` on for the test suite even though the language default stays

@@ -29,6 +29,10 @@ const
   MaxSyms    = 1024;
   MaxScopes  = 32;
   MaxFuncs   = 256;   { max user-defined functions }
+  { WASM global indices: 0 = $sp, 1..8 = display[0..7], 9 = __version,
+    10 = __stack_limit. }
+  GlobalStackLimit = 10;
+
   MaxIfdefDepth = 8;  { max nested IFDEF levels }
   MaxDefines    = 32; (* max conditional symbols: predefined + DEFINE + -d *)
 
@@ -523,6 +527,7 @@ var
   optAlign: longint;          (* ALIGN n, record field alignment in bytes (1,2,4,8), default 4 *)
   optDump: boolean;           (* -dump command-line flag *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
+  optStackChecks: boolean;    (* S+/-, default true: stack overflow guard *)
   optProgress: boolean;       (* -progress command-line flag *)
   optVerbose: boolean;        (* -v command-line flag, emits Info: lines *)
   optDebug: boolean;          (* -debug command-line flag, emits Debug: lines *)
@@ -1131,6 +1136,8 @@ begin
         Error('{$EXPORT} expects export name');
       hasPendingExport := true;
       pendingExportName := expName;
+    end else if (directive = 'S') or (directive = 'STACKCHECKS') then begin
+      optStackChecks := ParseDirectiveSwitch;
     end else if (directive = 'R') or (directive = 'RANGECHECKS') then begin
       optRangeChecks := ParseDirectiveSwitch;
     end else if (directive = 'Q') or (directive = 'OVERFLOWCHECKS') then begin
@@ -7823,6 +7830,37 @@ begin
             i32.const <frameSize>
             i32.sub
             global.set $sp *)
+    { Stack overflow guard, emitted when stack checks are on. Runs BEFORE the
+      subtraction, comparing against limit + frameSize rather than checking
+      $sp afterwards.
+      WAT: global.get $sp
+           global.get $__stack_limit
+           i32.const <frameSize>
+           i32.add
+           i32.lt_u
+           if
+             unreachable
+           end
+      Checking afterwards looks simpler and is wrong: a frame large enough to
+      carry $sp past zero wraps it to a huge unsigned value, which compares
+      as above the limit and sails through. Checking first means $sp never
+      wraps, and it is still valid at the trap, which makes the failure
+      easier to read.
+      Without any guard the stack walks down through the heap and the data
+      segment, corrupting whatever it passes while the program carries on
+      with wrong data. Only emitted when the function actually moves $sp: a
+      frameless function cannot overflow it. }
+    if optStackChecks then begin
+      EmitGlobalGet(0);
+      EmitGlobalGet(GlobalStackLimit);
+      EmitI32Const(curFrameSize);
+      EmitOp(OpI32Add);
+      EmitOp(OpI32LtU);
+      EmitOp(OpIf); EmitOp(WasmVoid);
+        EmitOp(OpUnreachable);
+      EmitOp(OpEnd);
+    end;
+
     EmitGlobalGet(0);
     EmitI32Const(curFrameSize);
     EmitOp(OpI32Sub);
@@ -8103,7 +8141,7 @@ var
   i: longint;
 begin
   SmallBufInit(secGlobal);
-  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth + 1); { $sp + 8 display + __version }
+  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth + 2); { $sp + 8 display + __version + __stack_limit }
   { Global 0: $sp (stack pointer) }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
   SmallBufEmit(secGlobal, 1);        { mutable }
@@ -8124,6 +8162,17 @@ begin
   SmallBufEmit(secGlobal, 0);        { immutable }
   SmallBufEmit(secGlobal, OpI32Const);
   SmallEmitSLEB128(secGlobal, VersionYear * 65536 + VersionMonth * 256 + VersionPatch);
+  SmallBufEmit(secGlobal, OpEnd);
+  { Global 10: __stack_limit (immutable, the first address the stack must not
+    reach). The stack grows down from the top of memory toward the data
+    segment, so the limit is the data segment's high-water mark. dataPos is
+    final by the time this section is assembled, which is why the limit lives
+    in a global rather than as an immediate in each prologue: frame code is
+    emitted long before the last string literal is allocated. }
+  SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
+  SmallBufEmit(secGlobal, 0);        { immutable }
+  SmallBufEmit(secGlobal, OpI32Const);
+  SmallEmitSLEB128(secGlobal, dataPos);
   SmallBufEmit(secGlobal, OpEnd);
 end;
 
@@ -10999,6 +11048,7 @@ begin
   optExtLiterals := false;
   optAlign := 4;
   optDump := false;
+  optStackChecks := true;
   optProgress := false;
   optVerbose := false;
   optDebug := false;

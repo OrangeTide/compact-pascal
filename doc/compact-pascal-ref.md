@@ -650,7 +650,9 @@ The stack pointer is a mutable WASM global, initialized to the top of memory. Ea
 **Frame size is fixed before the body is compiled.** The compiler is single-pass: it emits the prologue that reserves the frame, with the size as an immediate operand, before it has read a single statement of the body. Nothing later in the body can enlarge the frame. Two consequences follow, and both are properties of the language as specified, not passing implementation details:
 
 - A construct needing caller-allocated temporaries whose count is not known from the declarations alone cannot be given frame storage. This is why a function returning a structured type, including `string`, is not yet available: the caller must supply the result buffer, and it cannot reserve one per call site after the fact.
-- There is no stack overflow detection. A deep enough recursion walks the stack pointer down through the heap and the data segment without trapping, corrupting whatever it passes. Programs that recurse to a data-dependent depth should bound that depth themselves. A checked mode is planned.
+**Stack overflow is detected.** Every prologue compares the stack pointer against a lower bound before reserving the frame, and traps if the new frame would cross it. The bound is the end of the data segment, so a program that recurses too deeply terminates at the moment of overflow instead of walking the stack pointer down through the heap and the data segment and corrupting whatever it passes. The check costs five instructions per call and is on by default. It can be turned off per-region with `{$S-}` and back on with `{$S+}`; with checks off the old undefined behavior returns, and a deep enough recursion silently corrupts memory.
+
+The comparison happens before the subtraction, not after, so a single frame large enough to carry the stack pointer past zero is caught rather than wrapping around to a large unsigned address that compares as valid.
 
 ### Entry Point
 
@@ -852,6 +854,7 @@ Local directives may appear anywhere in the source. They take effect from the po
 |---|---|---|---|
 | `{$RANGECHECKS ON/OFF}` | `{$R+/-}` | OFF | Emit runtime range checks for array indexing and subrange assignments. |
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
+| `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue. |
 | `{$ALIGN n}` | — | 4 | Record field alignment in bytes (1, 2, 4, or 8). Each field within a record is placed at the next multiple of `n`; the total record size is padded to a multiple of `n`. |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |
