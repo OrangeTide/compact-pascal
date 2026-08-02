@@ -1261,15 +1261,15 @@ week three.
 - [x] `.github/workflows/test.yml`: full suite plus byte-for-byte fixpoint
       check on every push and PR. Adds `make check-fixpoint`, which also
       catches a stale committed snapshot, not just a broken fixpoint.
-- [x] Platform matrix: Linux (blocking), macOS (blocking), win32 under Wine
-      (**not blocking yet**). Wine makes win32 cheap enough to gate on rather
-      than defer, but the cross toolchain could not be verified locally: fpc
-      here has no win32 target, and whether a runner's fpc ships an i386
-      cross-compiler alongside the win32 RTL units is unconfirmed. The job
-      carries `continue-on-error: true` and a preflight step so a toolchain gap
-      reads as a CI setup problem rather than a compiler defect.
-- [ ] **Flip the win32 job to blocking** once it has gone green once, or fix its
-      install step if it has not.
+- [x] Platform matrix: Linux, macOS, and Windows under Wine, all blocking.
+      Target is **win64, not win32**: Ubuntu's `fp-units-win-rtl` ships
+      `x86_64-win64` units, so the host `ppcx64` cross-compiles directly with
+      no i386 cross-compiler and no multiarch. The first CI run failed on that
+      wrong assumption; the job's preflight step reported it as a CI setup
+      problem rather than a compiler defect, which is what it was designed to
+      do. Verified end to end locally before re-enabling: extracted the units
+      from the `.deb` without installing, cross-compiled, ran under Wine, and
+      confirmed byte-identical output. Blocking from the start as a result.
 - [ ] **Release artifact.** A CI rule that zips `snapshot/compiler.wasm` with a
       short README covering `wasmtime run compiler.wasm < prog.pas > prog.wasm`
       and attaches it to a tag. Least-effort distribution: no packaging, no

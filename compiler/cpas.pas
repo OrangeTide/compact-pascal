@@ -10851,7 +10851,12 @@ begin
 
   { Flush output to stdout }
   {$IFDEF FPC}
-  Assign(outFile, '/dev/stdout');
+  { An empty file name binds to standard output. Do not reach for
+    '/dev/stdout': that path is Linux-specific, fails on macOS with a file
+    access error, and does not exist on Windows at all. Rewrite with a record
+    size of 1 gives an untyped binary stream, which also avoids the CRLF
+    translation a text file would apply on Windows. }
+  Assign(outFile, '');
   Rewrite(outFile, 1);
   BlockWrite(outFile, outBuf.data, outBuf.len);
   Close(outFile);

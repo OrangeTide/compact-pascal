@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: No private information in tracked files
         run: make check-private
         # Only the generic layer runs here. The per-clone pattern list lives in
@@ -47,7 +47,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Free Pascal (Linux)
         if: runner.os == 'Linux'
@@ -107,61 +107,59 @@ jobs:
         run: make check-fixpoint
 
   # The compiler must build and produce identical output on Windows too.
-  # Cross-compiled on Linux and executed under Wine, which is far cheaper
-  # than a windows runner and exercises the same binary a Windows user gets.
-  win32:
-    name: Test (win32 under Wine)
+  # Cross-compiled on Linux and executed under Wine, which is far cheaper than
+  # a windows runner and exercises the same binary a Windows user would get.
+  #
+  # win64, not win32: Ubuntu's fp-units-win-rtl ships x86_64-win64 units, so
+  # the host ppcx64 cross-compiles directly and no i386 cross-compiler or
+  # multiarch is needed. The first run of this job failed on exactly that
+  # wrong assumption.
+  windows:
+    name: Test (win64 under Wine)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # NOT BLOCKING YET. The cross toolchain below could not be verified before
-    # this workflow was written: cross-compiling to win32 needs both the win32
-    # RTL units and an i386 cross-compiler binary, and whether the runner's fpc
-    # package ships the latter is unconfirmed. Landing it blocking would gate
-    # every merge on an unproven job. Flip continue-on-error off once this has
-    # gone green once; that flip is tracked in PLAN.md Phase C.
-    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install toolchain
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y fpc fp-units-win-rtl wine wine32 wabt
+        run: sudo apt-get update && sudo apt-get install -y fpc fp-units-win-rtl wine wabt
 
-      - name: Verify the win32 cross toolchain is usable
-        # Separated from the build so a missing cross-compiler reads as a CI
-        # setup problem rather than as a compiler defect.
+      - name: Verify the win64 cross target is usable
+        # Separated from the build so a missing target reads as a CI setup
+        # problem rather than as a compiler defect.
         run: |
-          if ! fpc -Twin32 -Pi386 -iV >/dev/null 2>&1; then
-            echo "::error::fpc cannot target win32/i386 on this runner. Adjust the install step (an i386 cross-compiler and the win32 RTL units are both required) rather than assuming the compiler is at fault." >&2
+          if ! fpc -Twin64 -iV >/dev/null 2>&1; then
+            echo "::error::fpc cannot target win64 on this runner. Fix the install step rather than assuming the compiler is at fault." >&2
             exit 1
           fi
-          echo "win32 cross target available"
+          echo "win64 cross target available"
 
-      - name: Cross-compile cpas for win32
-        run: fpc -Mtp -Twin32 -Pi386 -FEbuild/win32 compiler/cpas.pas
+      - name: Cross-compile cpas for Windows
+        run: fpc -Mtp -Twin64 -FEbuild/win64 compiler/cpas.pas
 
       - name: Compile the compiler's own source under Wine
         run: |
           export WINEDEBUG=-all
-          wine build/win32/cpas.exe < compiler/cpas.pas > win32.wasm
-          wasm-validate win32.wasm
+          wine build/win64/cpas.exe < compiler/cpas.pas > windows.wasm
+          wasm-validate windows.wasm
 
       - name: Output must match the committed snapshot byte for byte
+        # Catches host-dependent codegen, and also catches the compiler
+        # silently writing nothing: a previous stdout binding produced an empty
+        # file with exit status 0 on Windows, which only a content check finds.
         run: |
-          if ! cmp win32.wasm snapshot/compiler.wasm; then
-            echo "::error::win32 build produced different output than the committed snapshot. The compiler is host-dependent, which it must not be." >&2
+          if ! cmp windows.wasm snapshot/compiler.wasm; then
+            echo "::error::Windows build produced different output than the committed snapshot ($(stat -c%s windows.wasm) bytes). The compiler must not depend on its host." >&2
             exit 1
           fi
-          echo "win32 output is byte-identical to the snapshot"
+          echo "Windows output is byte-identical to the snapshot"
 
   rust:
     name: Rust embedding
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
