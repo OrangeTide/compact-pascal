@@ -711,7 +711,7 @@ Under `{$S+}` the epilogue also compares the stack pointer against the recorded 
 
 **Frame size is fixed before the body is compiled.** The compiler is single-pass: it emits the prologue that reserves the frame, with the size as an immediate operand, before it has read a single statement of the body. Nothing later in the body can enlarge the frame. Two consequences follow, and both are properties of the language as specified, not passing implementation details:
 
-- A construct needing caller-allocated temporaries whose count is not known from the declarations alone cannot be given frame storage. This is why a function returning a structured type, including `string`, is not yet available: the caller must supply the result buffer, and it cannot reserve one per call site after the fact.
+- A construct needing caller-allocated temporaries whose count is not known from the declarations alone cannot be given frame storage. A function returning a structured type is the case that matters, and it is supported: the buffer is taken from the stack below the frame rather than from the frame itself, and released at the end of the statement. See [Structured Return Types](#structured-return-types).
 **Stack overflow is detected.** Every prologue compares the stack pointer against a lower bound before reserving the frame, and traps if the new frame would cross it. The bound is the end of the data segment, so a program that recurses too deeply terminates at the moment of overflow instead of walking the stack pointer down through the heap and the data segment and corrupting whatever it passes. The check is six instructions on the path that does not trap, and measured 0.93% of the compiler's own code size. It is on by default. It can be turned off per-region with `{$S-}` and back on with `{$S+}`; with checks off the old undefined behavior returns, and a deep enough recursion silently corrupts memory.
 
 The comparison happens before the subtraction, not after, so a single frame large enough to carry the stack pointer past zero is caught rather than wrapping around to a large unsigned address that compares as valid.
@@ -1183,7 +1183,7 @@ This keeps `MyCat.Name` unambiguous. The alternative, letting fields shadow meth
 
 ### Structured Return Types
 
-Standard Pascal restricts function return types to simple types and pointers. Compact Pascal lifts this restriction: functions may return any type, including arrays and records. This follows the precedent set by C, where functions can return structs by value.
+Standard Pascal restricts function return types to simple types and pointers. Compact Pascal lifts this restriction: a function may return a `string`, a record, or an array. This follows the precedent set by C, where functions can return structs by value.
 
 ```pascal
 type TPoint = record
@@ -1191,20 +1191,42 @@ type TPoint = record
 end;
 
 function Origin: TPoint;
+var P: TPoint;
 begin
-  Origin.X := 0;
-  Origin.Y := 0;
+  P.X := 0;
+  P.Y := 0;
+  Origin := P;      { assign the whole value }
 end;
 
-function MakeRow: array[1..5] of integer;
-var i: integer;
+function Greet(const Name: string): string;
 begin
-  for i := 1 to 5 do
-    MakeRow[i] := i * 10;
+  Greet := 'hello, ' + Name;
+end;
+
+function Shout(const S: string): string[40];
+begin
+  Shout := S + '!';
 end;
 ```
 
-The compiler implements this via a hidden pointer parameter: the caller allocates space for the return value in its own stack frame and passes a pointer as a hidden first argument. The callee writes the result through that pointer. This is the same calling convention used by C compilers for struct returns.
+The return type must be a type *name*, or `string` / `string[n]`. An anonymous `record ... end` or `array[...] of T` is not accepted, because a caller has no way to name that type.
+
+**Assign the result as a whole.** `Origin := P` is how a structured result is delivered. Assigning to a field or element of it, `Origin.X := 0`, is not supported and is a compile error naming the limitation. Build the value in a local variable and assign that.
+
+**An `external` function cannot return a structured type.** The mechanism below is a private arrangement between the compiler's call sites and its own prologues; nothing tells a host what to do with it.
+
+#### How it works, and what that costs
+
+The caller allocates the result buffer and passes its address as a hidden **trailing** parameter; the callee writes through it and returns no WASM value. Trailing rather than leading so the visible parameters keep their indices.
+
+The buffer comes from the stack, not from the caller's frame — the frame size is fixed before the body is compiled, so it cannot hold a count of temporaries that is not known from the declarations. It is released at the end of the statement. That is the shortest lifetime that works: a result can be an operand of anything within the statement, and nothing refers to it afterwards.
+
+Two consequences worth knowing:
+
+- **A statement that calls many structured-returning functions holds every result until it ends.** `writeln(F(1), F(2), F(3))` has three buffers alive at once. Each `string` result costs 256 bytes. With the default 64 KB stack this is not a practical limit, but a statement in a deeply recursive function is spending stack that the recursion also needs.
+- **Loops release each iteration**, so a loop calling a string-returning function ten thousand times uses one buffer's worth of stack, not ten thousand. `exit`, `break`, and `continue` release before branching.
+
+Under `{$S+}` an unbalanced release is caught by the frame balance check described under [Stack](#stack).
 
 ### Interfaces
 
@@ -1481,7 +1503,9 @@ FuncDecl         = 'function'  Identifier
                     lookahead after the identifier decides between a method
                     and an ordinary procedure. LL(1) is preserved.
                     'external' is used with {$IMPORT} for WASM host-provided procedures.
-                    Return type is any Type, including arrays and records —
+                    A return type is a TypeIdentifier or a StringType, never an
+                    anonymous record or array, and an 'external' function may
+                    not return a structured type —
                     see Structured Return Types under Extensions. *)
 ```
 

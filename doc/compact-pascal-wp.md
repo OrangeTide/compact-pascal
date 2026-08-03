@@ -478,7 +478,9 @@ FuncDecl         = 'function'  Identifier
                    | [ FormalParams ] ':' Type ';' ( Block ';' | 'forward' ';' | 'external' ';' ) ) .
                  (* 'for' Receiver marks a standalone method — see Extensions.
                     'external' is used with {$IMPORT} for WASM host-provided procedures.
-                    Return type is any Type, including arrays and records —
+                    A return type is a TypeIdentifier or a StringType, never an
+                    anonymous record or array, and an 'external' function may
+                    not return a structured type —
                     see Structured Return Types under Extensions.
                     Forward bodies repeat the full header (IP Pascal convention),
                     unlike Turbo Pascal where the body omits the parameter list. *)

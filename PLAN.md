@@ -506,6 +506,66 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**A structured result buffer is stack-allocated with a compile-time depth
+counter.** The buffer cannot come from the frame, because the frame size is
+fixed before the body is compiled, which was the original blocker. It comes
+from the stack below the frame and is released at the end of the statement.
+
+Every address involved is derived from `$sp` at run time by adding back what
+was taken below it, and the amount is a compile-time constant the compiler
+tracks in `stmtArenaBytes`. That counter is the part that took two wrong
+attempts. Fixed offsets worked for one call and broke as soon as a call's
+argument contained another structured-returning call, because the inner call's
+buffer persists to the end of the statement and sits between `$sp` and the
+outer one. Anything derived from `$sp` needs the running depth, not a fixed
+size.
+
+Order of allocation is load-bearing and worth stating: saved concat pieces
+highest, then the result buffer, then the argument concat temps, which are the
+only ones released at the call rather than at the statement.
+
+**`exit`, `break`, and `continue` needed explicit releases; the plan said they
+would not.** Phase D's epilogue restores `$sp` from the frame base, so the plan
+assumed a branch out of a statement holding a buffer was already covered. It is
+not, for two reasons. The frame balance check runs *before* the epilogue's
+restore, so a buffer outstanding at `exit` trips a trap that is not a bug. And
+`break` leaves a loop whose body statement never reached its release, so
+without one the loop accumulates a buffer per iteration. All three now release
+before branching, and loops release at the bottom of each iteration.
+
+**One flag carried two meanings, and separating them mattered.**
+`stmtUsedResultBuf` means both "this statement owes a release" and "$sp is
+currently below the frame base". Clearing it on entry to a nested statement,
+which is the obvious save/restore pattern, broke the second meaning:
+`EmitFramePtr` reads `$sp` as a shortcut for the current frame, and a nested
+statement that had cleared the flag addressed its frame variables through a
+`$sp` that an enclosing statement's buffer was holding down. The flag is now
+not cleared; the statement that owes the release is the one that finds it
+false on entry.
+
+**Pending concatenation pieces collided across a call.** The pieces of a
+pending `+` chain lived in one static array at a fixed address. A callee that
+concatenated wrote over its caller's pieces while the caller was still using
+them, so `a + Wrap(b)` produced the wrong string. This predates Phase H
+entirely: the old compiler gave `[)]` where `[A(B)]` was correct, reachable
+through the accidental `type TS = string` return path. It is also what made a
+recursive string function return empty.
+
+Two fixes together, because either alone is insufficient. The slots are rebased
+per compile-time nesting level, which handles one expression nesting inside
+another. And the pending pieces are copied onto the stack across a call, which
+handles the run-time case: the callee was compiled at base zero and writes
+there no matter what base the caller chose. The copy is emitted only when there
+are pieces to protect, so an ordinary call costs nothing.
+
+**Known defect, not fixed here: char-to-string coercion aliases.** `a + '.' +
+b + '.'` with two `char` operands gives `[B.]` instead of `[A.B.]`. Each char
+is converted to a one-character string in a single static buffer, so the second
+conversion overwrites the first. Same family as the concat-piece collision and
+the same fix would apply. Present in the pre-Phase-H snapshot and unchanged by
+it, verified by running both compilers on the same source. Found while checking
+that a reference example actually ran.
+
 **The C library is dropped, and the checklist had been describing it
 generously.** "Partially implemented" appeared in the README and in this plan
 for months. The assessment at the Phase G gate found that every function
@@ -1540,7 +1600,7 @@ lives. See Findings for the assessment behind it.
       rather than as a library, with build instructions against upstream wasm3.
 - [x] Correct every document that described the C library in the present tense.
 
-### Phase H: Structured and string return types — 1.5 weeks
+### Phase H: Structured and string return types — DONE
 
 Depends on Phase D. `function F: string` is natural Pascal and is currently
 rejected outright with "return type expected"; the reference documents it as an
@@ -1550,17 +1610,32 @@ prologue is emitted, and a leaked allocation used to desynchronize SP silently.
 Phase D's epilogue change, restoring SP from a saved local, makes such a leak
 self-healing at function return, which is what makes this implementable.
 
-- [ ] Accept `string`, `string[n]`, records, and arrays as return types.
-- [ ] Hidden result pointer as the trailing parameter, which lands on the index
+- [x] Accept `string`, `string[n]`, records, and arrays as return types. The
+      return type must be a name or `string`/`string[n]`; an anonymous record
+      or array is rejected, since a caller cannot name that type.
+- [x] Hidden result pointer as the trailing parameter, which lands on the index
       the scalar result local already occupies, so the epilogue and
-      `FuncName := expr` need no reindexing.
-- [ ] Caller allocates the buffer from SP and restores at end of statement;
-      `exit`, `break`, and `continue` paths covered by the Phase D epilogue.
-- [ ] Reject a string return on an `external` declaration: the host cannot be
+      `FuncName := expr` need no reindexing. This part worked exactly as
+      written.
+- [x] Caller allocates the buffer from SP and restores at end of statement.
+      `exit`, `break`, and `continue` are NOT covered by the Phase D epilogue,
+      contrary to the plan: each branches past the release, and the balance
+      check runs before the epilogue restores. They release explicitly. Loops
+      release per iteration so a long loop cannot accumulate. See Findings.
+- [x] Reject a string return on an `external` declaration: the host cannot be
       handed a buffer this way.
 
 **Exit:** a function returning a string can be assigned, passed, concatenated,
-and written; suite passes with checks on and off; fixpoint holds.
+and written; suite passes with checks on and off; fixpoint holds. All met: 138
+tests in both configurations, fixpoint holds.
+
+**Not supported, deliberately:** assigning to a field or element of the result,
+`MakePoint.x := 1`. It is ordinary Pascal and it is a compile error naming the
+limitation rather than a mystery about a missing `end`. Build the value in a
+local and assign the whole thing. Supporting it means treating the function
+name as a designator over the hidden parameter, which is the same selector-loop
+duplication that `with p^ do` ran into; both should be fixed together after the
+five near-identical loops are collapsed.
 
 ### Phase I: Heap — `New` and `Dispose` — 2 weeks
 

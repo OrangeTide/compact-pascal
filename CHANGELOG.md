@@ -29,6 +29,16 @@ behind a decision lives in the Findings section of `PLAN.md`.
 - `write` and `writeln` reject a pointer argument.
 - **`{$S+/-}` (`{$STACKCHECKS}`) directive**, on by default. Controls the stack
   overflow guard, the frame balance check, and the nil check.
+- **Functions may return a `string`, `string[n]`, record, or array.**
+  `function F: string` was previously rejected outright. The result is
+  caller-allocated and released at the end of the statement; loops release each
+  iteration. Assigning to a *field* of the result, `MakePoint.x := 1`, is not
+  supported and reports what to do instead. An `external` function may not
+  return a structured type.
+
+  A named string return type used to compile by accident and returned the
+  address of the callee's dead frame, so `F(1) + F(2)` printed the second value
+  twice. If you relied on that path, it now copies correctly.
 
 ### Compiler
 
@@ -50,8 +60,16 @@ behind a decision lives in the Findings section of `PLAN.md`.
 - Fixed stdout binding that depended on `/dev/stdout` and so failed on macOS
   and produced an empty file on Windows.
 
-**Known limitation:** `with p^ do` is rejected. Use `p^.field`. Assignment
-between pointer types with different targets is not yet checked.
+- **Concatenation across a call is fixed.** The pieces of a pending `+` chain
+  were held at one fixed address, so a callee that concatenated overwrote its
+  caller's pieces. `a + Wrap(b)` produced the wrong string, and a recursive
+  string function returned empty. Pieces are now protected across a call.
+
+**Known limitations:** `with p^ do` is rejected; use `p^.field`. Assignment
+between pointer types with different targets is not yet checked. Concatenating
+two or more `char` values in one expression, `a + '.' + b + '.'`, aliases a
+shared conversion buffer and gives the wrong answer; concatenate strings
+instead. That last one is long-standing, not new.
 
 ### Rust crate
 

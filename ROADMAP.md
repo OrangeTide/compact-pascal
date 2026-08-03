@@ -37,14 +37,14 @@ and it is stated here rather than discovered later.
 What makes the language capable enough for arbitrary programs comes after, and
 is roughly as much work again:
 
-| Phase | Goal |
-|---|---|
-| H | Structured and string return types — `function F: string` |
-| I | Heap: `New` and `Dispose` |
-| J | File system access and the `text` type; `{$I}` inside the compiler |
-| K | System units — `uses` against runtime-provided bindings |
-| L | Pascal units — write and compile your own, separately |
-| M | Method pointers and interfaces |
+| Phase | Goal | Status |
+|---|---|---|
+| H | Structured and string return types — `function F: string` | Done |
+| I | Heap: `New` and `Dispose` | |
+| J | File system access and the `text` type; `{$I}` inside the compiler | |
+| K | System units — `uses` against runtime-provided bindings | |
+| L | Pascal units — write and compile your own, separately | |
+| M | Method pointers and interfaces | |
 
 Phases are capped at about three weeks each so that a wrong estimate stays
 contained. Phase L breaks that cap and is split into design and implementation
