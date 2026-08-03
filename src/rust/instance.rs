@@ -12,6 +12,25 @@ pub enum RuntimeError {
     Instantiation(String),
     Execution(String),
     FunctionNotFound(String),
+    /// The program called `halt(n)` with a nonzero status. This is an ordinary
+    /// way for a Pascal program to end, so it is reported separately from a
+    /// trap and carries the status rather than a message about it.
+    Exit(i32),
+    /// The program trapped. `Trapped` names the WASM trap where one applies:
+    /// `unreachable` is what the stack overflow guard, the frame balance
+    /// check, and the nil check all raise, so seeing it usually means a check
+    /// fired rather than that the module was malformed.
+    Trapped(String),
+}
+
+impl RuntimeError {
+    /// The exit status when the program ended by calling `halt`.
+    pub fn exit_status(&self) -> Option<i32> {
+        match self {
+            RuntimeError::Exit(n) => Some(*n),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for RuntimeError {
@@ -20,11 +39,24 @@ impl fmt::Display for RuntimeError {
             RuntimeError::Instantiation(e) => write!(f, "instantiation error: {e}"),
             RuntimeError::Execution(e) => write!(f, "execution error: {e}"),
             RuntimeError::FunctionNotFound(e) => write!(f, "function not found: {e}"),
+            RuntimeError::Exit(n) => write!(f, "program exited with status {n}"),
+            RuntimeError::Trapped(e) => write!(f, "trap: {e}"),
         }
     }
 }
 
 impl Error for RuntimeError {}
+
+/// Turn a wasmi call error into a RuntimeError, treating exit status zero as
+/// success. Every call site needs this, and getting it wrong here is how a
+/// normal program termination turns into a spurious failure.
+fn classify(e: wasmi::Error) -> Option<RuntimeError> {
+    match e.i32_exit_status() {
+        Some(0) => None,
+        Some(n) => Some(RuntimeError::Exit(n)),
+        None => Some(RuntimeError::Trapped(e.to_string())),
+    }
+}
 
 pub struct InstanceBuilder {
     engine: Engine,
@@ -150,14 +182,10 @@ impl Instance {
 
         match func.call(&mut self.store, &[], &mut []) {
             Ok(()) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("proc_exit(0)") {
-                    Ok(())
-                } else {
-                    Err(RuntimeError::Execution(msg))
-                }
-            }
+            Err(e) => match classify(e) {
+                Some(err) => Err(err),
+                None => Ok(()),
+            },
         }
     }
 
@@ -180,9 +208,8 @@ impl Instance {
         match func.call(&mut self.store, &wasm_args, &mut results) {
             Ok(()) => {}
             Err(e) => {
-                let msg = e.to_string();
-                if !msg.contains("proc_exit(0)") {
-                    return Err(RuntimeError::Execution(msg));
+                if let Some(err) = classify(e) {
+                    return Err(err);
                 }
             }
         }
@@ -548,6 +575,39 @@ end."#;
         let result = instance.call_args("compute", &[23])?;
         assert_eq!(result, Some(123));
         Ok(())
+    }
+
+    fn compile(src: &str) -> Vec<u8> {
+        crate::compiler::Compiler::new()
+            .compile(src)
+            .expect("source should compile")
+            .wasm
+    }
+
+    #[test]
+    fn halt_with_a_status_is_reported_as_an_exit() {
+        let wasm = compile("program T; begin halt(3); end.");
+        let mut i = Instance::new(&wasm).unwrap();
+        let err = i.run().unwrap_err();
+        assert_eq!(err.exit_status(), Some(3));
+    }
+
+    #[test]
+    fn halt_zero_is_success() {
+        let wasm = compile("program T; begin halt(0); end.");
+        let mut i = Instance::new(&wasm).unwrap();
+        assert!(i.run().is_ok());
+    }
+
+    #[test]
+    fn a_nil_dereference_is_reported_as_a_trap_not_an_exit() {
+        let wasm = compile(
+            "program T;\ntype PInt = ^integer;\nvar p: PInt;\nbegin p := nil; writeln(p^); end.",
+        );
+        let mut i = Instance::new(&wasm).unwrap();
+        let err = i.run().unwrap_err();
+        assert!(err.exit_status().is_none(), "got {err}");
+        assert!(matches!(err, RuntimeError::Trapped(_)), "got {err}");
     }
 }
 
