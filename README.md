@@ -5,7 +5,7 @@
 </p>
 
 ![Status: Phase 1 Complete](https://img.shields.io/badge/status-phase%201%20complete-green)
-![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
+![License: CC0-1.0](https://img.shields.io/badge/license-CC0--1.0-blue)
 ![WASM Target: 1.0 MVP](https://img.shields.io/badge/WASM-1.0%20MVP-purple)
 [![Human–AI Co-Created](https://dotnetdave.github.io/ai-usage-badges/badges/svg/human-ai-co-created.svg)](https://dotnetdave.github.io/ai-usage-badges/)
 
@@ -46,18 +46,21 @@ The compiler ships as a pre-compiled WASM binary embedded in the library. Your a
 ### Quick Example (Rust)
 
 ```rust
-let compiler = compact_pascal::Compiler::new();
-let wasm_bytes = compiler.compile(pascal_source)?;
+use compact_pascal::{Compiler, Instance};
 
-let mut runtime = compact_pascal::Runtime::new();
-runtime.register_import("print_int", |val: i32| { println!("{val}"); })?;
-let instance = runtime.instantiate(&wasm_bytes)?;
-instance.call("main", &[])?;
+let result = Compiler::new()
+    .compile("program Hello; begin writeln('Hello!') end.")?;
+Instance::new(&result.wasm)?.run()?;
 ```
+
+Compiling at run time is the point: the Pascal source can come from a file, a
+database, or a user. See [EMBEDDING-GUIDE.md](EMBEDDING-GUIDE.md) for calling
+into Pascal, registering host callbacks, reading diagnostics, and bounding what
+a guest may consume. Working examples are in `examples/rust`.
 
 ## Status
 
-**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 119 tests (102 positive, 12 negative, 5 command-line). A browser playground is shipped. The C embedding library is partially implemented. See the [roadmap](ROADMAP.md) for what is committed, deferred, and not planned; [PLAN.md](PLAN.md) is the working document behind it.
+**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 132 tests (108 positive, 19 negative, 5 command-line), each run with checks on and with checks off. A browser playground is shipped. The C embedding library is partially implemented. See the [roadmap](ROADMAP.md) for what is committed, deferred, and not planned; [PLAN.md](PLAN.md) is the working document behind it.
 
 **Standalone usage (no embedding library needed):**
 
@@ -84,6 +87,7 @@ wasmtime run hello.wasm
 
 | Document | Description |
 |---|---|
+| [EMBEDDING-GUIDE.md](EMBEDDING-GUIDE.md) | Embedding the compiler in a Rust application |
 | [doc/compact-pascal-wp.md](doc/compact-pascal-wp.md) | White paper — motivation, architecture, grammar |
 | [doc/compact-pascal-ref.md](doc/compact-pascal-ref.md) | Language reference (living document, CalVer versioned) |
 | [doc/compact-pascal-tutorial.md](doc/compact-pascal-tutorial.md) | Compiler tutorial book — building the compiler step by step |
@@ -122,9 +126,15 @@ wasmtime run hello.wasm
   sudo apt install build-essential
   ```
 
-### Future (not yet needed)
+- **Rust** (stable, 1.85 or later) — for the embedding crate. Nothing else is
+  needed to use it: the compiler snapshot is built into the crate, so a Rust
+  user needs no Pascal toolchain and no WASM runtime of their own.
 
-- **Rust** (stable) — for the Rust embedding library (Phase 2).
+  ```bash
+  cargo build
+  cargo test
+  cargo run --example hello
+  ```
 
 ### Optional
 
@@ -153,11 +163,11 @@ wasmtime run hello.wasm
 ## Project Layout
 
 ```
-compiler/       — Pascal source for the compiler (cpas.pas, ~10k lines)
-compiler-tests/ — test suite (102 positive, 12 negative, 5 command-line, shell runner)
+compiler/       — Pascal source for the compiler (cpas.pas, ~11.5k lines)
+compiler-tests/ — test suite (108 positive, 19 negative, 5 command-line, shell runner)
 src/
   c/            — C embedding library (compact_pascal.h/.c, vtable-based)
-  rust/         — Rust crate source (not yet started)
+  rust/         — Rust crate source (compiler, runtime, WASI bridge)
 snapshot/       — compiler WASM blob (compiler.wasm)
 vendor/wasm3/   — wasm3 C source (used by C library)
 examples/
@@ -170,13 +180,21 @@ pages/          — GitHub Pages site
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, what the tests check,
+and the two invariants a change must keep. Conduct expectations are in
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md); changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
+
+To report a security issue, see [SECURITY.md](SECURITY.md) rather than opening
+an issue.
 
 ## License
 
-Licensed under either of
+[CC0 1.0 Universal](LICENSE). This project is dedicated to the public domain.
 
-- [Apache License, Version 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
+Use it for anything, commercially or otherwise. No attribution is required,
+though it is welcome. There is no warranty.
 
-at your option.
+Most of this codebase was written by a machine, and machine-written work
+carries no copyright to assign. CC0 states plainly what is already the case
+rather than claiming a right in order to license it back out.
