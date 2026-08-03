@@ -225,6 +225,8 @@ const
   MaxTypes    = 256;
   MaxFields   = 512;
   MaxPendingPtr = 32;   { unresolved forward pointer references per type block }
+  { 17 slots of 4 bytes per nesting level, four levels deep. }
+  ConcatScratchBytes = 272;
 
   { Symbol kinds }
   skNone      = 0;
@@ -282,7 +284,7 @@ type
   end;
 
   { WASM type signature }
-  TWasmParamArr = array[0..15] of byte;
+  TWasmParamArr = array[0..16] of byte;  { 16 visible params plus a hidden result pointer }
   TWasmResultArr = array[0..3] of byte;
   TWasmType = record
     nparams: longint;
@@ -345,6 +347,14 @@ type
     constParams: array[0..15] of boolean; { which params are const (string by-ref, read-only) }
     paramTyp: array[0..15] of longint;    { param type tags, for forward-header checking }
     paramTypeIdx: array[0..15] of longint; { types[] index per param, -1 for simple }
+    { A function returning a structured type takes a hidden trailing parameter
+      holding the address of a buffer the caller allocated, and returns no
+      WASM value. retSize is the buffer size in bytes; retTyp is tyNone for a
+      procedure or a scalar-returning function. }
+    retTyp: longint;
+    retTypeIdx: longint;
+    retSize: longint;
+    retStrMax: longint;
   end;
 
 { ---- Global Variables ---- }
@@ -510,6 +520,7 @@ var
   needsCopyTemp: boolean;        { whether copy temp was allocated }
   concatPieces: longint;         { compile-time count of saved concat pieces }
   addrConcatScratch: longint;    { data segment addr of 17-slot scratch array }
+  concatScratchBase: longint;    { byte offset of the current nesting level }
   addrConcatTemp: longint;       { 256-byte temp string for concat result }
   needsConcatScratch: boolean;   { whether scratch was allocated }
   startNlocals: longint;         { extra locals for _start (0 or 1) }
@@ -519,6 +530,12 @@ var
   curFuncNeedsCaseTemp: boolean;  { whether current func needs the case temp local }
   curFuncIsFunction: boolean;    { whether current func is a function (has return value) }
   curFuncReturnIdx: longint;     { WASM local index for return value in current func }
+  curFuncRetStructured: boolean; { current function returns via a caller buffer }
+  curFuncRetTyp: longint;
+  curFuncRetSize: longint;
+  curFuncRetStrMax: longint;
+  stmtUsedResultBuf: boolean;   { a statement allocated a structured result buffer }
+  stmtArenaBytes: longint;      { bytes taken from $sp that live until the statement ends }
   breakDepth: longint;           { br depth for break (-1 = not in loop) }
   continueDepth: longint;        { br depth for continue (-1 = not in loop) }
   exitDepth: longint;            { br depth for exit (-1 = not in function/program body) }
@@ -2739,6 +2756,13 @@ begin
   numTypes := numTypes + 1;
 end;
 
+function IsStructuredRet(t: longint): boolean;
+{** Whether a return type is passed through a caller-allocated buffer rather
+  than on the WASM operand stack, which can only carry an i32. }
+begin
+  IsStructuredRet := (t = tyString) or (t = tyRecord) or (t = tyArray);
+end;
+
 function FindOrAddPointerType(targetTyp, targetTypeIdx, targetSize, targetStrMax: longint): longint;
 {** Return a descriptor for ^Target, reusing an existing one when the target
   matches. The target is held in the elem* fields, the same slots an array
@@ -3355,9 +3379,34 @@ end;
   ;; WAT: global.get $sp            (if level = curNestLevel)
   ;; WAT: global.get $display{level} (otherwise)
 *)
-procedure EmitFramePtr(level: longint);
+procedure EmitStmtArenaRelease;
+{** Return $sp to the frame base, dropping every structured result buffer and
+  saved concat slot the current statement took.
+
+  Emitted before exit, break, and continue, because each of those branches
+  past the release the statement would otherwise have run. Two instructions,
+  and it is not conditional on the statement having allocated anything: a
+  branch can leave a statement whose allocation happened further out, and the
+  compiler does not know that from where the branch is written. Restoring to
+  the frame base is idempotent, so paying it always is simpler than being
+  clever about when. }
 begin
-  if level = curNestLevel then begin
+  EmitGlobalGet(curNestLevel + 1);  { display[curNestLevel] = frame base }
+  EmitGlobalSet(0);
+  stmtArenaBytes := 0;
+end;
+
+procedure EmitFramePtr(level: longint);
+{** Push the base address of the frame at `level`.
+
+  For the current level this reads $sp rather than the display global, which
+  is a byte shorter and valid because $sp equals the frame base at every
+  statement boundary. A structured function result breaks that: its buffer is
+  taken from the stack and held until the statement ends, so $sp is below the
+  frame base for the rest of the statement. Once one has been taken, read the
+  display global instead. }
+begin
+  if (level = curNestLevel) and not stmtUsedResultBuf then begin
     EmitGlobalGet(0);  { $sp }
   end else begin
     EmitGlobalGet(level + 1);  { display[level] = global level+1 }
@@ -3572,10 +3621,13 @@ var j: longint;
 begin
   if not needsConcatScratch then begin
     needsConcatScratch := true;
-    { 17 slots x 4 bytes: 16 concat pieces, plus one for the final piece
-      when writing a concatenation to stderr (see ParseWriteArgs). }
-    addrConcatScratch := AllocDataAligned(68, 4);
-    for j := 1 to 68 do DataBufEmit(secData, 0);
+    { 17 slots x 4 bytes per nesting level: 16 concat pieces, plus one for
+      the final piece when writing a concatenation to stderr (see
+      ParseWriteArgs). Four levels, because a concatenation whose operand is
+      a call whose argument is another concatenation needs its own slots;
+      concatScratchBase selects the level. }
+    addrConcatScratch := AllocDataAligned(ConcatScratchBytes, 4);
+    for j := 1 to ConcatScratchBytes do DataBufEmit(secData, 0);
     addrConcatTemp := AllocDataAligned(256, 4);   { temp string for concat result }
     for j := 1 to 256 do DataBufEmit(secData, 0);
   end;
@@ -3973,6 +4025,9 @@ var
   hasAddr: boolean;
   exprTypeIdx: longint;
   exprStrMax: longint;
+  savedConcatPieces, savedConcatBase: longint;
+  pieceSaveBytes: longint;
+  retMark, saveMark: longint;
   fldIdx: longint;
   isConst: boolean;
   nSetElems: longint;
@@ -3986,6 +4041,7 @@ var
   castName: string;
   leftSetSize: longint;
   concatSPAllocs: longint;
+  retBufSize: longint;
   wantAddr: boolean;
   leftTypeIdx: longint;
   ptrTgtTyp, ptrTgtIdx, ptrTgtSize, ptrTgtStrMax: longint;
@@ -4106,7 +4162,7 @@ begin
             Error('too many concat pieces (max 16)');
           curFuncNeedsStringTemp := true;
           EmitLocalSet(curStringTempIdx);
-          EmitI32Const(addrConcatScratch + concatPieces * 4);
+          EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
           EmitLocalGet(curStringTempIdx);
           EmitI32Store(2, 0);
           concatPieces := concatPieces + 1;
@@ -4558,6 +4614,69 @@ begin
         skFunc: begin
           { Function call in expression }
           NextToken;
+          { Two stack areas are taken here, and the order is load-bearing
+            because every address below is derived from $sp by adding back
+            what was taken after it. Highest first:
+
+              pending concat pieces   (pieceSaveBytes)
+              structured result       (retBufSize)
+              concat temps for args   (concatSPAllocs * 256, taken later)
+
+            The concat temps are released right after the call; the other two
+            live until the statement ends. }
+          { Arguments get their own concat nesting level. Without this, an
+            argument that finalizes a concatenation consumes the pending
+            pieces of the expression the call sits inside, because the piece
+            count and the scratch slots are both global. `a + F(b)` used to
+            hand F the pieces belonging to the outer `+`.
+
+            The compile-time rebase is not enough on its own. The callee's
+            body was compiled at base zero, so at run time it writes over the
+            caller's slots regardless of what the caller chose. Pending pieces
+            are therefore copied onto the stack across the call. The copy is
+            emitted only when there are pieces to protect, so an ordinary call
+            outside a concatenation costs nothing. }
+          savedConcatPieces := concatPieces;
+          savedConcatBase := concatScratchBase;
+          pieceSaveBytes := 0;
+          if concatPieces > 0 then begin
+            pieceSaveBytes := concatPieces * 4;
+            EmitGlobalGet(0);
+            EmitI32Const(pieceSaveBytes);
+            EmitOp(OpI32Sub);
+            EmitGlobalSet(0);
+            for fi := 0 to concatPieces - 1 do begin
+              EmitGlobalGet(0);
+              if fi > 0 then begin
+                EmitI32Const(fi * 4);
+                EmitOp(OpI32Add);
+              end;
+              EmitI32Const(addrConcatScratch + concatScratchBase + fi * 4);
+              EmitI32Load(2, 0);
+              EmitI32Store(2, 0);
+            end;
+            stmtUsedResultBuf := true;  { released with the statement }
+            stmtArenaBytes := stmtArenaBytes + pieceSaveBytes;
+            saveMark := stmtArenaBytes;
+          end;
+          concatScratchBase := concatScratchBase + concatPieces * 4;
+          concatPieces := 0;
+          if concatScratchBase + 68 > ConcatScratchBytes then
+            Error('string concatenation nested too deeply');
+          { The result buffer, below the saved pieces. It lives until the end
+            of the statement so the caller can use the value it holds. }
+          retBufSize := 0;
+          retMark := 0;
+          if IsStructuredRet(funcs[syms[sym].size].retTyp) then begin
+            retBufSize := (funcs[syms[sym].size].retSize + 3) and (not 3);
+            EmitGlobalGet(0);
+            EmitI32Const(retBufSize);
+            EmitOp(OpI32Sub);
+            EmitGlobalSet(0);
+            stmtUsedResultBuf := true;
+            stmtArenaBytes := stmtArenaBytes + retBufSize;
+            retMark := stmtArenaBytes;
+          end;
           if tokKind = tkLParen then begin
             NextToken;
             argIdx := 0;
@@ -4586,7 +4705,7 @@ begin
                     for fi := 0 to concatPieces - 1 do begin
                       EmitGlobalGet(0);
                       EmitI32Const(255);
-                      EmitI32Const(addrConcatScratch + fi * 4);
+                      EmitI32Const(addrConcatScratch + concatScratchBase + fi * 4);
                       EmitI32Load(2, 0);
                       EmitCall(EnsureStrAppend);
                     end;
@@ -4655,6 +4774,20 @@ begin
             end;
             Expect(tkRParen);
           end;
+          concatPieces := savedConcatPieces;
+          concatScratchBase := savedConcatBase;
+          { A structured result goes through a buffer this call site allocated
+            before the arguments were evaluated. Its address is the current
+            $sp plus whatever the arguments pushed below it, which is exactly
+            the concat scratch that is about to be released. Deriving it that
+            way avoids spending a local to hold it. }
+          if retBufSize > 0 then begin
+            EmitGlobalGet(0);
+            if (stmtArenaBytes - retMark) + concatSPAllocs * 256 > 0 then begin
+              EmitI32Const((stmtArenaBytes - retMark) + concatSPAllocs * 256);
+              EmitOp(OpI32Add);
+            end;
+          end;
           EmitCall(syms[sym].offset);
           { Restore SP for any concat temp allocations }
           if concatSPAllocs > 0 then begin
@@ -4664,7 +4797,36 @@ begin
             EmitGlobalSet(0);
             concatSPAllocs := 0;
           end;
+          { Copy the protected pieces back, now that the callee can no longer
+            write over them. The save area sits just above the result buffer,
+            the concat temps having been released. }
+          if pieceSaveBytes > 0 then begin
+            for fi := 0 to concatPieces - 1 do begin
+              EmitI32Const(addrConcatScratch + concatScratchBase + fi * 4);
+              EmitGlobalGet(0);
+              if (stmtArenaBytes - saveMark) + fi * 4 > 0 then begin
+                EmitI32Const((stmtArenaBytes - saveMark) + fi * 4);
+                EmitOp(OpI32Add);
+              end;
+              EmitI32Load(2, 0);
+              EmitI32Store(2, 0);
+            end;
+            pieceSaveBytes := 0;
+          end;
           exprType := syms[sym].typ;
+          if retBufSize > 0 then begin
+            { The call returned nothing; the value of the expression is the
+              buffer. It stays allocated until the statement ends, so its
+              address is $sp plus whatever was taken below it since. }
+            EmitGlobalGet(0);
+            if stmtArenaBytes - retMark > 0 then begin
+              EmitI32Const(stmtArenaBytes - retMark);
+              EmitOp(OpI32Add);
+            end;
+            exprTypeIdx := funcs[syms[sym].size].retTypeIdx;
+            exprStrMax := funcs[syms[sym].size].retStrMax;
+            retBufSize := 0;
+          end;
           { Return value is left on WASM stack }
         end;
         skType: begin
@@ -4982,7 +5144,7 @@ begin
       { Save left addr from WASM stack to scratch[concatPieces] }
       curFuncNeedsStringTemp := true;
       EmitLocalSet(curStringTempIdx);
-      EmitI32Const(addrConcatScratch + concatPieces * 4);
+      EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
       EmitLocalGet(curStringTempIdx);
       EmitI32Store(2, 0);
       concatPieces := concatPieces + 1;
@@ -5338,12 +5500,12 @@ begin
               { Park the final piece in scratch memory. EmitInlineWriteStr
                 below uses curStringTempIdx as its own scratch and would
                 otherwise overwrite the address before we get to it. }
-              EmitI32Const(addrConcatScratch + concatPieces * 4);
+              EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
               EmitLocalGet(curStringTempIdx);
               EmitI32Store(2, 0);
             end;
             for i := 0 to concatPieces - 1 do begin
-              EmitI32Const(addrConcatScratch + i * 4);
+              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
               EmitI32Load(2, 0);
               if fd = 1 then
                 EmitCall(EnsureWriteStr)
@@ -5354,7 +5516,7 @@ begin
               EmitLocalGet(curStringTempIdx);
               EmitCall(EnsureWriteStr);
             end else begin
-              EmitI32Const(addrConcatScratch + concatPieces * 4);
+              EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
               EmitI32Load(2, 0);
               EmitInlineWriteStr(fd, curStringTempIdx);
             end;
@@ -5881,6 +6043,8 @@ begin
       types[pendingPtrType[i]].elemSize := 4;
   end;
   numPendingPtr := 0;
+  stmtUsedResultBuf := false;
+  stmtArenaBytes := 0;
 end;
 
 procedure CheckPointerAssign(dTyp: longint);
@@ -5997,8 +6161,29 @@ var
   savedContinue: longint;
   limitAddr: longint;
   concatSPAllocs: longint;
+  fi: longint;
+  savedUsedResultBuf: boolean;
+  savedConcatPieces, savedConcatBase: longint;
 begin
   concatSPAllocs := 0;
+  { A structured function result is a buffer taken from the stack, and it has
+    to outlive the call that filled it. Releasing it at the end of the
+    statement is the shortest lifetime that works: a result can be an operand
+    of anything within the statement, and nothing refers to it afterwards.
+
+    The release is an absolute restore rather than a byte count, because
+    display[curNestLevel] is the stack pointer's value at every statement
+    boundary. That makes it correct no matter how many buffers the statement
+    took, and it is why break and continue need nothing extra: they branch
+    past their loop body's release, and the enclosing loop statement's own
+    release runs at the branch target. }
+  savedUsedResultBuf := stmtUsedResultBuf;
+  { Deliberately not cleared. The flag carries two facts at once: that a
+    release is owed, and that $sp is currently below the frame base. A nested
+    statement that cleared it would go on to address frame variables through
+    the $sp shortcut while an enclosing statement's buffer was still holding
+    $sp down. The release is owed by whichever statement first displaced $sp,
+    which is the one that sees `saved` false. }
   case tokKind of
     tkBegin: begin
       NextToken;
@@ -6415,7 +6600,7 @@ begin
             for i := 0 to concatPieces - 1 do begin
               EmitI32Const(addrConcatTemp);
               EmitI32Const(255);
-              EmitI32Const(addrConcatScratch + i * 4);
+              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
               EmitI32Load(2, 0);
               EmitCall(EnsureStrAppend);
             end;
@@ -6526,15 +6711,82 @@ begin
           EmitStoreByType(desTyp);
         end;
       end
+      else if (sym >= 0) and (syms[sym].kind = skFunc)
+              and ((tokKind = tkDot) or (tokKind = tkLBrack))
+              and IsStructuredRet(funcs[syms[sym].size].retTyp) then
+        { Assigning to a field or element of the result is ordinary Pascal and
+          is not implemented: the result buffer is reachable only as a whole,
+          through the hidden parameter. Say so, rather than falling through to
+          the call path and failing on the selector with a complaint about a
+          missing "end". }
+        Error('cannot assign to a field or element of a function result; ' +
+              'build the value in a local variable and assign that')
       else if (sym >= 0) and (syms[sym].kind = skFunc) and (tokKind = tkAssign) then begin
         { Function return value assignment: FuncName := expr }
         NextToken;
-        ParseExpression(PrecNone);
-        { Store in the hidden WASM local at index nparams }
-        EmitLocalSet(funcs[syms[sym].size].nparams);
+        fi := syms[sym].size;  { funcs[] index }
+
+        if (funcs[fi].retTyp = tyString) then begin
+          { The result lives in the caller's buffer, whose address arrived in
+            the hidden trailing parameter at index nparams. Copy into it
+            rather than overwriting the pointer. }
+          ParseExpression(PrecNone);
+          if exprType <> tyString then
+            Error('string expression expected');
+          if concatPieces > 0 then begin
+            { Build the concatenation in the static temp first, for the same
+              reason an ordinary string assignment does: the destination may
+              be one of the operands. }
+            curFuncNeedsStringTemp := true;
+            EmitLocalSet(curStringTempIdx);
+            EmitI32Const(addrConcatTemp);
+            EmitI32Const(0);
+            EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+            for i := 0 to concatPieces - 1 do begin
+              EmitI32Const(addrConcatTemp);
+              EmitI32Const(255);
+              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+              EmitI32Load(2, 0);
+              EmitCall(EnsureStrAppend);
+            end;
+            EmitI32Const(addrConcatTemp);
+            EmitI32Const(255);
+            EmitLocalGet(curStringTempIdx);
+            EmitCall(EnsureStrAppend);
+            EmitLocalGet(funcs[fi].nparams);
+            EmitI32Const(funcs[fi].retStrMax);
+            EmitI32Const(addrConcatTemp);
+            EmitCall(EnsureStrAssign);
+            concatPieces := 0;
+          end else begin
+            curFuncNeedsStringTemp := true;
+            EmitLocalSet(curStringTempIdx);
+            EmitLocalGet(funcs[fi].nparams);
+            EmitI32Const(funcs[fi].retStrMax);
+            EmitLocalGet(curStringTempIdx);
+            EmitCall(EnsureStrAssign);
+          end;
+        end
+        else if (funcs[fi].retTyp = tyRecord) or (funcs[fi].retTyp = tyArray) then begin
+          EmitLocalGet(funcs[fi].nparams);   { dst = caller's buffer }
+          ParseExpression(PrecNone);          { src address }
+          EmitI32Const(funcs[fi].retSize);
+          EmitMemoryCopy;
+        end
+        else begin
+          ParseExpression(PrecNone);
+          { Store in the hidden WASM local at index nparams }
+          EmitLocalSet(funcs[fi].nparams);
+        end;
       end
       else if (sym >= 0) and ((syms[sym].kind = skProc) or (syms[sym].kind = skFunc)) then begin
         { Procedure/function call (discard result for functions) }
+        savedConcatPieces := concatPieces;
+        savedConcatBase := concatScratchBase;
+        concatScratchBase := concatScratchBase + concatPieces * 4;
+        concatPieces := 0;
+        if concatScratchBase + 68 > ConcatScratchBytes then
+          Error('string concatenation nested too deeply');
         if tokKind = tkLParen then begin
           NextToken;
           argIdx := 0;
@@ -6563,7 +6815,7 @@ begin
                   for i := 0 to concatPieces - 1 do begin
                     EmitGlobalGet(0);
                     EmitI32Const(255);
-                    EmitI32Const(addrConcatScratch + i * 4);
+                    EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
                     EmitI32Load(2, 0);
                     EmitCall(EnsureStrAppend);
                   end;
@@ -6636,7 +6888,7 @@ begin
                 for i := 0 to concatPieces - 1 do begin
                   EmitLocalGet(curStringTempIdx);
                   EmitI32Const(255);
-                  EmitI32Const(addrConcatScratch + i * 4);
+                  EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
                   EmitI32Load(2, 0);
                   EmitCall(EnsureStrAppend);
                 end;
@@ -6654,6 +6906,8 @@ begin
           end;
           Expect(tkRParen);
         end;
+        concatPieces := savedConcatPieces;
+        concatScratchBase := savedConcatBase;
         EmitCall(syms[sym].offset);
         { Restore SP for any concat temp allocations }
         if concatSPAllocs > 0 then begin
@@ -6737,6 +6991,9 @@ begin
       ParseStatement;
       if exitDepth >= 0 then exitDepth := exitDepth - 2;
       breakDepth := savedBreak; continueDepth := savedContinue;
+      { Each iteration releases what its condition and body took, so a loop
+        cannot walk the stack down one buffer at a time. }
+      EmitStmtArenaRelease;
       EmitOp(OpBr);
       EmitULEB128(startCode, 0);
       EmitOp(OpEnd);
@@ -6815,6 +7072,7 @@ begin
         if exitDepth >= 0 then exitDepth := exitDepth - 3;
         breakDepth := savedBreak; continueDepth := savedContinue;
         EmitOp(OpEnd); { end body block }
+        EmitStmtArenaRelease;
 
         { Increment counter }
         EmitFramePtr(syms[sym].level);
@@ -6871,6 +7129,9 @@ begin
         if exitDepth >= 0 then exitDepth := exitDepth - 3;
         breakDepth := savedBreak; continueDepth := savedContinue;
         EmitOp(OpEnd); { end body block }
+        { Release before touching the counter: the counter is a frame variable
+          and the body may have left $sp displaced. }
+        EmitStmtArenaRelease;
 
         { Decrement counter }
         EmitFramePtr(syms[sym].level);
@@ -6911,6 +7172,7 @@ begin
       Expect(tkUntil);
       ParseExpression(PrecNone);
       EmitOp(OpI32Eqz);
+      EmitStmtArenaRelease;
       EmitOp(OpBrIf);
       EmitULEB128(startCode, 0);
       EmitOp(OpEnd);  { end loop }
@@ -6992,6 +7254,7 @@ begin
       NextToken;
       if exitDepth < 0 then
         Error('exit outside of procedure/function');
+      EmitStmtArenaRelease;
       EmitOp(OpBr);
       EmitULEB128(startCode, exitDepth);
     end;
@@ -7000,6 +7263,7 @@ begin
       NextToken;
       if breakDepth < 0 then
         Error('break outside of loop');
+      EmitStmtArenaRelease;
       EmitOp(OpBr);
       EmitULEB128(startCode, breakDepth);
     end;
@@ -7008,6 +7272,7 @@ begin
       NextToken;
       if continueDepth < 0 then
         Error('continue outside of loop');
+      EmitStmtArenaRelease;
       EmitOp(OpBr);
       EmitULEB128(startCode, continueDepth);
     end;
@@ -7067,6 +7332,10 @@ begin
   else
     Error('statement expected');
   end;
+  if stmtUsedResultBuf and not savedUsedResultBuf then begin
+    EmitStmtArenaRelease;
+    stmtUsedResultBuf := false;
+  end;
 end;
 
 procedure ParseProcDecl;
@@ -7089,6 +7358,8 @@ var
   funcIdx: longint;
   retTyp: longint;
   retTypSym: longint;
+  retTypeIdx, retSize, retStrMax: longint;
+  retIsStructured: boolean;
   mismatchA, mismatchB: string[11];  { forward-header mismatch messages }
   nlocals: longint;
   nparams: longint;
@@ -7109,6 +7380,7 @@ var
   wasmParams: TWasmParamArr;
   wasmResults: TWasmResultArr;
   nWasmResults: longint;
+  nWasmParams: longint;
   savedNestLevel: longint;
   savedDisplayLocal: longint;
   myDisplayLocal: longint;
@@ -7118,6 +7390,8 @@ var
   savedFuncNeedsCaseTemp: boolean;
   savedFuncIsFunction: boolean;
   savedFuncReturnIdx: longint;
+  savedFuncRetStructured: boolean;
+  savedFuncRetTyp, savedFuncRetSize, savedFuncRetStrMax: longint;
   savedExitDepth: longint;
   savedBreakDepth: longint;
   savedContinueDepth: longint;
@@ -7233,20 +7507,35 @@ begin
     Expect(tkRParen);
   end;
 
-  { Parse return type for functions }
+  { Parse return type for functions.
+
+    ParseTypeSpec rather than a bare identifier, so `: string` and
+    `: string[40]` are accepted alongside a named type. It also rejects an
+    anonymous `record ... end` return by the grammar, which is deliberate:
+    a caller has no way to name that type. }
   retTyp := tyNone;
+  retTypeIdx := -1;
+  retSize := 0;
+  retStrMax := 0;
   if isFunc then begin
     Expect(tkColon);
-    if tokKind <> tkIdent then
+    if (tokKind <> tkIdent) and (tokKind <> tkString_kw) then
       Expected('return type');
-    retTypSym := LookupSym(tokStr);
-    if retTypSym < 0 then
-      Error('unknown type: ' + tokStr);
-    if syms[retTypSym].kind <> skType then
-      Error(tokStr + ' is not a type');
-    retTyp := syms[retTypSym].typ;
-    NextToken;
+    if tokKind = tkString_kw then
+      ParseTypeSpec(retTyp, retTypeIdx, retSize, retStrMax)
+    else begin
+      retTypSym := LookupSym(tokStr);
+      if retTypSym < 0 then
+        Error('unknown type: ' + tokStr);
+      if syms[retTypSym].kind <> skType then
+        Error(tokStr + ' is not a type');
+      ParseTypeSpec(retTyp, retTypeIdx, retSize, retStrMax);
+    end;
   end;
+  { A structured result is returned through a caller-allocated buffer rather
+    than on the WASM operand stack, which has no way to carry one. }
+  retIsStructured := (retTyp = tyString) or (retTyp = tyRecord)
+                     or (retTyp = tyArray);
 
   Expect(tkSemicolon);
 
@@ -7259,6 +7548,14 @@ begin
     hasPendingImport := false;
     NextToken;
     Expect(tkSemicolon);
+
+    { A host function cannot be handed a caller-allocated buffer: the hidden
+      parameter is a private arrangement between this compiler's own call
+      sites and its own prologues, and nothing tells a host what to do with
+      it. Rejecting is better than silently passing an address the host will
+      read as an integer. }
+    if retIsStructured then
+      Error('an external function cannot return a structured type');
 
     { Build WASM type signature for the import }
     for i := 0 to np - 1 do
@@ -7282,6 +7579,10 @@ begin
     funcs[numFuncs].bodyLen := 0;
     funcs[numFuncs].nlocals := 0;
     funcs[numFuncs].nparams := np;
+    funcs[numFuncs].retTyp := retTyp;
+    funcs[numFuncs].retTypeIdx := retTypeIdx;
+    funcs[numFuncs].retSize := retSize;
+    funcs[numFuncs].retStrMax := retStrMax;
     for i := 0 to np - 1 do
     begin
       funcs[numFuncs].varParams[i] := false; { imports have no var params }
@@ -7312,15 +7613,24 @@ begin
     slot := numDefinedFuncs;
     numDefinedFuncs := numDefinedFuncs + 1;
 
-    { Build WASM type signature }
+    { Build WASM type signature.
+
+      A structured result adds a hidden trailing parameter holding the address
+      of a caller-allocated buffer, and returns nothing. Trailing rather than
+      leading so the visible parameters keep their indices, which leaves every
+      existing argument-passing path untouched. }
     for i := 0 to np - 1 do
       wasmParams[i] := WasmI32;
     nWasmResults := 0;
-    if isFunc then begin
+    nWasmParams := np;
+    if retIsStructured then begin
+      wasmParams[np] := WasmI32;
+      nWasmParams := np + 1;
+    end else if isFunc then begin
       wasmResults[0] := WasmI32;
       nWasmResults := 1;
     end;
-    typIdx := AddWasmType(np, wasmParams, nWasmResults, wasmResults);
+    typIdx := AddWasmType(nWasmParams, wasmParams, nWasmResults, wasmResults);
 
     { Register in funcs table with empty body }
     if numFuncs >= MaxFuncs then
@@ -7331,6 +7641,10 @@ begin
     funcs[numFuncs].bodyLen := 0;
     funcs[numFuncs].nlocals := 0;
     funcs[numFuncs].nparams := np;
+    funcs[numFuncs].retTyp := retTyp;
+    funcs[numFuncs].retTypeIdx := retTypeIdx;
+    funcs[numFuncs].retSize := retSize;
+    funcs[numFuncs].retStrMax := retStrMax;
     for i := 0 to np - 1 do begin
       funcs[numFuncs].varParams[i] := paramIsVar[i];
       funcs[numFuncs].constParams[i] := paramIsConst[i];
@@ -7401,15 +7715,24 @@ begin
     slot := numDefinedFuncs;
     numDefinedFuncs := numDefinedFuncs + 1;
 
-    { Build WASM type signature }
+    { Build WASM type signature.
+
+      A structured result adds a hidden trailing parameter holding the address
+      of a caller-allocated buffer, and returns nothing. Trailing rather than
+      leading so the visible parameters keep their indices, which leaves every
+      existing argument-passing path untouched. }
     for i := 0 to np - 1 do
       wasmParams[i] := WasmI32;
     nWasmResults := 0;
-    if isFunc then begin
+    nWasmParams := np;
+    if retIsStructured then begin
+      wasmParams[np] := WasmI32;
+      nWasmParams := np + 1;
+    end else if isFunc then begin
       wasmResults[0] := WasmI32;
       nWasmResults := 1;
     end;
-    typIdx := AddWasmType(np, wasmParams, nWasmResults, wasmResults);
+    typIdx := AddWasmType(nWasmParams, wasmParams, nWasmResults, wasmResults);
 
     { Register in funcs table }
     if numFuncs >= MaxFuncs then
@@ -7421,6 +7744,10 @@ begin
     funcs[numFuncs].bodyLen := 0;
     funcs[numFuncs].nlocals := 0;
     funcs[numFuncs].nparams := np;
+    funcs[numFuncs].retTyp := retTyp;
+    funcs[numFuncs].retTypeIdx := retTypeIdx;
+    funcs[numFuncs].retSize := retSize;
+    funcs[numFuncs].retStrMax := retStrMax;
     for i := 0 to np - 1 do begin
       funcs[numFuncs].varParams[i] := paramIsVar[i];
       funcs[numFuncs].constParams[i] := paramIsConst[i];
@@ -7456,7 +7783,20 @@ begin
   savedFuncIsFunction := curFuncIsFunction;
   savedFuncReturnIdx := curFuncReturnIdx;
   curFuncIsFunction := isFunc;
-  curFuncReturnIdx := np; { return value is local[np] for functions }
+  { Index np is the scalar result local for a plain function and the hidden
+    result-pointer parameter for a structured one. The two cases land on the
+    same index on purpose: everything downstream that indexes locals, the
+    display slot, the string temp, the case temp, stays as it was. Only the
+    count of declared locals differs, since a parameter is not declared. }
+  curFuncReturnIdx := np;
+  savedFuncRetStructured := curFuncRetStructured;
+  savedFuncRetTyp := curFuncRetTyp;
+  savedFuncRetSize := curFuncRetSize;
+  savedFuncRetStrMax := curFuncRetStrMax;
+  curFuncRetStructured := retIsStructured;
+  curFuncRetTyp := retTyp;
+  curFuncRetSize := retSize;
+  curFuncRetStrMax := retStrMax;
 
   { Save and increment nesting level }
   savedNestLevel := curNestLevel;
@@ -7569,8 +7909,10 @@ begin
   breakDepth := savedBreakDepth;
   continueDepth := savedContinueDepth;
 
-  { For functions, push return value onto WASM stack }
-  if isFunc then begin
+  { For functions, push return value onto WASM stack. A structured result was
+    written into the caller's buffer instead, so there is nothing to push and
+    the WASM signature has no result. }
+  if isFunc and not retIsStructured then begin
     EmitLocalGet(np); { local index for return value }
   end;
 
@@ -7593,8 +7935,10 @@ begin
     - saved display value: 1 local (always present for all procs)
     - string temp: 1 local (if string concat was used) }
   nlocals := 1; { saved display }
-  if isFunc then
+  if isFunc and not retIsStructured then
     nlocals := 2; { return value + saved display }
+  { A structured result lives in the hidden trailing parameter, not in a
+    declared local, so index np is already accounted for by nparams. }
   if curFuncNeedsCaseTemp then
     nlocals := nlocals + 2  { string temp + case temp }
   else if curFuncNeedsStringTemp then
@@ -7607,6 +7951,10 @@ begin
   curFuncNeedsCaseTemp := savedFuncNeedsCaseTemp;
   curFuncIsFunction := savedFuncIsFunction;
   curFuncReturnIdx := savedFuncReturnIdx;
+  curFuncRetStructured := savedFuncRetStructured;
+  curFuncRetTyp := savedFuncRetTyp;
+  curFuncRetSize := savedFuncRetSize;
+  curFuncRetStrMax := savedFuncRetStrMax;
 
   { Restore prologue state for enclosing procedure }
   numVarParamSpills := savedNumVarParamSpills;
@@ -11302,6 +11650,8 @@ begin
   numWasmTypes := 0;
   numTypes := 0;
   numPendingPtr := 0;
+  stmtUsedResultBuf := false;
+  stmtArenaBytes := 0;
   numFields := 0;
   numStructCopies := 0;
   numVarInits := 0;
@@ -11373,6 +11723,7 @@ begin
   needsCopyTemp := false;
   concatPieces := 0;
   addrConcatScratch := -1;
+  concatScratchBase := 0;
   addrConcatTemp := -1;
   needsConcatScratch := false;
   startNlocals := 0;
