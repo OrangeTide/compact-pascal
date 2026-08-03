@@ -99,7 +99,8 @@ should say so in its own source, as `t108` does with `{$S+}`.
 - `compiler/cpas.pas` — the compiler. Changes here affect the core language.
 - `compiler-tests/` — the test suite and its shell runner.
 - `src/rust/` — the Rust embedding crate.
-- `src/c/` — the C embedding library, bring-your-own-WASM-runtime.
+- `examples/c/` — a reference sample for hosting the snapshot from C. Not a
+  library, not built by CI.
 - `snapshot/compiler.wasm` — the compiler as WASM. Generated, not edited by
   hand, but committed and expected to be regenerated with any compiler change.
 - `doc/` — the language reference, white paper, tutorial, and technical notes.

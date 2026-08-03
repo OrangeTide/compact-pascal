@@ -101,6 +101,22 @@ between pointer types with different targets is not yet checked.
 - Zig is removed from the documentation. It was never implemented and is not
   planned; `ROADMAP.md` states why.
 
+### Removed
+
+- **The C embedding library** (`src/c`) and the vendored copy of wasm3
+  (`vendor/wasm3`). Everything in it that needed a WASM engine was a stub,
+  including `cp_compile`, so it could never compile Pascal. The design put the
+  engine binding on the user, which is the hard half of the job, leaving the
+  library as a thin wrapper over work the user still had to do. `ROADMAP.md`
+  records the reasoning under "What is deliberately not planned".
+- `make all-c`, `make lib-c`, `make lib-wasm3`, `make example-c-hello`,
+  `make clean-c`, and `make clean-rust`. `make all` now bootstraps the compiler
+  and runs `test-all`; the Rust crate is cleaned with `cargo clean`.
+
+`examples/c/hello` is kept as a reference sample showing how to host the
+compiler snapshot from C against upstream wasm3, in about 300 lines. It is
+documentation, not a library, and it says so.
+
 ### Project
 
 - **The license is [CC0 1.0 Universal](LICENSE)**, matching what the source

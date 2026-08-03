@@ -2,36 +2,13 @@
 
 # ── Toolchain ────────────────────────────────────────────────────
 
-CC       := cc
-AR       := ar
 PANDOC   := pandoc
 TYPST    := typst
-
-CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic
-LDFLAGS  :=
-
-# Relaxed warnings for vendored wasm3 sources
-WASM3_CFLAGS := -std=c11 -Wall \
-	-Wno-unused-parameter -Wno-unused-variable \
-	-Wno-missing-field-initializers -Wno-sign-compare
 
 # ── Directories ──────────────────────────────────────────────────
 
 BUILD_DIR := build
 PAGES_DIR := pages
-
-# ── C sources ────────────────────────────────────────────────────
-
-CP_SRC   := src/c/compact_pascal.c
-CP_OBJ   := $(BUILD_DIR)/compact_pascal.o
-CP_LIB   := $(BUILD_DIR)/libcompact_pascal.a
-
-WASM3_SRC := $(wildcard vendor/wasm3/*.c)
-WASM3_OBJ := $(patsubst vendor/wasm3/%.c,$(BUILD_DIR)/wasm3/%.o,$(WASM3_SRC))
-WASM3_LIB := $(BUILD_DIR)/libwasm3.a
-
-HELLO_SRC := examples/c/hello/main.c
-HELLO_BIN := examples/c/hello/hello
 
 # ── PDF / HTML sources ───────────────────────────────────────────
 
@@ -75,15 +52,13 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 
 # ── Top-level targets ────────────────────────────────────────────
 
-.PHONY: help all all-c all-rust pdf html clean clean-c clean-rust
+.PHONY: help all pdf html clean
 .PHONY: bootstrap test test-checks check-private check-fixpoint test-all deploy-playground bump-version
 
 help:
 	@echo "Compact Pascal build targets:"
 	@echo ""
-	@echo "  all          Build everything (all-c all-rust)"
-	@echo "  all-c        Build C libraries, tools, tests, and examples"
-	@echo "  all-rust     Build Rust crate (not yet implemented)"
+	@echo "  all          Bootstrap the compiler and run everything CI runs"
 	@echo "  pdf          Generate PDF documentation"
 	@echo "  html         Generate HTML documentation"
 	@echo "  clean        Remove build artifacts"
@@ -98,51 +73,12 @@ help:
 	@echo "  bump-version VERSION=YY.MM.PATCH"
 	@echo "                       Update version in compiler and docs, commit"
 
-all: all-c all-rust
-
-all-c: lib-c lib-wasm3 example-c-hello
-
-all-rust:
-	@echo "all-rust: not yet implemented"
-
-# ── C library ────────────────────────────────────────────────────
-
-.PHONY: lib-c lib-wasm3 example-c-hello
-
-lib-c: $(CP_LIB)
-
-$(CP_OBJ): $(CP_SRC) src/c/compact_pascal.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-$(CP_LIB): $(CP_OBJ)
-	$(AR) rcs $@ $^
-
-# ── Vendored wasm3 ───────────────────────────────────────────────
-
-lib-wasm3: $(WASM3_LIB)
-
-$(BUILD_DIR)/wasm3/%.o: vendor/wasm3/%.c | $(BUILD_DIR)/wasm3
-	$(CC) $(WASM3_CFLAGS) -c -o $@ $<
-
-$(WASM3_LIB): $(WASM3_OBJ)
-	$(AR) rcs $@ $^
-
-# ── Examples ─────────────────────────────────────────────────────
-
-example-c-hello: $(HELLO_BIN)
-
-$(HELLO_BIN): $(HELLO_SRC) $(CP_LIB) $(WASM3_LIB) src/c/compact_pascal.h
-	$(CC) $(CFLAGS) -Wno-pointer-arith -Wno-unused-parameter \
-		-Isrc/c -Ivendor/wasm3 -o $@ $< \
-		-L$(BUILD_DIR) -lcompact_pascal -lwasm3 -lm
+all: bootstrap test-all
 
 # ── Output directories ───────────────────────────────────────────
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
-
-$(BUILD_DIR)/wasm3:
-	mkdir -p $(BUILD_DIR)/wasm3
 
 # ── PDF documentation ────────────────────────────────────────────
 
@@ -287,16 +223,8 @@ bump-version:
 
 # ── Cleanup ──────────────────────────────────────────────────────
 
-clean: clean-c clean-rust
-
-clean-c:
-	rm -f $(CP_OBJ) $(CP_LIB)
-	rm -f $(WASM3_OBJ) $(WASM3_LIB)
-	-rmdir $(BUILD_DIR)/wasm3
+clean:
 	rm -f $(WP_PDF) $(REF_PDF) $(TUTORIAL_PDF) $(TN_PDF)
 	$(if $(wildcard $(BUILD_DIR)),rmdir $(BUILD_DIR),: skipped removing $(BUILD_DIR) directory)
-	rm -f $(HELLO_BIN)
 	rm -f $(CPAS_BIN) compiler/cpas.o
-
-clean-rust:
-	@echo "clean-rust: not yet implemented"
+	@echo "clean: the Rust crate is cleaned with 'cargo clean'"

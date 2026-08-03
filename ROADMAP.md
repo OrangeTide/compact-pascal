@@ -27,6 +27,7 @@ finished.
 | D | Runtime safety instrumentation | Done |
 | E | Pointer types | Done |
 | F | Rust embedding to production grade | Done — **1.0 is ready to cut** |
+| G | C library: ship-or-defer decision | Done — dropped, see below |
 
 **1.0 means trustworthy, not capable.** Closed specification, CI gating every
 change, a proven embedding, and failures that are loud instead of silent. It is
@@ -38,7 +39,6 @@ is roughly as much work again:
 
 | Phase | Goal |
 |---|---|
-| G | C library: ship-or-defer decision |
 | H | Structured and string return types — `function F: string` |
 | I | Heap: `New` and `Dispose` |
 | J | File system access and the `text` type; `{$I}` inside the compiler |
@@ -71,8 +71,27 @@ Recorded so nobody waits for something that is not coming.
   substantially machine-written, so a Zig binding cannot be offered in good
   faith. Earlier documentation advertised one; that was wrong and has been
   corrected.
-- **A C embedding library before 1.0.** Deferred. Rust proves the embedding
-  design first. Three libraries in flight means three unfinished ones.
+- **A C embedding library.** Removed, not deferred. A partial one lived in
+  `src/c` for a while and has been deleted along with the vendored copy of
+  wasm3 it never used.
+
+  The design was bring-your-own-runtime: the host supplied a WASM engine
+  through a vtable, and the library sat on top. That is the wrong split. The
+  engine binding is the hard half, and a C user who has written it is most of
+  the way to running the compiler snapshot themselves. What the library would
+  have added on top was thin, and the parts that needed an engine, including
+  `cp_compile` itself, were never written.
+
+  The Rust crate's value comes from exactly what C cannot have: one dependency
+  with the compiler snapshot and a runtime already inside it. There is no
+  equivalent trick in C, so the library would have stayed a wrapper around
+  work the user still has to do.
+
+  What replaces it is smaller and honest. The host contract is five WASI
+  imports, specified in the language reference under "Implicit WASI Imports",
+  and `examples/c/hello` is a working sample that implements them against
+  wasm3 in about 300 lines. That sample is documentation, not a supported
+  library, and it says so.
 - **An LSP server, editor extensions, or a source-level debugger.** The browser
   playground covers the interactive case for now.
 - **Exception handling.** Incompatible with single-pass compilation. Use error

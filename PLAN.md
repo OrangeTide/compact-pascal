@@ -549,6 +549,33 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**The C library is dropped, and the checklist had been describing it
+generously.** "Partially implemented" appeared in the README and in this plan
+for months. The assessment at the Phase G gate found that every function
+needing a WASM engine was a stub, including `cp_compile` itself, so the library
+could not compile Pascal at all. What worked was exactly the part that needs no
+engine: include expansion and Pascal string conversion. Zero tests, no CI, and
+`examples/c/hello` linked wasm3 directly rather than using the library, so the
+one thing that appeared to demonstrate it demonstrated something else.
+
+The design was the deeper problem. Bring-your-own-runtime through a vtable puts
+the engine binding on the user, and the engine binding is the hard half. A C
+user who has written it is most of the way to running the snapshot themselves;
+`examples/c/hello` implements the whole WASI surface in about 300 lines. The
+Rust crate's value comes from what C structurally cannot have: one dependency
+with the snapshot and a runtime already inside it. The C library would have
+stayed a thin wrapper over work the user still had to do.
+
+Removing it also drops 532 KB of vendored wasm3 that nothing in the library
+used. The example is kept because it answers the real question a C user has,
+and it is labelled as documentation so it is not mistaken for a supported
+library.
+
+The general lesson, which is why this phase existed as a gate at all: a
+checklist item that says "partial" stops being informative the moment nobody
+re-measures it. The gate forced a measurement, and the measurement changed the
+decision.
+
 **The license is CC0-1.0.** The repository had stated three: `LICENSE-MIT` and
 `LICENSE-APACHE` with a README badge saying MIT OR Apache-2.0, `Cargo.toml`
 saying CC0-1.0, and twelve source files carrying `PUBLIC DOMAIN (CC0-1.0)`
@@ -1537,11 +1564,19 @@ maintainer asks. Everything a 1.0 needs is in place; cutting it is one commit
 setting `Cargo.toml` to `1.0.0`, dating the `Unreleased` section of
 `CHANGELOG.md`, and tagging.
 
-### Phase G: C library decision gate — 0.5 to 3 weeks
+### Phase G: C library decision gate — DONE, dropped
 
-Decide, with the Rust library in real use, whether the C library ships. Record
-the decision and its rationale publicly either way. Deferring silently is the
-failure mode to avoid.
+Decided: the C library does not ship and is removed from the tree, along with
+the vendored copy of wasm3 it never used. Recorded publicly in `ROADMAP.md`
+under "What is deliberately not planned", which is where the Zig decision also
+lives. See Findings for the assessment behind it.
+
+- [x] Assess what actually existed rather than what the checklist claimed.
+- [x] Decide, and record the decision and rationale publicly.
+- [x] Remove `src/c`, `vendor/wasm3`, and the Makefile targets.
+- [x] Keep `examples/c/hello` as a reference sample, labelled as documentation
+      rather than as a library, with build instructions against upstream wasm3.
+- [x] Correct every document that described the C library in the present tense.
 
 ### Phase H: Structured and string return types — 1.5 weeks
 

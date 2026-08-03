@@ -18,7 +18,7 @@ The target capability level is roughly that of mid-1990s hardware (PlayStation, 
 
 - **Modular.**  Programs link only the shader units they need.  Adding a new rendering mode means adding a `.glsl` file and regenerating -- no changes to the core API.
 
-- **Portable.**  The same Pascal source runs on every Compact Pascal host: Rust/wasmi, C/wasm3, and browser/JS.  The host implements the imports; the Pascal program is unaware of the backend.
+- **Portable.**  The same Pascal source runs on every Compact Pascal host: Rust/wasmi and browser/JS.  The host implements the imports; the Pascal program is unaware of the backend.
 
 - **Callback-driven lifecycle.**  The host owns the event loop.  Pascal provides `OnInit`, `OnFrame`, and `OnCleanup` callbacks.  This model works identically on native platforms (OS event loop) and in the browser (`requestAnimationFrame`).
 

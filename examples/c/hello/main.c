@@ -1,5 +1,5 @@
 /* main.c : run a Compact Pascal WASM program using wasm3 */
-/* PUBLIC DOMAIN or MIT-0 -- See LICENSE for details. */
+/* PUBLIC DOMAIN (CC0-1.0) -- See LICENSE for details. */
 
 /*
  * Usage: hello <program.wasm>
@@ -8,15 +8,11 @@
  * runs its _start export. WASI preview 1 I/O (fd_write, fd_read,
  * proc_exit) is provided so that write/writeln/readln work.
  *
- * Build:
- *   make examples/c/hello/hello
- *
- * Run:
- *   ./examples/c/hello/hello program.wasm
+ * A reference sample, not a supported library, and not built by CI.
+ * See README.md in this directory for why, and for build instructions.
  */
 
 #include "wasm3.h"
-#include "compact_pascal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

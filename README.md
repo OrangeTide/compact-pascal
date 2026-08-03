@@ -9,7 +9,7 @@
 ![WASM Target: 1.0 MVP](https://img.shields.io/badge/WASM-1.0%20MVP-purple)
 [![Human–AI Co-Created](https://dotnetdave.github.io/ai-usage-badges/badges/svg/human-ai-co-created.svg)](https://dotnetdave.github.io/ai-usage-badges/)
 
-An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. Embedding libraries let you compile and run Compact Pascal programs from your application — no external Pascal toolchain required. Rust is the supported target; a C library is planned after it.
+An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal, compiles to WASM 1.0, and ships as a self-contained WASM binary. The Rust crate lets you compile and run Compact Pascal programs from your application, with no external Pascal toolchain required. Rust is the supported embedding; hosting the snapshot from another language means implementing five WASI imports yourself.
 
 ## Overview
 
@@ -25,12 +25,12 @@ Compact Pascal is a new language in the Pascal family. It inherits Pascal's synt
 
 ```
 ┌───────────────────────────────────────────────────┐
-│  Your Application (Rust / C / Browser JS)         │
+│  Your Application (Rust)                          │
 ├───────────────────────────────────────────────────┤
-│  Embedding Library (compact─pascal crate/module)  │
+│  Embedding Library (compact─pascal crate)         │
 │  ┌────────────────┐   ┌───────────────────────┐   │
 │  │ WASM Runtime   │   │ Host─Guest FFI        │   │
-│  │ (wasmi / wasm3)│   │ (imports / exports)   │   │
+│  │ (wasmi)        │   │ (imports / exports)   │   │
 │  └────────────────┘   └───────────────────────┘   │
 ├───────────────────────────────────────────────────┤
 │  Compiler (WASM blob, written in Pascal)          │
@@ -60,7 +60,7 @@ a guest may consume. Working examples are in `examples/rust`.
 
 ## Status
 
-**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 132 tests (108 positive, 19 negative, 5 command-line), each run with checks on and with checks off. A browser playground is shipped. The C embedding library is partially implemented. See the [roadmap](ROADMAP.md) for what is committed, deferred, and not planned; [PLAN.md](PLAN.md) is the working document behind it.
+**Phase 1 complete.** The compiler is written, self-hosts (fixpoint validated), and has 132 tests (108 positive, 19 negative, 5 command-line), each run with checks on and with checks off. A browser playground is shipped. Rust is the one supported embedding. See the [roadmap](ROADMAP.md) for what is committed, deferred, and not planned; [PLAN.md](PLAN.md) is the working document behind it.
 
 **Standalone usage (no embedding library needed):**
 
@@ -74,7 +74,7 @@ wasmtime run hello.wasm
 | 1 | Compiler (Pascal, bootstrapped with fpc) | Done |
 | 1b | Peephole optimization (optional) | In progress |
 | 1c | Language completeness polish | In progress |
-| 2 | Embedding libraries (Rust, then C) | Rust production-ready; C partial |
+| 2 | Embedding library (Rust) | Production-ready; C not planned |
 | 3 | Self-hosting | Done (fixpoint validated) |
 | 4 | Browser playground | Done |
 | 5 | Playground file I/O | Not started |
@@ -119,13 +119,6 @@ wasmtime run hello.wasm
   curl https://wasmtime.dev/install.sh -sSf | bash
   ```
 
-- **C compiler** (optional) — for building the C embedding library and examples.
-
-  ```bash
-  # Debian/Ubuntu
-  sudo apt install build-essential
-  ```
-
 - **Rust** (stable, 1.85 or later) — for the embedding crate. Nothing else is
   needed to use it: the compiler snapshot is built into the crate, so a Rust
   user needs no Pascal toolchain and no WASM runtime of their own.
@@ -165,15 +158,13 @@ wasmtime run hello.wasm
 ```
 compiler/       — Pascal source for the compiler (cpas.pas, ~11.5k lines)
 compiler-tests/ — test suite (108 positive, 19 negative, 5 command-line, shell runner)
-src/
-  c/            — C embedding library (compact_pascal.h/.c, vtable-based)
-  rust/         — Rust crate source (compiler, runtime, WASI bridge)
+src/rust/       — Rust crate source (compiler, runtime, WASI bridge)
 snapshot/       — compiler WASM blob (compiler.wasm)
-vendor/wasm3/   — wasm3 C source (used by C library)
 examples/
   pascal/       — Compact Pascal example programs
-  c/            — C embedding examples (hello, student-compiler)
   rust/         — Rust embedding examples (hello, calculator, host-callback)
+  c/            — a reference sample for hosting the snapshot from C; not a
+                  library and not built by CI
 doc/            — white paper, language reference, tutorial, tech notes
 pages/          — GitHub Pages site
   playground/   — browser-based IDE (vanilla HTML/CSS/JS)

@@ -1021,7 +1021,7 @@ end.
 
 The `{$INCLUDE}` directive is resolved by the **host application**, not by the compiler. Before invoking the compiler, the embedding library (or fpc during bootstrap) scans the source for `{$I}` / `{$INCLUDE}` directives and replaces them with the contents of the referenced files. The compiler receives a single, fully-expanded source stream on stdin.
 
-This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust and C embedding libraries each provide a utility function to perform include expansion. If the host cannot locate an included file, the embedding library reports an error before compilation begins.
+This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust crate provides `expand_includes` for this, confining resolution to a base directory the host chooses. A host in another language performs the expansion itself. If the host cannot locate an included file, the embedding library reports an error before compilation begins.
 
 During fpc bootstrap, the compiler runs as a native executable and fpc handles `{$I}` natively.
 

@@ -100,7 +100,7 @@ The system has three layers:
 ```
 
 1. **The compiler** is a Pascal program compiled to WASM. It reads Compact Pascal source from fd 0, writes a WASM binary to fd 1, and writes errors to fd 2. It ships as a snapshot blob embedded in the library.
-2. **The embedding library** (one each for Rust and C) bundles the compiler blob and a WASM interpreter. It provides a high-level API: compile source, instantiate modules, register host functions, call exported procedures. The C library uses a bring-your-own-WASM-runtime approach via a vtable interface, so any C-compatible WASM interpreter can be plugged in.
+2. **The embedding library** (Rust) bundles the compiler blob and a WASM interpreter. It provides a high-level API: compile source, instantiate modules, register host functions, call exported procedures. A C library on a bring-your-own-runtime vtable was attempted and removed; see `ROADMAP.md` for why. Hosting the snapshot from another language means implementing the five WASI imports directly, which `examples/c/hello` demonstrates.
 3. **The host application** uses the embedding library to compile and run Pascal code, providing whatever host functions the Pascal program needs through WASM imports.
 
 ### Core Language
@@ -254,7 +254,7 @@ The compiler halts on the first error with a diagnostic written to stderr (fd 2)
 | Host Language | WASM Runtime | Rationale |
 |---|---|---|
 | **Rust** | wasmi [11] | Pure Rust, no native dependencies, small binary, works for WASM-in-WASM |
-| **C** | User's choice (vtable) | Bring-your-own-runtime: wasm3, WAMR, vmir, or any C-compatible WASM interpreter |
+| **C** | User's choice | No library is shipped. The host links a runtime such as wasm3 and implements the five WASI imports directly. |
 | **Browser** | Native `WebAssembly` API | Full-speed execution, no tooling beyond standard browser APIs |
 
 ## Bootstrapping
@@ -283,12 +283,11 @@ The Phase 1 compiler serves as the subject of a step-by-step compiler constructi
 ```
 compiler/       — Pascal source for the compiler (built with fpc)
 compiler-tests/ — test suite modeled on BSI Pascal Validation Suite
-src/
-  c/            — C embedding library (bring-your-own-WASM-runtime)
-  rust/         — Rust crate source (planned)
-snapshot/       — the compiler WASM blob (shared by all embedding libraries)
+src/rust/       — Rust crate source (compiler, runtime, WASI bridge)
+snapshot/       — the compiler WASM blob, embedded in the crate
 examples/
-  c/            — C example programs (wasm3)
+  rust/         — Rust embedding examples
+  c/            — a reference sample for hosting the snapshot from C
   pascal/       — example Pascal programs
 pages/          — GitHub Pages site (includes deployed playground)
 doc/            — language specification, white paper, and compiler tutorial
