@@ -298,3 +298,23 @@ fn a_rejected_program_reports_where() {
     let d = err.first_error().expect("an Error diagnostic");
     assert_eq!(d.line, Some(3));
 }
+
+#[test]
+fn a_missing_import_fails_at_instantiation_and_names_it() {
+    use compact_pascal::InstanceBuilder;
+
+    let src = "program S;\n\
+               {$IMPORT 'host' needsThis}\n\
+               procedure NeedsThis(x: integer); external;\n\
+               {$EXPORT go}\n\
+               procedure Go; begin NeedsThis(1); end;\n\
+               begin end.\n";
+    let wasm = Compiler::new().compile(src).unwrap().wasm;
+
+    // No register_import call at all.
+    let msg = match InstanceBuilder::new().unwrap().build(&wasm) {
+        Ok(_) => panic!("instantiation should have failed"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("needsThis"), "message did not name the import: {msg}");
+}

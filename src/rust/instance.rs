@@ -58,20 +58,60 @@ fn classify(e: wasmi::Error) -> Option<RuntimeError> {
     }
 }
 
+/// Ceilings on what a compiled program may consume.
+///
+/// The WASM sandbox stops a guest reaching outside itself. It does not stop a
+/// guest looping forever or growing memory until instantiation fails. Set
+/// these when running source you did not write; leave them unset when the
+/// program is your own and the overhead is not worth it.
+#[derive(Debug, Clone, Default)]
+pub struct Limits {
+    /// Units of execution before the program traps. wasmi charges roughly one
+    /// unit per instruction, so this bounds time without a wall clock and
+    /// without a second thread. Enabling it costs some speed, which is why it
+    /// is off unless asked for.
+    pub fuel: Option<u64>,
+    /// Ceiling on linear memory, in bytes. A guest that tries to grow past it
+    /// gets a failed `memory.grow` rather than taking the host's memory with
+    /// it. A Pascal program's `{$MAXMEMORY}` is its own ceiling; this one is
+    /// the host's, and the lower of the two wins.
+    pub memory_bytes: Option<usize>,
+}
+
+impl Limits {
+    fn store_limits(&self) -> wasmi::StoreLimits {
+        let mut b = wasmi::StoreLimitsBuilder::new();
+        if let Some(bytes) = self.memory_bytes {
+            b = b.memory_size(bytes);
+        }
+        b.build()
+    }
+}
+
 pub struct InstanceBuilder {
     engine: Engine,
     linker: Linker<WasiContext>,
+    limits: Limits,
 }
 
 impl InstanceBuilder {
     pub fn new() -> Result<Self, RuntimeError> {
-        let engine = Engine::default();
+        InstanceBuilder::with_limits(Limits::default())
+    }
+
+    /// Build with resource ceilings. Fuel metering has to be switched on in
+    /// the engine's configuration, so it is decided here rather than being
+    /// settable later.
+    pub fn with_limits(limits: Limits) -> Result<Self, RuntimeError> {
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(limits.fuel.is_some());
+        let engine = Engine::new(&config);
         let mut linker: Linker<WasiContext> = Linker::new(&engine);
 
         crate::wasi::add_wasi_imports(&mut linker)
             .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
 
-        Ok(InstanceBuilder { engine, linker })
+        Ok(InstanceBuilder { engine, linker, limits })
     }
 
     pub fn register_import<F>(
@@ -122,8 +162,15 @@ impl InstanceBuilder {
     }
 
     pub fn build(self, wasm: &[u8]) -> Result<Instance, RuntimeError> {
-        let ctx = WasiContext::with_real_io();
+        let mut ctx = WasiContext::with_real_io();
+        ctx.limits = self.limits.store_limits();
         let mut store = wasmi::Store::new(&self.engine, ctx);
+        store.limiter(|ctx| &mut ctx.limits);
+        if let Some(fuel) = self.limits.fuel {
+            store
+                .set_fuel(fuel)
+                .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
+        }
 
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| RuntimeError::Instantiation(format!("{e}")))?;
@@ -575,6 +622,33 @@ end."#;
         let result = instance.call_args("compute", &[23])?;
         assert_eq!(result, Some(123));
         Ok(())
+    }
+
+    #[test]
+    fn fuel_bounds_a_runaway_program() {
+        let wasm = compile(
+            "program T;\nvar i: integer;\nbegin\n  i := 0;\n  while true do i := i + 1;\nend.",
+        );
+        let builder = InstanceBuilder::with_limits(Limits {
+            fuel: Some(100_000),
+            ..Limits::default()
+        })
+        .unwrap();
+        let mut i = builder.build(&wasm).unwrap();
+        let err = i.run().unwrap_err();
+        assert!(matches!(err, RuntimeError::Trapped(_)), "got {err}");
+    }
+
+    #[test]
+    fn fuel_does_not_disturb_a_program_that_finishes() {
+        let wasm = compile("program T;\nvar i, n: integer;\nbegin n := 0;\n  for i := 1 to 10 do n := n + i;\n  halt(n);\nend.");
+        let builder = InstanceBuilder::with_limits(Limits {
+            fuel: Some(10_000_000),
+            ..Limits::default()
+        })
+        .unwrap();
+        let mut i = builder.build(&wasm).unwrap();
+        assert_eq!(i.run().unwrap_err().exit_status(), Some(55));
     }
 
     fn compile(src: &str) -> Vec<u8> {

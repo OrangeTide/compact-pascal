@@ -62,6 +62,10 @@ pub struct WasiContext {
     /// Arguments visible to the guest through `args_sizes_get`/`args_get`.
     /// By convention `args[0]` is the program name.
     pub args: Vec<String>,
+    /// Ceiling on growable resources. wasmi asks for this through the store's
+    /// limiter hook, which is why it lives on the context rather than beside
+    /// the engine.
+    pub limits: wasmi::StoreLimits,
 }
 
 impl WasiContext {
@@ -72,6 +76,7 @@ impl WasiContext {
             stderr: StdioBuffer::new(),
             use_real_io: false,
             args: Vec::new(),
+            limits: wasmi::StoreLimitsBuilder::new().build(),
         }
     }
 
@@ -82,6 +87,7 @@ impl WasiContext {
             stderr: StdioBuffer::new(),
             use_real_io: true,
             args: Vec::new(),
+            limits: wasmi::StoreLimitsBuilder::new().build(),
         }
     }
 
