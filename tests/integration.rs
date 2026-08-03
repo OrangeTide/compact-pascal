@@ -223,3 +223,78 @@ fn test_wasm_valid() {
     // Verify WASM version
     assert_eq!(&result.wasm[4..8], b"\x01\x00\x00\x00", "WASM version incorrect");
 }
+
+// ---- The paths the examples take ----
+//
+// The examples in examples/rust are the crate's user-facing documentation.
+// These tests exercise the same paths so a change that breaks an example
+// fails the suite rather than waiting for someone to run it by hand.
+
+#[test]
+fn a_host_can_call_an_exported_pascal_function() {
+    let src = "program C;\n\
+               {$EXPORT evaluate}\n\
+               function Evaluate(a, b: integer): integer;\n\
+               begin Evaluate := a * a + b * b; end;\n\
+               begin end.\n";
+    let wasm = Compiler::new().compile(src).unwrap().wasm;
+    let mut instance = Instance::new(&wasm).unwrap();
+    assert_eq!(instance.call_args("evaluate", &[3, 4]).unwrap(), Some(25));
+    assert_eq!(instance.call_args("evaluate", &[5, 12]).unwrap(), Some(169));
+}
+
+#[test]
+fn pascal_can_call_back_into_the_host() {
+    use compact_pascal::InstanceBuilder;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Arc;
+
+    let src = "program S;\n\
+               {$IMPORT 'host' readSensor}\n\
+               function ReadSensor(id: integer): integer; external;\n\
+               {$IMPORT 'host' recordReading}\n\
+               procedure RecordReading(id, value: integer); external;\n\
+               {$EXPORT poll}\n\
+               procedure Poll;\n\
+               var id, value: integer;\n\
+               begin\n\
+                 for id := 1 to 4 do begin\n\
+                   value := ReadSensor(id);\n\
+                   RecordReading(id, value);\n\
+                 end;\n\
+               end;\n\
+               begin end.\n";
+    let wasm = Compiler::new().compile(src).unwrap().wasm;
+
+    let count = Arc::new(AtomicI32::new(0));
+    let total = Arc::new(AtomicI32::new(0));
+
+    let mut builder = InstanceBuilder::new().unwrap();
+    builder
+        .register_import("host", "readSensor", 1, true, |args| Some(args[0] * 10 + 1))
+        .unwrap();
+    let count_c = Arc::clone(&count);
+    let total_c = Arc::clone(&total);
+    builder
+        .register_import("host", "recordReading", 2, false, move |args| {
+            count_c.fetch_add(1, Ordering::Relaxed);
+            total_c.fetch_add(args[1], Ordering::Relaxed);
+            None
+        })
+        .unwrap();
+
+    let mut instance = builder.build(&wasm).unwrap();
+    instance.call("poll").unwrap();
+
+    assert_eq!(count.load(Ordering::Relaxed), 4);
+    assert_eq!(total.load(Ordering::Relaxed), 11 + 21 + 31 + 41);
+}
+
+#[test]
+fn a_rejected_program_reports_where() {
+    let err = Compiler::new()
+        .compile("program C;\nbegin\n  x := 1;\nend.\n")
+        .unwrap_err();
+    let d = err.first_error().expect("an Error diagnostic");
+    assert_eq!(d.line, Some(3));
+}

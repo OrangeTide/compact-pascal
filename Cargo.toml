@@ -17,6 +17,14 @@ path = "src/rust/lib.rs"
 name = "hello"
 path = "examples/rust/hello/main.rs"
 
+[[example]]
+name = "calculator"
+path = "examples/rust/calculator/main.rs"
+
+[[example]]
+name = "host-callback"
+path = "examples/rust/host-callback/main.rs"
+
 [dependencies]
 wasmi = "1.0"
 

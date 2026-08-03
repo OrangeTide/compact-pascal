@@ -179,3 +179,12 @@ jobs:
         run: cargo build --verbose
       - name: Test
         run: cargo test --verbose
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Examples must build and run
+        # They are the crate's user-facing documentation. An example that no
+        # longer compiles is a broken instruction, so run each one.
+        run: |
+          cargo run --example hello
+          cargo run --example calculator
+          cargo run --example host-callback
