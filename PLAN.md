@@ -587,6 +587,24 @@ form, and the pointer-target check. Test-writing looks for cases the author
 already imagined; documentation-writing forces a claim to be stated in full,
 where a gap is visible.
 
+**Include paths escaped their base directory, and the threat model found it.**
+`build_path` was `base_dir.join(filename)` with no check. `Path::join` given an
+absolute path discards the base and returns the absolute path, so
+`{$I '/etc/passwd'}` read that file. `..` walked upward freely.
+
+Found by reviewing the newly written `SECURITY.md` against the code: the threat
+model listed "include resolution reaching outside its base directory" as in
+scope, and checking whether that claim held showed it did not. Writing down
+what a boundary is supposed to do is what makes it checkable.
+
+The fix rejects `..`, absolute paths, and drive prefixes, by inspecting the
+components of the written path rather than by touching the filesystem.
+`canonicalize` would also catch a symlink pointing out of the base directory,
+but it requires the target to exist, which turns a missing-file error into a
+confusing one, and it resolves symlinks the host may have put there on purpose.
+The symlink case is documented as a limit instead. Revisit if a host ever
+serves untrusted source from a directory it does not fully control.
+
 **Pointer types carry their target in the array element slots.** A `^T`
 descriptor is an ordinary `TTypeDesc` with `kind = tyPointer` and the target
 in `elemType`/`elemTypeIdx`/`elemSize`/`elemStrMax`, the same fields an array
@@ -643,7 +661,7 @@ paren-star form would mean teaching `SkipBraceComment` a second terminator,
 which is more surgery than the parity is worth right now. Worth revisiting if
 porting real Turbo Pascal sources becomes a goal.
 
-**Stack overflow guard compares before subtracting.** The prologue checks `$sp < __stack_limit + frame_size` and traps, rather than subtracting first and checking `$sp < __stack_limit` afterwards. The second form looks simpler and is wrong: a frame large enough to carry `$sp` past zero wraps it to a large unsigned value, which compares as above the limit and sails through. Checking first also leaves `$sp` valid at the trap, so the backtrace is readable. The limit lives in an immutable WASM global (index 10, `__stack_limit`) initialized to the data end. Cost is five instructions per frame and 0.93% of compiler code size. On by default pre-1.0 under `{$S+}`; silent corruption costs more to debug than the instructions cost to run.
+**Stack overflow guard compares before subtracting.** The prologue checks `$sp < __stack_limit + frame_size` and traps, rather than subtracting first and checking `$sp < __stack_limit` afterwards. The second form looks simpler and is wrong: a frame large enough to carry `$sp` past zero wraps it to a large unsigned value, which compares as above the limit and sails through. Checking first also leaves `$sp` valid at the trap, so the backtrace is readable. The limit lives in an immutable WASM global (index 10, `__stack_limit`) initialized to the data end. Cost is six instructions per frame on the path that does not trap, eight emitted, and 0.93% of compiler code size. On by default pre-1.0 under `{$S+}`; silent corruption costs more to debug than the instructions cost to run.
 
 The guard does not cover the 256-byte scratch allocations the body makes for string concatenation in const argument position. Those move `$sp` after the prologue check. Small enough not to matter at the depths the guard catches, and Phase H replaces the mechanism.
 

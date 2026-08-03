@@ -83,8 +83,10 @@ holding a regex if the compiler should warn. With no `.warning` file the
 compiler is expected to say nothing at all, so a stray diagnostic fails.
 
 **A program that should be rejected** goes in `compiler-tests/negative/` as
-`nNNN_short_name.pas`, with `nNNN_short_name.error` holding a substring of the
-expected message.
+`nNNN_short_name.pas`, with `nNNN_short_name.error` holding a regex that must
+match the compiler's stderr, case-insensitively. A plain substring works, and
+is usually the right choice: matching a fragment of the message rather than
+all of it leaves room to reword it.
 
 **A compiler invocation** goes in `compiler-tests/cli/` keyed on a name, with
 `.args` for the command line and either `.error` or `.diag`.

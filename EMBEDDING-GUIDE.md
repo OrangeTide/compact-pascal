@@ -132,13 +132,18 @@ if !warnings.is_empty() && strict {
 
 ## Running
 
-`Instance::new` instantiates a compiled module and runs its top-level
-`begin...end.` block as the WASI `_start` entry point.
+`Instance::new` instantiates a compiled module. It does not run it: a compiled
+program has no WASM start section, so nothing executes until you ask. `run`
+calls the `_start` export, which is the program's top-level `begin...end.`
+block.
 
 ```rust
 let mut instance = Instance::new(&result.wasm)?;
 instance.run()?;
 ```
+
+The gap between the two is useful. Between instantiating and running you can
+write into the guest's memory, and after running you can read out of it.
 
 ### Reading the failure
 
@@ -149,7 +154,8 @@ instance.run()?;
 | `Exit(n)` | The program called `halt(n)`. An ordinary ending, not a fault. |
 | `Trapped(msg)` | The program trapped. |
 | `FunctionNotFound(name)` | No export by that name. |
-| `Instantiation(msg)` | The module could not be loaded. |
+| `Instantiation(msg)` | The module could not be loaded, or an import was not registered. |
+| `Memory(msg)` | A memory access through this API failed. Raised by the string helpers below, never by execution. |
 
 `halt(0)` is success and returns `Ok(())`.
 
@@ -276,9 +282,15 @@ let result = Compiler::new()
 `expand_includes` is also public if you want to do the expansion yourself,
 inspect the result, or resolve names against something other than a directory.
 
-Include expansion is where a host decides what the guest may read. Resolving
-against a fixed directory is a boundary; joining an arbitrary path from
-untrusted source is not.
+Include expansion is where a host decides what the guest may read, so the base
+directory is enforced as a boundary rather than used as a starting point. An
+include path containing `..`, an absolute path, or a Windows drive prefix is
+refused. Without that, `{$I '/etc/passwd'}` would work: joining an absolute
+path onto a base discards the base.
+
+The check is on the written path and does not touch the filesystem, so a
+symlink inside the base directory that points outside it is still followed.
+Do not place one there in a directory you serve untrusted source from.
 
 ## What the sandbox does and does not protect
 

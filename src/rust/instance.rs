@@ -10,7 +10,11 @@ use wasmi::{Engine, FuncType, Linker, Module, Val, ValType, Instance as WasmiIns
 #[derive(Debug)]
 pub enum RuntimeError {
     Instantiation(String),
-    Execution(String),
+    /// A memory access through this API failed: the address is outside the
+    /// guest's linear memory, the module has no memory export, or a string is
+    /// too long or not valid UTF-8. Not raised by execution itself; a program
+    /// that fails while running reports Exit or Trapped.
+    Memory(String),
     FunctionNotFound(String),
     /// The program called `halt(n)` with a nonzero status. This is an ordinary
     /// way for a Pascal program to end, so it is reported separately from a
@@ -37,7 +41,7 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             RuntimeError::Instantiation(e) => write!(f, "instantiation error: {e}"),
-            RuntimeError::Execution(e) => write!(f, "execution error: {e}"),
+            RuntimeError::Memory(e) => write!(f, "memory error: {e}"),
             RuntimeError::FunctionNotFound(e) => write!(f, "function not found: {e}"),
             RuntimeError::Exit(n) => write!(f, "program exited with status {n}"),
             RuntimeError::Trapped(e) => write!(f, "trap: {e}"),
@@ -276,7 +280,7 @@ impl Instance {
             .get_export(&self.store, "memory")
             .and_then(|e| e.into_memory())
             .ok_or_else(|| {
-                RuntimeError::Execution("memory export not found".into())
+                RuntimeError::Memory("memory export not found".into())
             })
     }
 
@@ -291,7 +295,7 @@ impl Instance {
         let len = bytes.len();
 
         if len > 255 {
-            return Err(RuntimeError::Execution(
+            return Err(RuntimeError::Memory(
                 format!("string too long: {} bytes (max 255)", len)
             ));
         }
@@ -303,7 +307,7 @@ impl Instance {
         let end = start + 1 + len;
 
         if end > mem.len() {
-            return Err(RuntimeError::Execution(
+            return Err(RuntimeError::Memory(
                 format!("write_pascal_string out of bounds: addr={} len={}", addr, len)
             ));
         }
@@ -319,7 +323,7 @@ impl Instance {
     pub fn read_pascal_string(&self, addr: u32) -> Result<String, RuntimeError> {
         let bytes = self.read_pascal_bytes(addr)?;
         String::from_utf8(bytes).map_err(|e| {
-            RuntimeError::Execution(format!("invalid UTF-8 in pascal string: {}", e))
+            RuntimeError::Memory(format!("invalid UTF-8 in pascal string: {}", e))
         })
     }
 
@@ -331,7 +335,7 @@ impl Instance {
         let start = addr as usize;
 
         if start >= mem.len() {
-            return Err(RuntimeError::Execution(
+            return Err(RuntimeError::Memory(
                 format!("read_pascal_string out of bounds: addr={}", addr)
             ));
         }
@@ -340,7 +344,7 @@ impl Instance {
         let end = start + 1 + len;
 
         if end > mem.len() {
-            return Err(RuntimeError::Execution(
+            return Err(RuntimeError::Memory(
                 format!("read_pascal_string out of bounds: addr={} len={}", addr, len)
             ));
         }
@@ -406,10 +410,10 @@ mod tests {
         let result = instance.write_pascal_string(0, &too_long);
 
         assert!(result.is_err());
-        if let Err(RuntimeError::Execution(msg)) = result {
+        if let Err(RuntimeError::Memory(msg)) = result {
             assert!(msg.contains("string too long"));
         } else {
-            panic!("Expected Execution error");
+            panic!("Expected Memory error");
         }
     }
 

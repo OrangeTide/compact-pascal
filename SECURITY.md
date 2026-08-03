@@ -64,7 +64,10 @@ API, not with the reader.
 
 **Include resolution reaching outside its base directory** when the host used
 `compile_with_includes` with a base directory, since that is the boundary the
-call is meant to draw.
+call draws. Paths containing `..`, absolute paths, and drive prefixes are
+refused. A symlink inside the base directory pointing outside it is followed,
+which is stated as a limit rather than defended against; placing one there is
+the host's decision.
 
 ### Out of scope
 
@@ -103,8 +106,9 @@ If you run Pascal source that you did not write:
 - Set `Limits` with both `fuel` and `memory_bytes`. Neither is on by default.
 - Register the smallest set of imports that the workload needs. Every import
   is capability handed across the boundary.
-- Resolve includes against a fixed directory, or expand them yourself. Joining
-  an untrusted path is how a sandbox becomes a file reader.
+- Resolve includes against a directory that contains only what the guest may
+  read, and put no symlinks in it. `..` and absolute paths are refused, but a
+  symlink out is not.
 - Leave `stack_checks` on. It is the default, and turning it off converts a
   trap into silent memory corruption inside the guest.
 - Treat compilation as execution when budgeting time and memory.

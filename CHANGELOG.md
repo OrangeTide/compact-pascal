@@ -63,6 +63,15 @@ between pointer types with different targets is not yet checked.
   include.
 - **`Limits`** bounds what a compiled program may consume: `fuel` for
   execution and `memory_bytes` for linear memory. Neither is on by default.
+- **Include paths are confined to their base directory.** `expand_includes`
+  and `compile_with_includes` refuse a path containing `..`, an absolute path,
+  or a drive prefix. Previously the filename was joined onto the base
+  directory with no check, and joining an absolute path discards the base, so
+  `{$I '/etc/passwd'}` read that file. Found while reviewing the threat model
+  in `SECURITY.md` against the code.
+- `RuntimeError::Execution` is renamed `RuntimeError::Memory`. After the change
+  above it was only raised by the string helpers, never by execution, so the
+  name said the wrong thing. Renamed now rather than after 1.0 freezes it.
 - **`RuntimeError` distinguishes an exit from a trap.** `halt(3)` arrives as
   `RuntimeError::Exit(3)`; a trap arrives as `RuntimeError::Trapped`. The
   previous code could not tell them apart, because `proc_exit` was signalled

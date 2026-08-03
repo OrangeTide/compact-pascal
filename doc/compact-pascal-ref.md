@@ -712,7 +712,7 @@ Under `{$S+}` the epilogue also compares the stack pointer against the recorded 
 **Frame size is fixed before the body is compiled.** The compiler is single-pass: it emits the prologue that reserves the frame, with the size as an immediate operand, before it has read a single statement of the body. Nothing later in the body can enlarge the frame. Two consequences follow, and both are properties of the language as specified, not passing implementation details:
 
 - A construct needing caller-allocated temporaries whose count is not known from the declarations alone cannot be given frame storage. This is why a function returning a structured type, including `string`, is not yet available: the caller must supply the result buffer, and it cannot reserve one per call site after the fact.
-**Stack overflow is detected.** Every prologue compares the stack pointer against a lower bound before reserving the frame, and traps if the new frame would cross it. The bound is the end of the data segment, so a program that recurses too deeply terminates at the moment of overflow instead of walking the stack pointer down through the heap and the data segment and corrupting whatever it passes. The check costs five instructions per call and is on by default. It can be turned off per-region with `{$S-}` and back on with `{$S+}`; with checks off the old undefined behavior returns, and a deep enough recursion silently corrupts memory.
+**Stack overflow is detected.** Every prologue compares the stack pointer against a lower bound before reserving the frame, and traps if the new frame would cross it. The bound is the end of the data segment, so a program that recurses too deeply terminates at the moment of overflow instead of walking the stack pointer down through the heap and the data segment and corrupting whatever it passes. The check is six instructions on the path that does not trap, and measured 0.93% of the compiler's own code size. It is on by default. It can be turned off per-region with `{$S-}` and back on with `{$S+}`; with checks off the old undefined behavior returns, and a deep enough recursion silently corrupts memory.
 
 The comparison happens before the subtraction, not after, so a single frame large enough to carry the stack pointer past zero is caught rather than wrapping around to a large unsigned address that compares as valid.
 
@@ -882,11 +882,14 @@ An implementation may impose limits, but not below these. A program staying with
 | Exported symbols | 32 | 32 |
 | Conditional symbols defined at once | 32 | 32 |
 | `{$IFDEF}` nesting depth | 8 | 8 |
+| Unresolved forward pointer references per type block | 32 | 32 |
 | Operands in one string concatenation | 16 | 17 |
 | String length | 255 | 255 |
 | Set base type values | 256 | 256 |
 
 Exceeding a limit is an error and must be reported as one. It is never undefined behavior.
+
+Pointer types are counted against the named-type limit. A `^T` written anywhere, including inline in a `var` declaration, occupies an entry, though pointers with the same target share one. A program with many distinct pointer types can therefore reach the limit with fewer than 256 type declarations of its own.
 
 Where the two columns differ, a program using the larger value compiles today but is not portable. The concatenation diagnostic counts saved pieces rather than operands, so it reports a maximum of 16 while accepting 17 operands; the operand count is what a program author sees, and it is what the table gives.
 

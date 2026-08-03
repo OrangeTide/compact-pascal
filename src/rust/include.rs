@@ -4,7 +4,7 @@
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_INCLUDE_DEPTH: usize = 16;
 
@@ -306,14 +306,43 @@ fn find_string_end(source: &str, mut pos: usize) -> Result<usize, IncludeError> 
     )))
 }
 
-/// Builds a full path by joining base_dir and filename
+/// Resolve an include filename against the base directory, refusing anything
+/// that would land outside it.
+///
+/// `base_dir.join(filename)` alone is not enough, and the way it fails is
+/// quiet. Given an absolute filename, `join` discards the base entirely and
+/// returns the absolute path, so `{$I '/etc/passwd'}` reads that file. A `..`
+/// component walks upward for as long as the caller likes.
+///
+/// The base directory is the boundary a host draws by calling
+/// `compile_with_includes` with it, so a path that leaves it is refused rather
+/// than resolved. The check is on the components of the written path and does
+/// not touch the filesystem: a symlink inside the base directory that points
+/// outside it is still followed, and a host serving untrusted source should not
+/// place one there.
 fn build_path(base_dir: &Path, filename: &str) -> Result<PathBuf, IncludeError> {
     if filename.is_empty() {
         return Err(IncludeError::FileNotFound("empty filename".to_string()));
     }
 
-    let path = base_dir.join(filename);
-    Ok(path)
+    let requested = Path::new(filename);
+    for component in requested.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(IncludeError::FileNotFound(format!(
+                    "{filename}: an include path may not contain '..'"
+                )))
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(IncludeError::FileNotFound(format!(
+                    "{filename}: an include path must be relative to the include directory"
+                )))
+            }
+        }
+    }
+
+    Ok(base_dir.join(requested))
 }
 
 #[cfg(test)]

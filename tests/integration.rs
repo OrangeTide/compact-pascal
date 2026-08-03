@@ -318,3 +318,23 @@ fn a_missing_import_fails_at_instantiation_and_names_it() {
     };
     assert!(msg.contains("needsThis"), "message did not name the import: {msg}");
 }
+
+#[test]
+fn include_paths_stay_inside_the_base_directory() {
+    use compact_pascal::expand_includes;
+    use std::path::Path;
+
+    // A relative escape.
+    let up = "program T;\n{$I '../../../etc/hostname'}\nbegin end.\n";
+    assert!(
+        expand_includes(up, Path::new("compiler-tests")).is_err(),
+        "a '..' escape was resolved instead of refused"
+    );
+
+    // An absolute path, which Path::join adopts wholesale, discarding the base.
+    let abs = "program T;\n{$I '/etc/hostname'}\nbegin end.\n";
+    assert!(
+        expand_includes(abs, Path::new("compiler-tests")).is_err(),
+        "an absolute path was resolved instead of refused"
+    );
+}
