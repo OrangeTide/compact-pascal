@@ -501,6 +501,8 @@ There is no heap. `New` and `Dispose` are not available, so every pointer must b
 
 The compiler checks that a pointer is not assigned to a non-pointer and that a non-pointer is not assigned to a pointer. It does not yet check that the *targets* agree, so assigning a `^integer` to a `^TRec` compiles. Treat that as a gap to be closed, not as permission.
 
+`with p^ do` is not accepted; the `with` statement takes a record variable, not a dereference. Write `p^.field` instead. This is a compile error, not a silent miscompile.
+
 ### Lifetime
 
 A pointer does not keep its target alive. Taking the address of a local variable and using it after that variable's procedure has returned reads whatever the stack holds now. The language does not detect this. It is the same rule that already applies to `var` parameters and to interface values: the programmer owns the lifetime.

@@ -1433,7 +1433,14 @@ phase.
 **Exit:** pointer tests pass in both check configurations; fixpoint holds.
 Both met: 131 tests in each configuration, snapshot self-hosts.
 
-**Left open deliberately.** Pointer assignment checks the type tag but not the
+**Left open deliberately.** `with p^ do` is rejected: the `with` statement's
+own designator paths do not take a `^` selector. It is a clean compile error
+rather than a miscompile, and `p^.field` covers the same ground. The compiler
+has five near-identical selector loops; two of them, the expression and
+assignment paths, learned `^`, and teaching the other three is better done by
+first collapsing the duplication.
+
+Pointer assignment checks the type tag but not the
 target type, so `^integer := ^TRec` compiles. The expression parser reports its
 result type in a global but keeps the descriptor index in a local, so the
 target is not visible to the assignment paths. Closing this means threading the
