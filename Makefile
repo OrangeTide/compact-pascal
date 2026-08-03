@@ -76,7 +76,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 # ── Top-level targets ────────────────────────────────────────────
 
 .PHONY: help all all-c all-rust pdf html clean clean-c clean-rust
-.PHONY: bootstrap test check-private check-fixpoint test-all deploy-playground bump-version
+.PHONY: bootstrap test test-checks check-private check-fixpoint test-all deploy-playground bump-version
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -93,7 +93,8 @@ help:
 	@echo "  deploy-playground    Copy compiler.wasm into pages/playground/"
 	@echo "  check-private        Fail if tracked files leak local paths or private info"
 	@echo "  check-fixpoint       Verify snapshot is current and self-hosting holds"
-	@echo "  test-all             Everything CI runs (check-private test check-fixpoint)"
+	@echo "  test-checks          Run the test suite with checks on, then with checks off"
+	@echo "  test-all             Everything CI runs (check-private test test-checks check-fixpoint)"
 	@echo "  bump-version VERSION=YY.MM.PATCH"
 	@echo "                       Update version in compiler and docs, commit"
 
@@ -216,6 +217,16 @@ $(SNAPSHOT): $(CPAS_BIN) $(CPAS_SRC)
 test: $(CPAS_BIN)
 	bash compiler-tests/run-tests.sh
 
+# Run the suite under both check configurations. The generated code differs
+# between them, so passing one says nothing about the other: checks-on can
+# hide a codegen bug behind a trap, and checks-off can hide a bug in the
+# checks themselves. Tests that must pin a setting do so with a directive.
+test-checks: $(CPAS_BIN)
+	@echo "── checks on ──"
+	CPASFLAGS='-S+ -R+' bash compiler-tests/run-tests.sh
+	@echo "── checks off ──"
+	CPASFLAGS='-S- -R-' bash compiler-tests/run-tests.sh
+
 # Fail if a tracked file leaks private info (local paths, personal domains).
 check-private:
 	@bash compiler-tests/check-private-info.sh
@@ -232,7 +243,7 @@ check-fixpoint: $(CPAS_BIN)
 	@tmp=$$(mktemp -d); 	trap 'rm -rf "$$tmp"' EXIT; 	$(CPAS_BIN) < $(CPAS_SRC) > "$$tmp/gen1.wasm"; 	if ! cmp -s "$$tmp/gen1.wasm" $(SNAPSHOT); then 	    echo "check-fixpoint: committed snapshot is stale; run 'make bootstrap'" >&2; 	    exit 1; 	fi; 	$(WASMRUN) $(SNAPSHOT) < $(CPAS_SRC) > "$$tmp/gen2.wasm"; 	if ! cmp -s "$$tmp/gen1.wasm" "$$tmp/gen2.wasm"; then 	    echo "check-fixpoint: fixpoint broken; self-compiled output differs" >&2; 	    exit 1; 	fi; 	echo "check-fixpoint: snapshot current, fixpoint holds"
 
 # Everything CI runs, reproducible locally.
-test-all: check-private test check-fixpoint
+test-all: check-private test test-checks check-fixpoint
 	@echo "test-all: all checks passed"
 
 # ── Deploy ───────────────────────────────────────────────────────

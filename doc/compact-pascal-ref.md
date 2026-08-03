@@ -617,7 +617,7 @@ When a program uses `write`/`writeln`, `read`/`readln`, or `halt`, the compiler 
 | `fd_write` | `(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) → errno: i32` | Program uses `write`/`writeln` |
 | `proc_exit` | `(code: i32) → noreturn` | Program uses `halt` |
 
-> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-debug`, `-progress`, `-O0`, `-O1`, and `-dSYMBOL`. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
+> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-debug`, `-progress`, `-O0`, `-O1`, `-dSYMBOL`, and the check switches `-R+`/`-R-` and `-S+`/`-S-`. The check switches set the state a source file starts with; a directive in the source still overrides from the point it appears. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
 
 Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The generated code always passes a single iovec (`iovs_len = 1`).
 

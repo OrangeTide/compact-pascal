@@ -1315,7 +1315,7 @@ week three.
 **Exit:** a commit that breaks the fixpoint by one byte cannot be merged, and
 one that adds a home-directory path fails the same way.
 
-### Phase D: Runtime safety instrumentation — 1 week
+### Phase D: Runtime safety instrumentation — DONE, in one session rather than a week
 
 The load-bearing phase. Debugging silent memory corruption costs more than the
 instructions these checks add, and the frame-balance work here is what unblocks
@@ -1340,9 +1340,14 @@ caller-allocated temporaries (structured and string returns) later.
       and is saved and restored across recursion. See Findings.
 - [x] New `{$S+/-}` directive, default **ON** pre-1.0. Silent corruption is
       worse than the code size. Revisit the default at 1.0.
-- [ ] Run the whole suite twice in CI, checks on and checks off.
-- [ ] Flip `{$R+}` on for the test suite even though the language default stays
-      off.
+- [x] Run the whole suite twice in CI, checks on and checks off. `make
+      test-checks`, driven by a `CPASFLAGS` environment variable the runner
+      passes through to the positive and negative compilations.
+- [x] Flip `{$R+}` on for the test suite even though the language default stays
+      off. Done with new `-R+/-` and `-S+/-` command-line switches that set the
+      state a file starts with, rather than editing every test. A test that
+      must pin a setting regardless does so with a directive in its source;
+      `t104` pins `{$S+}` so the checks-off run still proves the guard traps.
 
 **Exit:** suite passes in both configurations; a deliberately over-deep
 recursion traps instead of corrupting; a deliberately leaked stack allocation

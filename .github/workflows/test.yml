@@ -103,6 +103,12 @@ jobs:
         # Builds compiler/cpas as a prerequisite.
         run: make test
 
+      - name: Test suite with checks on, then with checks off
+        # The two configurations generate different code, so passing one says
+        # nothing about the other. Checks-on can hide a codegen bug behind a
+        # trap; checks-off can hide a bug in the checks themselves.
+        run: make test-checks
+
       - name: Snapshot currency and self-hosting fixpoint
         run: make check-fixpoint
 

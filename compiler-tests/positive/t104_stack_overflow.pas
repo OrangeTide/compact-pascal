@@ -2,7 +2,10 @@
   walk down through the heap and data segment corrupting them silently.
   The frame here is large enough that one subtraction would carry the
   stack pointer past zero, which is the case a naive check misses: a
-  wrapped pointer compares as a huge address and looks fine. }
+  wrapped pointer compares as a huge address and looks fine.
+  The explicit directive keeps the guard on in the suite's checks-off run,
+  where the point is that this test still traps. }
+(*$S+*)
 program t104;
 procedure Recurse(n: integer);
 var pad: array[1..8000] of integer;

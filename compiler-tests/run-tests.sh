@@ -14,6 +14,19 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPILER="${CPAS:-$PROJECT_DIR/compiler/cpas}"
 TMPDIR="${TMPDIR:-/tmp}/cpas-tests-$$"
 
+# Extra compiler flags for the positive and negative tests, word-split on
+# purpose. Used to run the whole suite under a different check configuration,
+# e.g. CPASFLAGS='-S- -R-'. The cli/ tests supply their own arguments and are
+# left alone. A test that must pin a setting regardless does so with a
+# directive in its source.
+#
+# The ${arr[@]+"${arr[@]}"} form below is for bash 3.2, which macOS still
+# ships: there an empty array expansion under `set -u` is an error.
+CPASFLAGS_ARR=()
+if [ -n "${CPASFLAGS:-}" ]; then
+    read -r -a CPASFLAGS_ARR <<< "$CPASFLAGS"
+fi
+
 export WASMTIME_HOME="${WASMTIME_HOME:-$HOME/.wasmtime}"
 export PATH="$WASMTIME_HOME/bin:$PATH"
 
@@ -92,7 +105,7 @@ for src in "$SCRIPT_DIR"/positive/*.pas; do
     fi
 
     # Compile
-    if ! "$COMPILER" < "$src" > "$wasm" 2>"$TMPDIR/$name.cerr"; then
+    if ! "$COMPILER" ${CPASFLAGS_ARR[@]+"${CPASFLAGS_ARR[@]}"} < "$src" > "$wasm" 2>"$TMPDIR/$name.cerr"; then
         echo "FAIL $name (compilation failed)"
         cat "$TMPDIR/$name.cerr"
         fail=$((fail + 1))
@@ -181,7 +194,7 @@ for src in "$SCRIPT_DIR"/negative/*.pas; do
     expected_error="$(cat "$error_file")"
 
     # Compile - should fail
-    if "$COMPILER" < "$src" > "$wasm" 2>"$TMPDIR/$name.err"; then
+    if "$COMPILER" ${CPASFLAGS_ARR[@]+"${CPASFLAGS_ARR[@]}"} < "$src" > "$wasm" 2>"$TMPDIR/$name.err"; then
         echo "FAIL $name (compilation should have failed)"
         fail=$((fail + 1))
         continue

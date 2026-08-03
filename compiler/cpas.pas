@@ -11117,6 +11117,18 @@ begin
         end;
       end;
     end
+    { Initial state for the range and stack check switches. A directive in
+      the source still overrides from the point it appears; these only set
+      what the file starts with, so the suite can be run under either
+      configuration without editing every test. }
+    else if ParamStr(i) = '-R+' then
+      optRangeChecks := true
+    else if ParamStr(i) = '-R-' then
+      optRangeChecks := false
+    else if ParamStr(i) = '-S+' then
+      optStackChecks := true
+    else if ParamStr(i) = '-S-' then
+      optStackChecks := false
     else if ParamStr(i) = '-O0' then
       optLevel := 0
     else if ParamStr(i) = '-O1' then
