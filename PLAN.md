@@ -549,6 +549,44 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**The license is CC0-1.0.** The repository had stated three: `LICENSE-MIT` and
+`LICENSE-APACHE` with a README badge saying MIT OR Apache-2.0, `Cargo.toml`
+saying CC0-1.0, and twelve source files carrying `PUBLIC DOMAIN (CC0-1.0)`
+headers. MIT OR Apache-2.0 is the Rust ecosystem convention and is what a
+crates.io user expects, which is the argument against the choice made. The
+argument for it, and the one that decided it: machine-written work carries no
+copyright to assign, so a permissive license would be claiming a right in order
+to license it back out. CC0 states what is already the case. Decided by the
+maintainer when the inconsistency was raised.
+
+**`proc_exit` signalled through an error message was the root of two bugs.**
+The Rust bridge reported program exit by constructing a wasmi error whose
+message read `proc_exit(0)`, and every call site matched that substring to
+decide whether the program had succeeded. Two consequences: `halt(3)` was
+indistinguishable from a trap, and a trap whose message happened to contain the
+text would have been read as success. wasmi has `Error::i32_exit`, which
+carries the status as structured data, and `i32_exit_status()` to read it back.
+Now `halt(3)` is `RuntimeError::Exit(3)` and a trap is `RuntimeError::Trapped`.
+
+The lesson generalizes past this instance: formatting structured information
+into a string and parsing it back at the boundary loses the distinction the
+structure carried. The same shape appears wherever a message is used as a
+channel.
+
+**Writing the embedding guide found the gap it was documenting.** The sandbox
+section wanted to say "impose limits from the host side", and there was no way
+to: `Instance` and `InstanceBuilder` each built their own `Engine::default()`,
+so wasmi's fuel metering and memory ceiling were unreachable from this crate's
+API. Documenting a boundary honestly means naming what is not defended, and
+that is what surfaced it. `Limits` now exposes both.
+
+This is the fourth time in this project that a bug was found by verifying a
+documentation claim rather than by adding a test of the existing kind. The
+others were the `/dev/stdout` portability failure, the `(*$...*)` directive
+form, and the pointer-target check. Test-writing looks for cases the author
+already imagined; documentation-writing forces a claim to be stated in full,
+where a gap is visible.
+
 **Pointer types carry their target in the array element slots.** A `^T`
 descriptor is an ordinary `TTypeDesc` with `kind = tyPointer` and the target
 in `elemType`/`elemTypeIdx`/`elemSize`/`elemStrMax`, the same fields an array
@@ -1448,20 +1486,38 @@ descriptor index out of `ParseExpression`, which is worth doing once rather
 than patching around. Recorded in the reference under Defined and Undefined
 Behavior so nobody mistakes it for a language rule.
 
-### Phase F: Rust embedding to production grade — 3 weeks — **1.0 here**
+### Phase F: Rust embedding to production grade — DONE except for cutting the release
 
-- [ ] Complete the WASI bridge: `fd_read`, `fd_write`, `proc_exit`, args.
-- [ ] Error handling returning `Result` with actionable diagnostics, parsing
+- [x] Complete the WASI bridge: `fd_read`, `fd_write`, `proc_exit`, args.
+      `args_sizes_get`/`args_get` were stubs returning zero arguments; both now
+      serve a real vector, which is what makes `Options` possible. `fd_write`
+      and `fd_read` validate the descriptor instead of reporting success for
+      one that does not exist. See Findings.
+- [x] Error handling returning `Result` with actionable diagnostics, parsing
       the tagged `Error:`/`Warning:` stream the compiler now emits.
-- [ ] Three end-to-end examples: hello, calculator, host callback.
-- [ ] `EMBEDDING-GUIDE.md` and a published API stability policy.
-- [ ] Governance: `SECURITY.md` with a disclosure process, `CHANGELOG.md`,
-      contribution guide, license clarity.
-- [ ] Zig removal: delete the Makefile targets and README/doc references.
+      `CompileError` distinguishes a rejected program from a compiler fault
+      from an unresolved include, which decides whether to blame the source or
+      file a bug.
+- [x] Three end-to-end examples: hello, calculator, host callback. Each is
+      covered by an integration test and run in CI, so a broken example fails
+      the build rather than waiting to be found by a reader.
+- [x] `EMBEDDING-GUIDE.md` and a published API stability policy. Writing the
+      guide exposed a gap and closed it: the sandbox section wanted to say
+      "impose limits from the host side" and there was no way to. New `Limits`
+      type exposes wasmi's fuel metering and memory ceiling.
+- [x] Governance: `SECURITY.md` with a disclosure process, `CHANGELOG.md`,
+      contribution guide, license clarity. License settled on CC0-1.0 by the
+      maintainer; see Findings.
+- [x] Zig removal: delete the Makefile targets and README/doc references. The
+      Makefile targets were already gone; the prose was not.
 
 **Exit:** a third party can add the crate, compile and run a Pascal program,
 get a useful error from a bad one, and file a bug against a documented process.
-Declare 1.0.0.
+All four hold. **Declaring 1.0.0 is deliberately not done here** — it is a
+publishing decision, and the standing rule is not to bump a version until the
+maintainer asks. Everything a 1.0 needs is in place; cutting it is one commit
+setting `Cargo.toml` to `1.0.0`, dating the `Unreleased` section of
+`CHANGELOG.md`, and tagging.
 
 ### Phase G: C library decision gate — 0.5 to 3 weeks
 

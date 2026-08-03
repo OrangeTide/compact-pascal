@@ -23,10 +23,10 @@ finished.
 |---|---|---|
 | A | Specification closure | Done |
 | B | FFI snapshot hang | Done |
-| C | CI, fixpoint gating, release artifact | In progress |
-| D | Runtime safety instrumentation | Not started |
-| E | Pointer types | Not started |
-| F | Rust embedding to production grade | Not started — **1.0 here** |
+| C | CI, fixpoint gating, release artifact | Done except the release artifact |
+| D | Runtime safety instrumentation | Done |
+| E | Pointer types | Done |
+| F | Rust embedding to production grade | Done — **1.0 is ready to cut** |
 
 **1.0 means trustworthy, not capable.** Closed specification, CI gating every
 change, a proven embedding, and failures that are loud instead of silent. It is
