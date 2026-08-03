@@ -138,39 +138,36 @@ This is the primary integration point. All I/O, system access, and application-s
 
 ### API Sketch
 
-**Rust:**
+**Rust**, which is the supported embedding. The compiler snapshot is compiled
+into the crate, so nothing is read from disk and no Pascal toolchain is
+involved:
 
 ```rust
-let compiler = compact_pascal::Compiler::new();
-let wasm_bytes = compiler.compile(pascal_source)?;
+use compact_pascal::{Compiler, InstanceBuilder};
 
-let mut runtime = compact_pascal::Runtime::new();
-runtime.register_import("print_int", |val: i32| { println!("{val}"); })?;
-let instance = runtime.instantiate(&wasm_bytes)?;
-instance.call("main", &[])?;
+let result = Compiler::new().compile(pascal_source)?;
+
+let mut builder = InstanceBuilder::new()?;
+builder.register_import("host", "printInt", 1, false, |args| {
+    println!("{}", args[0]);
+    None
+})?;
+
+let mut instance = builder.build(&result.wasm)?;
+instance.call("main")?;
 ```
 
-**C (conceptual — bring-your-own-WASM-runtime):**
+The full API is in `EMBEDDING-GUIDE.md`.
 
-```c
-#include "compact_pascal.h"
+**Other languages** implement the five WASI imports listed below against a WASM
+runtime of their choice. There is no library to link; the compiler is a WASM
+module and the host contract is the import list, nothing more. A worked example
+for C against wasm3 is in `examples/c/hello`, in about 300 lines.
 
-/* User provides WASM engine callbacks via vtable */
-cp_wasm_engine_t engine = {
-    .instantiate     = my_wasm_instantiate,
-    .call            = my_wasm_call,
-    .get_memory      = my_wasm_get_memory,
-    .register_import = my_wasm_register_import,
-    .destroy         = my_wasm_destroy,
-};
-
-cp_compiler_t *compiler = cp_compiler_new(&engine);
-cp_load_compiler_from_file(compiler, "compiler.wasm");
-cp_result_t result = cp_compile(compiler, source, source_len);
-
-cp_instance_t *inst = cp_instantiate(&engine, result.wasm, result.wasm_len);
-cp_call(inst, "_start");
-```
+An earlier design offered a C library that abstracted the runtime behind a
+vtable the host filled in. It was removed: the vtable put the engine binding on
+the user, which is the hard half of the work, leaving the library as a thin
+wrapper over what the user had already done. `ROADMAP.md` records the decision.
 
 ### Compiler I/O Interface
 

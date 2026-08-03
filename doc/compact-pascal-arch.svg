@@ -15,7 +15,7 @@
   <!-- Host Application -->
   <rect class="box" x="10" y="10" width="500" height="50" rx="4"/>
   <text class="label" x="260" y="40" text-anchor="middle">Host Application</text>
-  <text class="sublabel" x="260" y="54" text-anchor="middle">(Rust / Zig / Browser JS)</text>
+  <text class="sublabel" x="260" y="54" text-anchor="middle">(Rust / Browser JS)</text>
 
   <!-- Embedding Library -->
   <rect class="box" x="10" y="76" width="500" height="100" rx="4"/>
@@ -24,7 +24,7 @@
   <!-- WASM Runtime sub-box -->
   <rect class="inner" x="30" y="106" width="220" height="56" rx="3"/>
   <text class="label" x="140" y="128" text-anchor="middle">WASM Runtime</text>
-  <text class="sublabel" x="140" y="148" text-anchor="middle">(wasmi / wasm3)</text>
+  <text class="sublabel" x="140" y="148" text-anchor="middle">(wasmi)</text>
 
   <!-- Host-Guest FFI sub-box -->
   <rect class="inner" x="270" y="106" width="220" height="56" rx="3"/>

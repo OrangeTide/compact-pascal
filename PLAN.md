@@ -1,6 +1,6 @@
 # Compact Pascal — Project Plan
 
-Compact Pascal is a new language in the Pascal family with a compiler that targets WASM 1.0. The compiler is written in Pascal, ships as a WASM binary, and is embedded in Rust, Zig, and C libraries.
+Compact Pascal is a new language in the Pascal family with a compiler that targets WASM 1.0. The compiler is written in Pascal, ships as a WASM binary, and is embedded in a Rust crate.
 
 See `doc/compact-pascal-wp.md` for the full white paper and `doc/compact-pascal-ref.md` for the language reference.
 
@@ -9,13 +9,13 @@ See `doc/compact-pascal-wp.md` for the full white paper and `doc/compact-pascal-
 1. **Design a new Pascal-family language** — minimal, strongly typed, suitable for embedding. I/O via compiler intrinsics that lower to WASM host imports. Not a conforming implementation of any existing standard.
 2. **Write the compiler in Pascal** — single-pass recursive-descent parser targeting WASM 1.0 binary output. Bootstrapped with fpc, then self-hosting.
 3. **Ship the compiler as a WASM blob** — the compiler runs inside a WASM interpreter, so any host that can run WASM can compile Compact Pascal programs.
-4. **Provide Rust, Zig, and C embedding libraries** — high-level APIs to compile Pascal source, instantiate WASM modules, and bridge host-guest function calls. No external Pascal toolchain required. The C library uses a bring-your-own-WASM-runtime approach via a vtable interface.
-5. **Run everywhere WASM runs** — native applications (via wasmi/wasm3), browsers (via native WebAssembly API), edge runtimes.
+4. **Provide a Rust embedding crate** — a high-level API to compile Pascal source, instantiate WASM modules, and bridge host-guest function calls, with no external Pascal toolchain required. A host in another language implements the five WASI imports directly; a C library on a bring-your-own-runtime vtable was attempted and dropped in Phase G.
+5. **Run everywhere WASM runs** — native applications (via wasmi or any WASM runtime), browsers (via native WebAssembly API), edge runtimes.
 6. **Extend the language thoughtfully** — add structural interfaces with methods, and potentially garbage collection, while preserving single-pass compilation and the language's minimalist character.
 
 ## Bootstrapping
 
-Bootstrap using **fpc** in TP/BP 7.0 mode (`-Mtp`). fpc produces a **native binary** (not WASM). The native compiler then compiles its own source to WASM, producing the first snapshot. Once a snapshot WASM blob exists (< 1 MB, committed to git), only Rust, Zig, or C (with a WASM runtime) is needed to build.
+Bootstrap using **fpc** in TP/BP 7.0 mode (`-Mtp`). fpc produces a **native binary** (not WASM). The native compiler then compiles its own source to WASM, producing the first snapshot. Once a snapshot WASM blob exists (< 1 MB, committed to git), only Rust, or any language with a WASM runtime, is needed to build.
 
 **Open question (checked when resolved) :**
 - [x] do we keep the bootstrap compiler that can build in TP-mode of fpc? Or move entirely to the self-hosted compiler knowing that if we lose the .wasm binary that we are stuck? **RESOLVED: Keep fpc bootstrap permanently.** The TP subset fits the compiler's coding style naturally (flat arrays, integers, short strings), so the compatibility cost is near-zero. The main benefit is cross-checking: building via fpc (native → WASM) and via the snapshot (WASM → WASM) gives two independent paths to the same output. Diffing them is a fixpoint test that catches self-hosting bugs. Disaster recovery (rebuild without a WASM runtime) and easy onboarding (`fpc -Mtp cpas.pas` is one command) are secondary benefits. The compiler source must continue to avoid Compact Pascal extensions not present in fpc `-Mtp` (no initialized variables, no extended literals, etc.).
@@ -25,23 +25,17 @@ Bootstrap using **fpc** in TP/BP 7.0 mode (`-Mtp`). fpc produces a **native bina
 ```
 compiler/       — Pascal source for the compiler (built with fpc)
 compiler-tests/ — test suite modeled on BSI Pascal Validation Suite
-src/
-  rust/         — Rust crate source
-  zig/          — Zig library source
-  c/            — C embedding library (bring-your-own-WASM-runtime)
-snapshot/       — the compiler WASM blob (shared by Rust, Zig, and C)
+src/rust/       — Rust crate source (compiler, runtime, WASI bridge, diagnostics)
+snapshot/       — the compiler WASM blob, embedded in the crate
 examples/
   pascal/       — Compact Pascal example programs
   lightout/     — Light's Out browser game (Canvas + WASM, see doc/lightout-example.md)
-  rust/         — Rust embedding examples (hello, ffi, pode-server)
-  zig/          — Zig embedding examples
-  c/            — C embedding examples (wasm3)
-  html/         — client-side browser playground (static HTML, no server)
+  rust/         — Rust embedding examples (hello, calculator, host-callback)
+  c/            — reference sample for hosting the snapshot from C, not a library
 pages/          — GitHub Pages site (includes deployed playground)
+  playground/   — client-side browser playground (static HTML, no server)
 doc/            — white paper, language reference, and compiler tutorial
 Cargo.toml      — Rust build (lib path: src/rust/lib.rs)
-build.zig       — Zig build (root source: src/zig/)
-build.zig.zon   — Zig package manifest
 ```
 
 ## Phases
@@ -117,69 +111,32 @@ Polish items beyond the self-hosting cut. None of these block any later phase; t
 - [x] Makefile for building and local serving
 - [x] Demonstrates `{$IMPORT}`/`{$EXPORT}` FFI, arrays, constants, frame-driven game loop
 
-### Phase 2: Embedding Libraries (Rust + Zig + C) — `IN PROGRESS`
+### Phase 2: Embedding Libraries — `DONE (Rust); C and Zig dropped`
 
-#### Rust (`compact-pascal` crate, using wasmi)
+Superseded by Phase F, which took the Rust crate to production grade, and by
+Phase G, which dropped the C library. Zig was dropped earlier. The original
+checklist for this phase is deleted rather than left standing, because it was
+not merely stale: six items under the C library were marked done that were
+never implemented, including the WASI callbacks, the host-guest FFI through the
+vtable, and an example described as "minimal compile-and-run" that never
+compiled anything. Leaving false ticks in place is worse than having no
+checklist. See Findings.
 
-- [x] Cargo project setup with wasmi dependency
-- [x] Embed the snapshot WASM blob of the compiler
-- [x] Run the compiler in wasmi to compile Pascal source to WASM bytes
-- [x] Provide WASI preview 1 host imports for the compiler (`fd_read`, `fd_write`, `proc_exit`)
-- [x] Instantiate and run compiled WASM modules via wasmi
-- [x] Host-guest FFI (imports and exports)
-- [x] String conversion helpers
-- [x] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
-- [x] Example: `examples/rust/hello/` — minimal compile-and-run (~30 lines, shows basic API)
-- [ ] Example: `examples/rust/ffi/` — host-guest FFI (register Rust function, call from Pascal, call Pascal export from Rust)
-- [ ] Example: `examples/rust/pode-server/` — **Pode Server: The Pascal Node Clone** (see `doc/pode-server.md`)
-  - [ ] File-based routing: `routes/*.pas` → HTTP endpoints (filename = route path)
-  - [ ] Query string → stdin piping (`GET /fib?input=10` → `readln(n)` receives `"10"`)
-  - [ ] stdout → HTTP response body, stderr → server console with colored `[route]` prefix
-  - [ ] Hot reload: watch `routes/` via `notify` crate, recompile on save
-  - [ ] Deno-style permission flags: `--allow-stdout`, `--allow-stdin`, `--allow-args`
-  - [ ] Startup banner with ASCII toad
-  - [ ] Auto-generated landing page at `GET /` listing all routes
-  - [ ] Example routes: `hello.pas`, `fib.pas`, `greet.pas`
-  - [ ] Dependencies: `compact-pascal`, `axum`, `tokio`, `notify`, `clap`
+Remaining ideas from that list that are still wanted, none of them blocking:
 
-#### Zig (`compact-pascal` module, using wasm3 via C interop)
-
-- [ ] `build.zig` / `build.zig.zon` project setup
-- [ ] wasm3 C dependency integration via Zig build system
-- [ ] Embed the snapshot WASM blob of the compiler
-- [ ] Run the compiler in wasm3 to compile Pascal source to WASM bytes
-- [ ] Provide WASI preview 1 host imports for the compiler (`fd_read`, `fd_write`, `proc_exit`)
-- [ ] Instantiate and run compiled WASM modules via wasm3
-- [ ] Host-guest FFI (imports and exports)
-- [ ] String conversion helpers
-- [ ] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
-- [ ] Example programs in `examples/zig/`
-
-#### C (`compact-pascal` library, bring-your-own-WASM-runtime)
-
-- [x] `src/c/compact_pascal.h` — public header with vtable interface, API functions, WASI helpers
-- [x] `src/c/compact_pascal.c` — implementation
-- [x] Vtable-based WASM engine abstraction (`cp_wasm_engine_t`) — user fills in function pointers for their chosen runtime
-- [x] `cp_load_compiler_from_file()` — load compiler snapshot WASM from disk
-- [x] `cp_load_compiler_from_string()` — load compiler snapshot WASM from memory buffer
-- [x] WASI preview 1 callback implementations (fd_read, fd_write, proc_exit, args_get, args_sizes_get) that users wire into their runtime
-- [x] String conversion helpers: C string ↔ Pascal short string in WASM linear memory
-- [x] Host-guest FFI (imports and exports) through the vtable
-- [x] `{$INCLUDE}` / `{$I}` preprocessing (expand include directives before passing source to compiler)
-- [x] Example: `examples/c/hello/` — minimal compile-and-run using wasm3
-
-All three libraries share the same snapshot blob and compiler test suite. APIs should be idiomatic to each language.
+- [ ] Example: `examples/rust/pode-server/` — **Pode Server: The Pascal Node
+      Clone** (see `doc/pode-server.md`). File-based routing over `routes/*.pas`,
+      query string piped to stdin, stdout as the response body, hot reload, and
+      Deno-style permission flags.
 
 ### Phase 3: Self-Hosting — `MOSTLY DONE`
 
-Core self-hosting is complete: the fpc-built compiler compiles its own source to WASM, the snapshot produces bit-identical output (fixpoint validated), and the blob is committed at 131 KB. Embedding library verification is pending on Phase 2.
+Core self-hosting is complete: the fpc-built compiler compiles its own source to WASM, the snapshot produces bit-identical output (fixpoint validated), and the blob is committed at 131 KB. The Rust crate exercises the snapshot on every `cargo test`, so embedding is verified continuously rather than pending.
 
 - [x] Use the native (fpc-built) compiler to compile its own source to WASM, producing the first snapshot binary
 - [x] Verify fixpoint: fpc-built and self-built compilers produce bit-identical WASM
 - [x] Commit the snapshot blob to git (131 KB, well under the 1 MB budget)
 - [x] Verify the Rust crate works end-to-end using only the snapshot (no fpc required) — 10 integration tests in `tests/integration.rs`
-- [ ] Verify the Zig library works end-to-end using only the snapshot (no fpc required)
-- [ ] Verify the C library works end-to-end using only the snapshot (no fpc required)
 
 ### Phase 4: Browser IDE (Playground) — `DONE`
 
@@ -812,15 +769,18 @@ This is simpler than the earlier `fpRead`/`fpWrite` via `BaseUnix` design: no `u
 - **Built-in I/O scope:** Phase 1 supports a minimal subset of `write`/`writeln` (integers, characters, strings) and `read`/`readln` (integers, characters). Format specifiers (`:width`, `:width:decimals`), booleans, and reals are deferred. `write`/`writeln` always target stdout (fd 1). The compiler does not implement `write(stderr, ...)` as a language feature. Instead, the compiler source uses `WriteError`/`WriteErrorLn` wrapper procedures that are `{$IFDEF FPC}` switched: under fpc they call `writeln(stderr, s)`, under self-hosting they do WASI `fd_write` to fd 2 directly. Error messages are pre-formatted into a string using `Str()` and string concatenation before calling the wrapper. The `-dump` disassembler is wrapped in `{$IFDEF FPC}` and excluded from self-hosted builds.
 - **Low-level I/O:** `BlockRead`/`BlockWrite` are the byte-level I/O primitives. Under fpc bootstrap they operate on real `file` variables. Under self-hosting they are compiler intrinsics wrapping WASI `fd_read`/`fd_write`. `Assign`/`Reset`/`Rewrite` are no-ops in self-hosted mode. See the I/O abstraction Finding for details.
 - **TP numeric types:** `byte`, `word`, `shortint`, `longint` are included as aliases to WASM integer types. These are trivial to add and important for the compiler source.
-- **Include file resolution:** `{$INCLUDE}` directives are resolved by the host application before invoking the compiler. The embedding library scans the source, expands includes by replacing the directive with file contents, and passes a single concatenated source stream to the compiler on stdin. This keeps the compiler's I/O interface minimal (three fds, no filesystem access). During fpc bootstrap, fpc handles `{$I}` natively. The Rust, Zig, and C libraries each provide a utility function for this — parsing `{$I 'filename'}` out of comments is straightforward.
+- **Include file resolution:** `{$INCLUDE}` directives are resolved by the host application before invoking the compiler. The embedding library scans the source, expands includes by replacing the directive with file contents, and passes a single concatenated source stream to the compiler on stdin. This keeps the compiler's I/O interface minimal (three fds, no filesystem access). During fpc bootstrap, fpc handles `{$I}` natively. The Rust crate provides `expand_includes` for this, confining resolution to a base directory the host chooses; a host in another language does the expansion itself. Parsing `{$I ...}` out of comments is straightforward.
 
-**Rust, Zig, and C version targets.**
+**Rust version target.**
 
 - **Rust MSRV: 1.85 (edition 2024).** This is the edition 2024 baseline and the minimum supported Rust version for the `compact-pascal` crate (set via `rust-version = "1.85"` in `Cargo.toml`). wasmi works on stable Rust; no nightly features are required. The MSRV can be bumped conservatively as needed.
-- **Zig: 0.14.0 (latest stable release).** Zig is pre-1.0, so pinning to the latest stable release is standard practice. The C interop needed for wasm3 works on 0.14.x. The version should be documented in `build.zig.zon`. Expect to update when new Zig stable releases land; pinning to stable (not master/nightly) avoids unnecessary churn.
-- **C: C99 or later.** The C embedding library targets C99 for maximum portability. No C11/C17 features required. The library has no WASM runtime dependency — users bring their own.
 
-**Zig WASM runtime: wasm3 via C interop.** wasm3 (C library) chosen for Zig side. Zig-native interpreters are immature. Zig's `@cImport` makes C interop trivial. Parallels Rust's wasmi choice. **Risk:** wasm3 development has slowed significantly. If the project becomes unmaintained, alternatives include writing a minimal WASM interpreter in Zig or switching to another C-based runtime.
+The Zig and C version targets that stood here are dropped along with those
+libraries. The wasm3 dependency they implied is gone too, which removes the
+risk noted at the time: wasm3's development had slowed and an unmaintained
+runtime would have been the project's problem. The `examples/c/hello` sample
+still uses wasm3, but it builds against an upstream checkout the reader
+supplies and nothing in the repository depends on it.
 
 **WASM snapshot hung on `{$IMPORT}` + `external` sources. RESOLVED.** The WASM compiler snapshot entered an infinite computation loop compiling any source carrying both `{$IMPORT 'module' name}` and `procedure/function ... external;`. No `fd_read` calls occurred, so it was pure computation rather than an I/O stall, and export-only sources compiled fine. **The root cause was not the FPC RTL, and not I/O at all.** It was the for-loop `continue` codegen bug fixed in `ee481a9`: `continue` branched past the loop increment, so any `for` loop containing it ran forever. Import handling reaches such a loop; export handling does not, which is why only import-bearing sources hung. Confirmed by bisecting the checked-in snapshots: the snapshot at `fff708d`, the commit that recorded this finding, still hangs on a minimal import source and compiles an export-only source fine, exactly as described. The snapshot at `ee481a9`, the very next commit, compiles both. The planned `BlockRead`/`BlockWrite` migration was chasing the wrong hypothesis and is not needed for this. The `compile_native` workaround in the Rust tests is removed; all four FFI tests now go through wasmi, and `snapshot_compiles_import_bearing_source` pins it.
 
@@ -1072,32 +1032,34 @@ This consolidates the duplicated address-computation code and makes all future s
 
 #### Examples
 
-##### Rust: Pode Server
+##### Pode Server (Rust)
 
 Node-like Pascal server with Rust backend.
 
-##### Zig: Compact Pascal IDE
+##### A native command-line wrapper generator
 
-Using zig-webui and the Playground javascript as a starting point. Implement an IDE with a Zig backend to handle the wasm runtime.
+Turn a `.wasm` from cpas into a stand-alone command-line utility: emit a small
+C stub that embeds the module and links a WASM runtime, exporting the bare
+minimum the program needs. A sort of mini-linker that produces a
+wasm-in-a-native bundle, which would also give `cpas` itself a native
+command-line form.
 
-Zig's runtime provides local file access, so that the editor windows can read/write files as normal.
-Wasm runtime is still in a sandbox by default.
+Language-agnostic, and no longer tied to the dropped C library. `examples/c/hello`
+is most of the runtime half already.
 
-##### C: To Be Determined
-
-Possibilities:
-
-- Tool to generate native command-line wrappers of wasm3+runtime. outputs stubs for gcc/clang (in .c) exporting the bare minimum to the app's runtime. A sort of mini-linker in C that assists in creating wasm-in-a-native bundle. This makes it possible to run 'cpas' at the command-line, or turn any of the .wasm output from cpas into a stand-alone command-line utility. (glibc or musl linked)
+The Zig IDE idea that stood here is dropped with the Zig binding.
 
 #### Releases
 
 On tag (e.g. v1.2.3), release a set of packages on the Github release page.
 
 - ZIP with PDFs: White Paper, Reference(s), and Tech Notes.
-- ZIP with Rust release.
-- ZIP with C release.
-- ZIP with Zig release.
-- ZIP with only the wasm binaries for the compiler.
+- ZIP with only the wasm binaries for the compiler, plus a README covering
+  `wasmtime run compiler.wasm < prog.pas > prog.wasm`. This is the Phase C
+  release artifact and the only one that is committed.
+
+The Rust crate is published to crates.io rather than as a zip. The C and Zig
+release zips that stood here are dropped with those libraries.
 - ZIP of the Playground website ready for people to deploy locally.
 
 #### Dependencies and risks
