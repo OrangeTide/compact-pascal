@@ -219,10 +219,12 @@ const
   tyArray     = 6;
   tyEnum      = 7;
   tySet       = 8;
+  tyPointer   = 9;
 
   { Type descriptor table limits }
   MaxTypes    = 256;
   MaxFields   = 512;
+  MaxPendingPtr = 32;   { unresolved forward pointer references per type block }
 
   { Symbol kinds }
   skNone      = 0;
@@ -380,6 +382,16 @@ var
   types: array[0..MaxTypes-1] of TTypeDesc;
   numTypes: longint;
 
+  { Pointer types naming a type that is not declared yet. Pascal allows this
+    one break from declare-before-use because a linked list cannot be written
+    without it: PNode = ^TNode must precede the TNode that mentions PNode.
+    The reference is resolved at the end of the type declaration block that
+    opened it, and is an error if the name never appears. }
+  pendingPtrType: array[0..MaxPendingPtr-1] of longint;  { types[] index }
+  pendingPtrName: array[0..MaxPendingPtr-1] of string[63];
+  pendingPtrLine: array[0..MaxPendingPtr-1] of longint;
+  numPendingPtr: longint;
+
   { Field descriptor table (for record fields) }
   fields: array[0..MaxFields-1] of TFieldDesc;
   numFields: longint;
@@ -488,6 +500,7 @@ var
   needsSetSubset: boolean;       { __set_subset helper needed }
   needsIntToStr: boolean;        { __int_to_str helper needed }
   needsWriteChar: boolean;       { __write_char helper needed }
+  needsNilCheck: boolean;        { __nil_check helper needed }
   addrSetTemp: longint;          { 32-byte temp for large set arithmetic results }
   needsSetTemp: boolean;         { whether set temp was allocated }
   addrSetTemp2: longint;         { second 32-byte temp for compound set expressions }
@@ -2123,6 +2136,15 @@ begin
   TypeVoidI32 := AddWasmType(0, p, 1, r);
 end;
 
+{** Return the index of the (i32) -> (i32) signature. }
+function TypeI32I32: longint;
+var p: TWasmParamArr; r: TWasmResultArr;
+begin
+  p[0] := WasmI32;
+  r[0] := WasmI32;
+  TypeI32I32 := AddWasmType(1, p, 1, r);
+end;
+
 {** Return the index of the (i32, i32) -> () signature. }
 function TypeI32x2Void: longint;
 var p: TWasmParamArr; r: TWasmResultArr;
@@ -2717,6 +2739,49 @@ begin
   numTypes := numTypes + 1;
 end;
 
+function FindOrAddPointerType(targetTyp, targetTypeIdx, targetSize, targetStrMax: longint): longint;
+{** Return a descriptor for ^Target, reusing an existing one when the target
+  matches. The target is held in the elem* fields, the same slots an array
+  uses for its element type. Reuse keeps a program with many pointers to the
+  same type from exhausting the 256-entry table, and it is safe because two
+  pointer types with the same target are the same type.
+
+  Descriptors still awaiting a forward reference (elemType = tyNone) are never
+  matched: their target is not known yet, so they cannot be compared. }
+var i, idx: longint;
+begin
+  for i := 0 to numTypes - 1 do
+    if (types[i].kind = tyPointer) and (types[i].elemType <> tyNone)
+       and (types[i].elemType = targetTyp)
+       and (types[i].elemTypeIdx = targetTypeIdx)
+       and (types[i].elemStrMax = targetStrMax) then begin
+      FindOrAddPointerType := i;
+      exit;
+    end;
+  idx := AddTypeDesc;
+  types[idx].kind := tyPointer;
+  types[idx].size := 4;
+  types[idx].elemType := targetTyp;
+  types[idx].elemTypeIdx := targetTypeIdx;
+  types[idx].elemSize := targetSize;
+  types[idx].elemStrMax := targetStrMax;
+  FindOrAddPointerType := idx;
+end;
+
+function PointerTargetsMatch(aIdx, bIdx: longint): boolean;
+{** Whether two pointer types may be assigned or compared. A descriptor index
+  of -1 is nil, which is compatible with every pointer type. Otherwise the
+  targets must agree; the descriptor indices need not, since a forward
+  reference and a later direct reference can produce two descriptors for the
+  same pointer type. }
+begin
+  if (aIdx < 0) or (bIdx < 0) then
+    PointerTargetsMatch := true
+  else
+    PointerTargetsMatch := (types[aIdx].elemType = types[bIdx].elemType)
+                       and (types[aIdx].elemTypeIdx = types[bIdx].elemTypeIdx);
+end;
+
 function AddField(const aname: string; atyp, atypeIdx, aoffset, asize, astrMax: longint): longint;
 {** Add a field descriptor and return its index. }
 begin
@@ -2804,6 +2869,7 @@ var
   dimLo: array[0..7] of longint;
   dimHi: array[0..7] of longint;
   loBound, hiBound, scratchTypeIdx: longint;
+  ptrTargetSize, ptrTargetStrMax: longint;
   { Variant record fields }
   tagFieldName: string;
   tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax: longint;
@@ -2839,6 +2905,48 @@ begin
     end else begin
       outSize := 4;  { integer, boolean, char, enum — all i32 }
     end;
+  end else if tokKind = tkCaret then begin
+    { Pointer type: ^TypeIdentifier. The grammar allows only a name here, not
+      an anonymous record or array, which is what makes the forward reference
+      below tractable in a single pass. }
+    NextToken;
+    if tokKind <> tkIdent then
+      Expected('type name after ''^''');
+    typeName := tokStr;
+    typId := LookupSym(typeName);
+    outTyp := tyPointer;
+    outSize := 4;
+    if (typId >= 0) and (syms[typId].kind = skType) then begin
+      if syms[typId].typ = tyString then begin
+        ptrTargetStrMax := syms[typId].strMax;
+        if ptrTargetStrMax = 0 then ptrTargetStrMax := 255;
+        ptrTargetSize := ptrTargetStrMax + 1;
+      end else if (syms[typId].typ = tyRecord) or (syms[typId].typ = tyArray)
+                  or (syms[typId].typ = tySet) then begin
+        ptrTargetStrMax := 0;
+        ptrTargetSize := types[syms[typId].typeIdx].size;
+      end else begin
+        ptrTargetStrMax := 0;
+        ptrTargetSize := 4;
+      end;
+      outTypeIdx := FindOrAddPointerType(syms[typId].typ, syms[typId].typeIdx,
+                                         ptrTargetSize, ptrTargetStrMax);
+    end else if typId >= 0 then
+      Error(typeName + ' is not a type')
+    else begin
+      { Forward reference. Park a descriptor with no target and record the
+        name; ResolvePendingPointers fills it in at the end of the block. }
+      if numPendingPtr >= MaxPendingPtr then
+        Error('too many unresolved forward pointer types');
+      outTypeIdx := AddTypeDesc;
+      types[outTypeIdx].kind := tyPointer;
+      types[outTypeIdx].size := 4;
+      pendingPtrType[numPendingPtr] := outTypeIdx;
+      pendingPtrName[numPendingPtr] := typeName;
+      pendingPtrLine[numPendingPtr] := srcLine;
+      numPendingPtr := numPendingPtr + 1;
+    end;
+    NextToken;
   end else if tokKind = tkString_kw then begin
     outTyp := tyString;
     NextToken;
@@ -3772,6 +3880,27 @@ begin
   EnsureWriteChar := numImports + 22; { slot 22 = __write_char }
 end;
 
+function EnsureNilCheck: longint;
+{** Ensure the __nil_check helper is registered.
+  __nil_check(addr) -> addr is at slot 23. Traps if addr is zero. }
+begin
+  needsNilCheck := true;
+  EnsureNilCheck := numImports + 23;
+end;
+
+procedure EmitNilCheck;
+{** Guard a dereference. The address is on the operand stack and is left
+  there. Reading through nil would otherwise hit the four-byte nil guard and
+  quietly return zeros, which is the failure this catches: the program keeps
+  running on a value it never stored.
+
+  Omitted when stack checks are off, where the guard bytes at address 0 are
+  the only protection left. }
+begin
+  if optStackChecks then
+    EmitCall(EnsureNilCheck);
+end;
+
 procedure EmitWriteChar(fd: longint);
 {** Emit a call to __write_char(value, fd).
   The char value (i32) is already on the WASM operand stack.
@@ -3857,10 +3986,23 @@ var
   castName: string;
   leftSetSize: longint;
   concatSPAllocs: longint;
+  wantAddr: boolean;
+  leftTypeIdx: longint;
+  ptrTgtTyp, ptrTgtIdx, ptrTgtSize, ptrTgtStrMax: longint;
 begin
   withFound := false;
   leftSetSize := 4;
   concatSPAllocs := 0;
+  { Address-of. The designator that follows is parsed by the ordinary
+    variable path below; wantAddr only tells that path to stop one step
+    short, leaving the address it computed instead of loading through it. }
+  wantAddr := false;
+  if tokKind = tkAt then begin
+    wantAddr := true;
+    NextToken;
+    if tokKind <> tkIdent then
+      Expected('variable after ''@''');
+  end;
   { Prefix }
   case tokKind of
     tkInteger: begin
@@ -3886,6 +4028,15 @@ begin
     tkFalse: begin
       EmitI32Const(0);
       exprType := tyBoolean;
+      NextToken;
+    end;
+
+    tkNil: begin
+      { Address 0, which the nil guard reserves. Type index -1 marks the
+        untyped nil, compatible with every pointer type. }
+      EmitI32Const(0);
+      exprType := tyPointer;
+      exprTypeIdx := -1;
       NextToken;
     end;
 
@@ -4287,11 +4438,30 @@ begin
           exprType := syms[sym].typ;
           NextToken;
 
-          { Process .field and [index] selectors — address must be on stack }
-          while (tokKind = tkDot) or (tokKind = tkLBrack) do begin
-            if not hasAddr then
-              Error('cannot apply selector to value parameter');
-            if tokKind = tkDot then begin
+          { Process .field, [index], and ^ selectors — address must be on stack }
+          while (tokKind = tkDot) or (tokKind = tkLBrack)
+                or (tokKind = tkCaret) do begin
+            if tokKind = tkCaret then begin
+              { Dereference. When the address of the pointer is on the stack,
+                load through it to get the pointer's value; when the pointer
+                is a scalar value parameter its value is already there. Either
+                way the result is an address, so selectors can continue. }
+              if exprType <> tyPointer then
+                Error('pointer type expected before ''^''');
+              if exprTypeIdx < 0 then
+                Error('cannot dereference nil');
+              if hasAddr then
+                EmitI32Load(2, 0);
+              EmitNilCheck;
+              exprType := types[exprTypeIdx].elemType;
+              exprStrMax := types[exprTypeIdx].elemStrMax;
+              exprTypeIdx := types[exprTypeIdx].elemTypeIdx;
+              hasAddr := true;
+              NextToken;
+            end
+            else if not hasAddr then
+              Error('cannot apply selector to value parameter')
+            else if tokKind = tkDot then begin
               if exprType <> tyRecord then
                 Error('record type expected before ''.''');
               NextToken;
@@ -4349,8 +4519,30 @@ begin
             end;
           end;
 
+          if wantAddr then begin
+            { @designator: keep the address the selectors computed and call it
+              a pointer to whatever they arrived at. Structured types already
+              leave an address, so the only thing to skip is the final load. }
+            if not hasAddr then
+              Error('cannot take the address of a value parameter');
+            ptrTgtTyp := exprType;
+            ptrTgtIdx := exprTypeIdx;
+            ptrTgtStrMax := exprStrMax;
+            if ptrTgtTyp = tyString then
+              ptrTgtSize := exprStrMax + 1
+            else if (ptrTgtTyp = tyRecord) or (ptrTgtTyp = tyArray)
+                    or (ptrTgtTyp = tySet) then
+              ptrTgtSize := types[ptrTgtIdx].size
+            else
+              ptrTgtSize := 4;
+            exprType := tyPointer;
+            exprTypeIdx := FindOrAddPointerType(ptrTgtTyp, ptrTgtIdx,
+                                                ptrTgtSize, ptrTgtStrMax);
+            exprStrMax := 0;
+            wantAddr := false;
+          end
           { Final load: scalars need i32.load, structured types leave address }
-          if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
+          else if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
              and (exprType <> tyArray)
              and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then begin
             if (exprType = tyChar) or (exprType = tyBoolean) then
@@ -5063,6 +5255,21 @@ begin
         else
           exprType := tyBoolean;
       end;
+    end
+    else if (leftType = tyPointer) or (exprType = tyPointer) then begin
+      { Pointers compare by address and nothing else. Ordering is left out
+        deliberately: two pointers into different objects have no meaningful
+        order, and the one case where it would be defined, comparing into the
+        same array, is better written on the indices. }
+      if (leftType <> tyPointer) or (exprType <> tyPointer) then
+        Error('pointer compared with a non-pointer value');
+      if op = tkEqual then
+        EmitOp(OpI32Eq)
+      else if op = tkNotEqual then
+        EmitOp(OpI32Ne)
+      else
+        Error('only = and <> are defined for pointers');
+      exprType := tyBoolean;
     end else begin
       case op of
         tkPlus:      if optOverflowChecks then EmitCall(EnsureCheckedAdd)
@@ -5164,6 +5371,11 @@ begin
         end else if exprType = tyChar then begin
           { Char expression: write raw byte }
           EmitWriteChar(fd);
+        end else if exprType = tyPointer then begin
+          { A raw address is not output. Printing one is almost always a
+            debugging accident, and the number means nothing outside the
+            run that produced it. }
+          Error('cannot write a pointer; write what it points at')
         end else begin
           { Integer/boolean/enum expression }
           if fd = 1 then
@@ -5633,6 +5845,59 @@ begin
   EvalBinary(PrecNone);
 end;
 
+procedure ResolvePendingPointers;
+{** Fill in the targets of forward pointer references opened by the type
+  declaration block that is now ending. A name that never appeared is an
+  error: the alternative, leaving the target unknown, would let p^ compile
+  with no idea what it dereferences.
+
+  The descriptors are not merged with an equivalent resolved one here. Two
+  descriptors for the same pointer type are harmless because compatibility
+  compares targets, not descriptor indices. }
+var i, typId, lineStr: longint;
+  lineText: string[11];
+begin
+  for i := 0 to numPendingPtr - 1 do begin
+    typId := LookupSym(pendingPtrName[i]);
+    lineStr := pendingPtrLine[i];
+    str(lineStr, lineText);
+    if typId < 0 then
+      Error('forward pointer type ^' + pendingPtrName[i] + ' on line ' +
+            lineText + ' was never declared');
+    if syms[typId].kind <> skType then
+      Error(pendingPtrName[i] + ' is not a type');
+    types[pendingPtrType[i]].elemType := syms[typId].typ;
+    types[pendingPtrType[i]].elemTypeIdx := syms[typId].typeIdx;
+    if syms[typId].typ = tyString then begin
+      types[pendingPtrType[i]].elemStrMax := syms[typId].strMax;
+      if types[pendingPtrType[i]].elemStrMax = 0 then
+        types[pendingPtrType[i]].elemStrMax := 255;
+      types[pendingPtrType[i]].elemSize :=
+        types[pendingPtrType[i]].elemStrMax + 1;
+    end else if (syms[typId].typ = tyRecord) or (syms[typId].typ = tyArray)
+                or (syms[typId].typ = tySet) then
+      types[pendingPtrType[i]].elemSize := types[syms[typId].typeIdx].size
+    else
+      types[pendingPtrType[i]].elemSize := 4;
+  end;
+  numPendingPtr := 0;
+end;
+
+procedure CheckPointerAssign(dTyp: longint);
+{** Reject mixing pointers and non-pointers across an assignment.
+
+  Only the type tag is checked, not the target type, because the expression
+  parser reports its result type in a global but keeps the descriptor index
+  in a local. That catches p := 5 and i := p, the mistakes that produce a
+  wild address; assigning between two pointer types with different targets
+  is not yet caught. }
+begin
+  if (dTyp = tyPointer) and (exprType <> tyPointer) then
+    Error('pointer value expected on the right of '':=''');
+  if (dTyp <> tyPointer) and (exprType = tyPointer) then
+    Error('cannot assign a pointer to a non-pointer variable');
+end;
+
 procedure ParseVarDecl;
 {** Parse variable declarations in a var section. }
 var
@@ -5723,6 +5988,7 @@ var
   desTypeIdx: longint;
   desStrMax: longint;
   desHasAddr: boolean;
+  desBaseIsValue: boolean;
   fldIdx: longint;
   withFound: boolean;
   wi: longint;
@@ -6025,6 +6291,7 @@ begin
           EmitMemoryCopy;
         end else begin
           ParseExpression(PrecNone);
+          CheckPointerAssign(desTyp);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -6033,8 +6300,9 @@ begin
         end;
       end
       else if (sym >= 0) and (syms[sym].kind = skVar) and
-         ((tokKind = tkAssign) or (tokKind = tkDot) or (tokKind = tkLBrack)) then begin
-        { Assignment: var [:= | .field | [index] ...] := expr }
+         ((tokKind = tkAssign) or (tokKind = tkDot) or (tokKind = tkLBrack)
+          or (tokKind = tkCaret)) then begin
+        { Assignment: var [:= | .field | [index] | ^ ...] := expr }
         if syms[sym].isConstParam then
           Error('cannot assign to const parameter ''' + name + '''');
 
@@ -6044,7 +6312,7 @@ begin
         desStrMax := syms[sym].strMax;
         desHasAddr := false;
 
-        if (tokKind = tkDot) or (tokKind = tkLBrack) then begin
+        if (tokKind = tkDot) or (tokKind = tkLBrack) or (tokKind = tkCaret) then begin
           { Need to compute base address for selector chain }
           if syms[sym].isVarParam then begin
             EmitVarParamPtr(sym);
@@ -6056,10 +6324,30 @@ begin
             EmitOp(OpI32Add);
           end;
           desHasAddr := true;
+          { A scalar value parameter's local holds the value, not an address.
+            That only matters for a pointer, where the value already is the
+            address its ^ needs, so the load below must be skipped once. }
+          desBaseIsValue := (syms[sym].offset < 0) and (desTyp = tyPointer)
+                            and not syms[sym].isVarParam;
 
-          { Process .field and [index] selectors }
-          while (tokKind = tkDot) or (tokKind = tkLBrack) do begin
-            if tokKind = tkDot then begin
+          { Process .field, [index], and ^ selectors }
+          while (tokKind = tkDot) or (tokKind = tkLBrack)
+                or (tokKind = tkCaret) do begin
+            if tokKind = tkCaret then begin
+              if desTyp <> tyPointer then
+                Error('pointer type expected before ''^''');
+              if desTypeIdx < 0 then
+                Error('cannot dereference nil');
+              if not desBaseIsValue then
+                EmitI32Load(2, 0);
+              desBaseIsValue := false;
+              EmitNilCheck;
+              desTyp := types[desTypeIdx].elemType;
+              desStrMax := types[desTypeIdx].elemStrMax;
+              desTypeIdx := types[desTypeIdx].elemTypeIdx;
+              NextToken;
+            end
+            else if tokKind = tkDot then begin
               if desTyp <> tyRecord then
                 Error('record type expected before ''.''');
               NextToken;
@@ -6198,6 +6486,7 @@ begin
         else if desHasAddr then begin
           { Scalar with address on stack from selector chain }
           ParseExpression(PrecNone);
+          CheckPointerAssign(desTyp);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -6207,6 +6496,7 @@ begin
         else if syms[sym].isVarParam then begin
           EmitVarParamPtr(sym);
           ParseExpression(PrecNone);
+          CheckPointerAssign(desTyp);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -6216,6 +6506,7 @@ begin
         else if syms[sym].offset < 0 then begin
           { WASM local (value parameter or function return value) }
           ParseExpression(PrecNone);
+          CheckPointerAssign(desTyp);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -6227,6 +6518,7 @@ begin
           EmitI32Const(syms[sym].offset);
           EmitOp(OpI32Add);
           ParseExpression(PrecNone);
+          CheckPointerAssign(desTyp);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -7814,6 +8106,7 @@ begin
           syms[sym].strMax := typDeclStrMax;
           Expect(tkSemicolon);
         end;
+        ResolvePendingPointers;
       end;
       tkProcedure, tkFunction: begin
         ParseProcDecl;
@@ -8082,7 +8375,7 @@ end;
 
   Slots 0..22 are reserved for the compiler-generated runtime helpers
   (_start, __write_int, __read_int, string ops, checked arithmetic,
-  set ops, etc.). Slots 23+ are user-defined functions. }
+  set ops, etc.). Slots 24+ are user-defined functions. }
 procedure AssembleFunctionSection;
 var i: longint;
 begin
@@ -8134,7 +8427,9 @@ begin
   SmallEmitULEB128(secFunc, TypeI32x2Void);
   { Slot 22: __write_char uses type i32,i32 -> void (always present) }
   SmallEmitULEB128(secFunc, TypeI32x2Void);
-  { Slots 23+: User-defined functions (skip imports) }
+  { Slot 23: __nil_check uses type i32 -> i32 (always present) }
+  SmallEmitULEB128(secFunc, TypeI32I32);
+  { Slots 24+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
     if funcs[i].bodyStart <> -2 then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
@@ -9911,7 +10206,7 @@ procedure AssembleCodeSectionFixed;
   slot 3 = __str_assign, slot 4 = __write_str, slot 5 = __str_compare,
   slot 6 = __read_str, slot 7 = __str_append, slot 8 = __str_copy,
   slot 9 = __str_pos, slot 10 = __str_delete, slot 11 = __str_insert,
-  slot 21 = __int_to_str, slot 22 = __write_char, slots 23+ = user funcs. }
+  slot 21 = __int_to_str, slot 22 = __write_char, slot 23 = __nil_check, slots 24+ = user funcs. }
 var
   bodyLen: longint;
   i, j: longint;
@@ -10398,7 +10693,27 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 23+: User-defined function bodies (skip imports) }
+  { Slot 23: __nil_check body — always present (empty stub if unused) }
+  if needsNilCheck then begin
+    { __nil_check(addr) -> addr, traps if addr is zero }
+    EmitULEB128(secCode, 11); { body size: 1 (locals) + 9 (code) + 1 (end) }
+    CodeBufEmit(secCode, 0);  { 0 local declarations }
+    CodeBufEmit(secCode, OpLocalGet); CodeBufEmit(secCode, 0); { addr }
+    CodeBufEmit(secCode, OpI32Eqz);
+    CodeBufEmit(secCode, OpIf);
+    CodeBufEmit(secCode, $40); { void block }
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+    CodeBufEmit(secCode, OpLocalGet); CodeBufEmit(secCode, 0); { return addr }
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 24+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
@@ -10629,9 +10944,11 @@ begin
           writeln(stderr, '  ;; __int_to_str')
         else if val = numImports + 22 then
           writeln(stderr, '  ;; __write_char')
+        else if val = numImports + 23 then
+          writeln(stderr, '  ;; __nil_check')
         else begin
           { User function }
-          i := val - numImports - 23;
+          i := val - numImports - 24;
           if (i >= 0) and (i < numFuncs) then
             writeln(stderr, '  ;; ', funcs[i].name)
           else
@@ -10808,7 +11125,7 @@ begin
   writeln(stderr);
 
   { Helper slots — list active ones }
-  for i := 1 to 22 do begin
+  for i := 1 to 23 do begin
     case i of
       1: if needsWriteInt then slotName := '__write_int' else continue;
       2: if needsReadInt then slotName := '__read_int' else continue;
@@ -10832,6 +11149,7 @@ begin
       20: if needsSetSubset then slotName := '__set_subset' else continue;
       21: if needsIntToStr then slotName := '__int_to_str' else continue;
       22: if needsWriteChar then slotName := '__write_char' else continue;
+      23: if needsNilCheck then slotName := '__nil_check' else continue;
     end;
     writeln(stderr, 'func[', numImports + i, '] ', slotName, '  (helper, code in code section)');
   end;
@@ -10840,11 +11158,11 @@ begin
   { User-defined functions }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then begin
-      writeln(stderr, 'func[', numImports + 23 + i, '] ', funcs[i].name,
+      writeln(stderr, 'func[', numImports + 24 + i, '] ', funcs[i].name,
               '  (import)');
       continue;
     end;
-    writeln(stderr, 'func[', numImports + 23 + i, '] ', funcs[i].name,
+    writeln(stderr, 'func[', numImports + 24 + i, '] ', funcs[i].name,
             '  params=', funcs[i].nparams,
             '  locals=', funcs[i].nlocals,
             '  bytes=', funcs[i].bodyLen);
@@ -10876,6 +11194,7 @@ begin
   { TypeI32x3Void already registered — reused for __str_append, __str_delete, __str_insert stubs }
   TypeI32x4Void; { always needed for __str_copy stub }
   TypeI32x3I32;  { always needed for __range_check stub }
+  TypeI32I32;    { always needed for __nil_check stub }
 
   { Assemble all sections }
   AssembleTypeSection;
@@ -10982,11 +11301,12 @@ begin
 
   numWasmTypes := 0;
   numTypes := 0;
+  numPendingPtr := 0;
   numFields := 0;
   numStructCopies := 0;
   numVarInits := 0;
   numImports := 0;
-  numDefinedFuncs := 23; { slots 0-22: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str, __write_char }
+  numDefinedFuncs := 24; { slots 0-23: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str, __write_char, __nil_check }
   numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
@@ -11036,6 +11356,7 @@ begin
   needsSetSubset := false;
   needsIntToStr := false;
   needsWriteChar := false;
+  needsNilCheck := false;
   breakDepth := -1;
   continueDepth := -1;
   exitDepth := -1;

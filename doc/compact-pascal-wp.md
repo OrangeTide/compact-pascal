@@ -105,7 +105,7 @@ The system has three layers:
 
 ### Core Language
 
-The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records, enumerated types, and set types; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Variant records, pointers, floating point (`real`), and dynamic allocation (`New`/`Dispose`) are planned for later phases. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
+The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records, enumerated types, and set types; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Variant records and pointers are implemented; floating point (`real`) and dynamic allocation (`New`/`Dispose`) are planned for later phases. Pointers reference storage that already exists, since there is no heap yet. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
 
 Source files are UTF-8. The compiler's lexer only acts on ASCII-range bytes (0x00–0x7F); bytes 0x80–0xFF pass through verbatim in string literals and comments. `char` is a byte, not a Unicode codepoint, and `length` returns the byte count — the same model as C and Go's `[]byte`. Legacy source files in CP437 (the code page used by DOS-era Pascal systems) or other encodings must be converted to UTF-8 before compilation using standard tools (`iconv`, `encoding_rs`, etc.).
 
@@ -243,7 +243,7 @@ Compiled programs use the industry-standard WASM memory layout, matching LLVM, R
 - **Nil guard (bytes 0-3):** Reserved, zeroed. Dereferencing `nil` (address 0) reads zeros rather than corrupting data.
 - **Data segment:** Global variables, string literals, and typed constants, laid out at compile time.
 - **Heap:** Grows upward from end of data (Phase 6; unused in Phase 1).
-- **Stack:** Grows downward from top of memory. The stack pointer is a mutable WASM global (`$sp`), initialized to the top of memory. Procedure entry subtracts the frame size; exit adds it back.
+- **Stack:** Grows downward from top of memory. The stack pointer is a mutable WASM global (`$sp`), initialized to the top of memory. Procedure entry subtracts the frame size and records the resulting frame base; exit restores the stack pointer from that base, so an unbalanced allocation inside the body is contained to the one call. Entry also compares against the end of the data segment and traps if the frame would cross it.
 
 In Phase 1 (no heap), the entire space between the data segment and memory top is available for the stack.
 
@@ -583,6 +583,7 @@ Factor           = INTEGER_LITERAL
                  | STRING_LITERAL
                  | 'nil'
                  | Designator
+                 | '@' Designator      (* address of an addressable designator *)
                  | '(' Expression ')'
                  | 'not' Factor
                  | SetConstructor .

@@ -549,6 +549,62 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Pointer types carry their target in the array element slots.** A `^T`
+descriptor is an ordinary `TTypeDesc` with `kind = tyPointer` and the target
+in `elemType`/`elemTypeIdx`/`elemSize`/`elemStrMax`, the same fields an array
+uses for its element type. No new table, and the dereference selector reads
+the target exactly the way array indexing reads the element type.
+
+Descriptors are interned: `FindOrAddPointerType` reuses an existing descriptor
+whose target matches. Without that, a program with many `^TNode` declarations
+would exhaust the 256-entry type table on pointers alone. Interning is safe
+because two pointer types with the same target are the same type.
+
+Compatibility compares *targets*, not descriptor indices, because a forward
+reference and a later direct reference to the same type produce two
+descriptors. `nil` is descriptor index -1 and is compatible with everything.
+
+**Forward pointer references are resolved at the end of the type block.** This
+was not in the phase scope and was added anyway: `PNode = ^TNode` before
+`TNode` is the one break from declare-before-use that Pascal allows, and it
+exists because a linked node type cannot be written without it. Deferring it
+would have meant retrofitting it during the heap phase, when there is more to
+go wrong.
+
+The mechanism is small because the grammar allows only a type *name* after
+`^`, never an anonymous record or array. An unresolved `^Name` parks a
+descriptor with `elemType = tyNone` and records the name and the line;
+`ResolvePendingPointers` fills the targets in when the `type` block ends, and
+errors with the original line number if the name never appeared. Interning
+skips unresolved descriptors, since their target is not yet known.
+
+The scope is the type block that opened the reference, matching standard
+Pascal. A forward reference that crosses into a later `type` block is an error,
+not a silent success.
+
+**Pointers compare with `=` and `<>` only.** Ordering is a compile error rather
+than an address comparison. Two pointers into different objects have no
+meaningful order, and the one case where an order would be defined, two
+pointers into the same array, reads better on the indices. This is stricter
+than Turbo Pascal, which permits the comparison and gives it address
+semantics.
+
+**`write(p)` is rejected.** Printing a raw address is nearly always a debugging
+accident, and the number is meaningless outside the run that produced it.
+
+**`(*$...*)` is not a directive.** The scanner routes only `{$` to the
+directive parser; `(*$R+*)` is an ordinary comment and is silently ignored.
+Found while writing `t108`, which needed to pin `{$S+}` for the checks-off run
+and quietly did nothing. This also means `t104`'s pin was never active: it
+passed the checks-off run because unbounded recursion exhausts the WASM call
+stack and traps anyway, not because the guard fired.
+
+The reference now states the brace form is the only directive form, and calls
+out that the Turbo Pascal spelling is accepted as a comment. Supporting the
+paren-star form would mean teaching `SkipBraceComment` a second terminator,
+which is more surgery than the parity is worth right now. Worth revisiting if
+porting real Turbo Pascal sources becomes a goal.
+
 **Stack overflow guard compares before subtracting.** The prologue checks `$sp < __stack_limit + frame_size` and traps, rather than subtracting first and checking `$sp < __stack_limit` afterwards. The second form looks simpler and is wrong: a frame large enough to carry `$sp` past zero wraps it to a large unsigned value, which compares as above the limit and sails through. Checking first also leaves `$sp` valid at the trap, so the backtrace is readable. The limit lives in an immutable WASM global (index 10, `__stack_limit`) initialized to the data end. Cost is five instructions per frame and 0.93% of compiler code size. On by default pre-1.0 under `{$S+}`; silent corruption costs more to debug than the instructions cost to run.
 
 The guard does not cover the 256-byte scratch allocations the body makes for string concatenation in const argument position. Those move `$sp` after the prologue check. Small enough not to matter at the depths the guard catches, and Phase H replaces the mechanism.
@@ -1356,7 +1412,7 @@ is contained to its function.
 **Why before pointers:** pointers add new corruption modes, and this phase is
 what makes them debuggable rather than mysterious.
 
-### Phase E: Pointer types — 2 weeks
+### Phase E: Pointer types — DONE, in one session rather than two weeks
 
 Scoped deliberately to what does *not* need frame allocation. Pointers that
 only reference existing storage (`@x`, `p^`, `nil` comparison, pointer
@@ -1365,13 +1421,25 @@ touching the frame convention, even though a pointer type with no heap behind
 it is not yet useful on its own. `New`/`Dispose` and the heap stay in a later
 phase.
 
-- [ ] `^T` type declarations, `p^` dereference, `@x` address-of.
-- [ ] `nil` literal, comparison, and the nil guard check under `{$S+}`.
-- [ ] Pointers as parameters, record fields, and array elements.
-- [ ] Negative tests: dereferencing nil traps under `{$S+}`, type mismatch
-      rejected.
+- [x] `^T` type declarations, `p^` dereference, `@x` address-of. Also forward
+      references (`PNode = ^TNode` before `TNode`), which were not in the
+      original scope but are the reason pointers exist in Pascal. See Findings.
+- [x] `nil` literal, comparison, and the nil check under `{$S+}`.
+- [x] Pointers as parameters, record fields, and array elements.
+- [x] Negative tests: dereferencing nil traps under `{$S+}`, type mismatch
+      rejected, ordering comparison rejected, unresolved forward reference
+      rejected, writing a pointer rejected.
 
 **Exit:** pointer tests pass in both check configurations; fixpoint holds.
+Both met: 131 tests in each configuration, snapshot self-hosts.
+
+**Left open deliberately.** Pointer assignment checks the type tag but not the
+target type, so `^integer := ^TRec` compiles. The expression parser reports its
+result type in a global but keeps the descriptor index in a local, so the
+target is not visible to the assignment paths. Closing this means threading the
+descriptor index out of `ParseExpression`, which is worth doing once rather
+than patching around. Recorded in the reference under Defined and Undefined
+Behavior so nobody mistakes it for a language rule.
 
 ### Phase F: Rust embedding to production grade — 3 weeks — **1.0 here**
 

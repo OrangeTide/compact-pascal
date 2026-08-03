@@ -72,7 +72,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - `array` — fixed-size arrays: `array[lo..hi] of T`.
 - `record` — composite types, including variant records with a `case` tag. See [Variant Records](#variant-records).
 - `set` — bit-set types: `set of T` where T is an ordinal type with up to 256 values. See [Set Types](#set-types).
-- Pointers — `^T` typed pointers.
+- Pointers — `^T` typed pointers, with `@x` for address-of, `p^` for dereference, and `nil`. No heap yet: a pointer must target storage that already exists. See [Pointers](#pointers).
 - Enumerated types — mapped to WASM `i32`. Values are assigned sequentially from 0.
 - Subranges — a restricted range of an ordinal type. The base type can be inferred from the constants (`1..12` is `integer`, `'A'..'Z'` is `char`, `Mon..Fri` is the enumerated type containing `Mon`) or specified explicitly using the GPC typed subrange syntax: `Day(Mon..Fri)`. Mapped to WASM `i32`. Range bounds are checked at assignment only when `{$R+}` is enabled.
 - Procedural types — `procedure (params)` and `function (params): T`.
@@ -86,7 +86,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - Short-circuit logical: `and then`, `or else` (as in ISO 10206).
 - Set operations: `+` (union), `*` (intersection), `-` (difference), `in` (membership).
 - String concatenation: `+`.
-- Pointer dereference: `p^`.
+- Pointer dereference: `p^`. Address-of: `@x`. Pointer comparison: `=`, `<>`.
 - Field access: `r.field`.
 - Array indexing: `a[i]`.
 
@@ -449,6 +449,64 @@ The tag field (`Kind`) is a normal field accessible at runtime. The tag field na
 
 Variant records map directly to WASM linear memory — the variants simply share the same byte offsets. No special WASM support is required.
 
+## Pointers
+
+A pointer type is written `^T`, where `T` is the name of a type. A pointer holds a byte address in linear memory and occupies four bytes, the same as an `integer`.
+
+```pascal
+type
+  PInt = ^integer;
+  TRec = record a, b: integer end;
+  PRec = ^TRec;
+var
+  i: integer;
+  r: TRec;
+  p: PInt;
+  q: PRec;
+begin
+  p := @i;          { address of a variable }
+  p^ := 7;          { assign through the pointer }
+  writeln(p^);
+  q := @r;
+  q^.b := 99;       { selectors chain after a dereference }
+end.
+```
+
+`@x` yields the address of `x`. The operand must be addressable: a variable, a field of an addressable record, an element of an addressable array, or a dereference. A scalar value parameter lives in a WASM local rather than in memory and has no address, so `@` on one is a compile error.
+
+`p^` dereferences. It may be followed by further selectors, so `q^.b`, `q^.items[3]`, and `p^^` all parse as expected, and a dereference may appear on the left of an assignment.
+
+`nil` is the pointer that points at nothing. It is address zero, which the [nil guard](#linear-memory-layout) reserves. `nil` is assignment-compatible with every pointer type.
+
+Pointers compare with `=` and `<>` only. Ordering operators are a compile error: two pointers into different objects have no meaningful order, and the case where an order would be defined, two pointers into the same array, is better written on the indices.
+
+### Forward References
+
+A pointer type may name a type that has not been declared yet, provided the name is declared later in the **same** type declaration block:
+
+```pascal
+type
+  PNode = ^TNode;       { TNode does not exist yet }
+  TNode = record
+    value: integer;
+    next: PNode;
+  end;
+```
+
+This is the language's only exception to declare-before-use, and it exists because without it a linked node type cannot be written at all: the record needs the pointer type and the pointer type needs the record. A name that never appears in the block is an error, reported at the end of the block with the line the reference was made on.
+
+### What Pointers Do Not Do Yet
+
+There is no heap. `New` and `Dispose` are not available, so every pointer must be aimed at storage that already exists: a variable, a field, or an array element. Pointer arithmetic does not exist and is not planned. See `ROADMAP.md` for the phase that adds allocation.
+
+The compiler checks that a pointer is not assigned to a non-pointer and that a non-pointer is not assigned to a pointer. It does not yet check that the *targets* agree, so assigning a `^integer` to a `^TRec` compiles. Treat that as a gap to be closed, not as permission.
+
+### Lifetime
+
+A pointer does not keep its target alive. Taking the address of a local variable and using it after that variable's procedure has returned reads whatever the stack holds now. The language does not detect this. It is the same rule that already applies to `var` parameters and to interface values: the programmer owns the lifetime.
+
+Under `{$S+}` a dereference of `nil` traps at the point of the dereference. A dereference of a stale-but-nonzero pointer does not, because nothing distinguishes it from a live one.
+
 ## With Statement
 
 The `with` statement opens a record variable's fields for unqualified access:
@@ -764,6 +822,20 @@ Range checking is off by default and enabled with `{$R+}`.
   silently to the statement after `end`. This is Turbo Pascal behavior and is
   intentional; ISO 7185 makes it an error.
 
+### Pointers
+
+- **Dereferencing `nil` traps** under `{$S+}`, which is the default. Under
+  `{$S-}` it reads or writes the four-byte nil guard at address 0. A read
+  returns zeros, so the program continues on a value it never stored, which is
+  the failure the check exists to replace.
+- **Dereferencing a pointer to storage that no longer exists is undefined
+  behavior** at any directive setting. A pointer to a local outlives that
+  local's frame, and nothing distinguishes a stale address from a live one.
+- **Assigning between pointer types with different targets is not yet
+  rejected.** The compiler checks pointer against non-pointer but does not
+  compare the targets. This is an implementation gap, not a language rule; do
+  not write code that relies on it.
+
 ## Conformance
 
 This section states what an implementation must do to call itself Compact Pascal. It exists so that a second implementation is possible, and so that a program can say what it relies on.
@@ -856,7 +928,7 @@ Local directives may appear anywhere in the source. They take effect from the po
 |---|---|---|---|
 | `{$RANGECHECKS ON/OFF}` | `{$R+/-}` | OFF | Emit runtime range checks for array indexing and subrange assignments. |
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
-| `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue, and a frame balance check in every epilogue. |
+| `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue, a frame balance check in every epilogue, and a nil check on every pointer dereference. |
 | `{$ALIGN n}` | — | 4 | Record field alignment in bytes (1, 2, 4, or 8). Each field within a record is placed at the next multiple of `n`; the total record size is padded to a multiple of `n`. |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |
@@ -1521,6 +1593,7 @@ Factor           = INTEGER_LITERAL
                  | STRING_LITERAL
                  | 'nil'
                  | Designator          (* includes true, false as built-in identifiers *)
+                 | '@' Designator      (* address of an addressable designator *)
                  | '(' Expression ')'
                  | 'not' Factor
                  | SetConstructor .
@@ -1629,7 +1702,7 @@ DirectiveValue   = SwitchValue | Identifier | INTEGER_LITERAL | STRING_LITERAL .
 SwitchValue      = '+' | '-' .
 ```
 
-A comment begins with `{` or `(*` and ends at the first matching `}` or `*)`. The commentary within a brace or parenthesis-star comment must not contain the closing delimiter. Whether comments nest is undefined — an implementation may support nesting or may not. Programs that depend on nested comments are not portable. Comments may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line. A `$` immediately after the opening delimiter marks a compiler directive. Switch directives use `+`/`-` (e.g., `{$R+}`). See [Compiler Directives](#compiler-directives) for the full directive list.
+A comment begins with `{` or `(*` and ends at the first matching `}` or `*)`. The commentary within a brace or parenthesis-star comment must not contain the closing delimiter. Whether comments nest is undefined — an implementation may support nesting or may not. Programs that depend on nested comments are not portable. Comments may appear anywhere whitespace is permitted. Line comments (`//`) extend to the end of the line. A `$` immediately after `{` marks a compiler directive. Switch directives use `+`/`-` (e.g., `{$R+}`). The brace form is the only directive form: `(*$R+*)` is a comment and has no effect, unlike in Turbo Pascal. A directive written that way is silently ignored, which is worth knowing when porting. See [Compiler Directives](#compiler-directives) for the full directive list.
 
 If the first byte of the source is `#`, the remainder of the first line is ignored. This permits Unix-style interpreter directives (e.g., `#!/usr/bin/env cpas`).
 
