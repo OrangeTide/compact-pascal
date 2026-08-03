@@ -272,7 +272,7 @@
 
   Because the annotation table is in shared linear memory with an exported address, both sides can use it:
 
-  - **Host-side:** The host (Rust, Zig, C) reads the exported `__annotation_table` address, walks the entries, and marshals record data to/from JSON, protobuf, database rows, etc. The host has full knowledge of field names, types, offsets, and sizes. No FFI calls needed — just memory reads.
+  - **Host-side:** The host (Rust, C) reads the exported `__annotation_table` address, walks the entries, and marshals record data to/from JSON, protobuf, database rows, etc. The host has full knowledge of field names, types, offsets, and sizes. No FFI calls needed — just memory reads.
   - **Guest-side:** Pascal code iterates the same table using the `AnnotationTable` global and `typeof` case dispatch. A Pascal unit could implement its own JSON writer, binary serializer, or debug printer using only the annotation table and standard I/O.
   - **Both at once:** The host provides JSON parsing via imports (fast, native), the guest provides the field-walking logic via the annotation table (type-aware, application-specific). Each side does what it is good at.
 

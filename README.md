@@ -71,7 +71,7 @@ wasmtime run hello.wasm
 | 1 | Compiler (Pascal, bootstrapped with fpc) | Done |
 | 1b | Peephole optimization (optional) | In progress |
 | 1c | Language completeness polish | In progress |
-| 2 | Embedding libraries (Rust, then C) | Rust working; C partial; Zig not planned |
+| 2 | Embedding libraries (Rust, then C) | Rust working; C partial |
 | 3 | Self-hosting | Done (fixpoint validated) |
 | 4 | Browser playground | Done |
 | 5 | Playground file I/O | Not started |

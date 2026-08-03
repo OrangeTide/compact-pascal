@@ -48,7 +48,7 @@ A leading UTF-8 byte order mark (`EF BB BF`) is accepted and skipped. Many Windo
 
 Line endings may be LF, CRLF, or CR. All three are accepted, so a file edited on Windows compiles unchanged.
 
-Legacy Turbo Pascal source files encoded in CP437 or other 8-bit code pages must be converted to UTF-8 before compilation. This is a one-time conversion performed by standard tools or libraries (e.g., `iconv`, Rust's `encoding_rs` crate, or a simple 128-entry lookup table in Zig).
+Legacy Turbo Pascal source files encoded in CP437 or other 8-bit code pages must be converted to UTF-8 before compilation. This is a one-time conversion performed by standard tools or libraries (e.g., `iconv`, Rust's `encoding_rs` crate, or a simple 128-entry lookup table).
 
 ## Core Language
 
@@ -259,7 +259,7 @@ Memory layout:  [len: byte] [char1] [char2] ... [charN] [padding to maxlen]
 
 Short strings live on the stack or in records — no heap allocation is required. This representation is identical to Free Pascal in `-Mtp` mode.
 
-The embedding libraries provide helper functions to copy between host strings (Rust `&str`/`String`, Zig `[]const u8`, C `const char *`) and the Pascal string representation in the WASM memory space.
+The embedding libraries provide helper functions to copy between host strings (Rust `&str`/`String`, C `const char *`) and the Pascal string representation in the WASM memory space.
 
 A richer dynamically-allocated string type (pointer + length, no 255-character limit) is planned for Phase 6b when `New`/`Dispose` and heap allocation become available.
 
@@ -1018,7 +1018,7 @@ end.
 
 The `{$INCLUDE}` directive is resolved by the **host application**, not by the compiler. Before invoking the compiler, the embedding library (or fpc during bootstrap) scans the source for `{$I}` / `{$INCLUDE}` directives and replaces them with the contents of the referenced files. The compiler receives a single, fully-expanded source stream on stdin.
 
-This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust, Zig, and C embedding libraries each provide a utility function to perform include expansion. If the host cannot locate an included file, the embedding library reports an error before compilation begins.
+This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust and C embedding libraries each provide a utility function to perform include expansion. If the host cannot locate an included file, the embedding library reports an error before compilation begins.
 
 During fpc bootstrap, the compiler runs as a native executable and fpc handles `{$I}` natively.
 

@@ -20,7 +20,7 @@ Both projects sit in a surprisingly similar niche despite targeting opposite end
 
 - **Nested subroutines with lexical scoping.** Both support nested procedures that access enclosing scope variables. Cowgol uses static variable placement to make this cheap. Compact Pascal uses a Dijkstra display — 8 WASM globals where `display[N]` holds the frame pointer for nesting level N.
 
-- **Tiny compilers.** Cowgol's 80386 binary is 70 KB. Compact Pascal's goal is a WASM blob small enough to embed in a Rust, Zig, or C library. Both treat compiler size as a first-class design constraint.
+- **Tiny compilers.** Cowgol's 80386 binary is 70 KB. Compact Pascal's goal is a WASM blob small enough to embed in a Rust or C library. Both treat compiler size as a first-class design constraint.
 
 - **No standard library.** Cowgol's system calls are platform-specific thin wrappers. Compact Pascal's I/O intrinsics lower directly to WASI `fd_write`/`fd_read`. Neither ships a runtime library.
 
@@ -30,7 +30,7 @@ Both projects sit in a surprisingly similar niche despite targeting opposite end
 |---|---|---|
 | Language family | Ada-inspired, custom syntax | Pascal-family (TP dialect) |
 | Target architectures | 6502, Z80, 8080, 80386, ARM, PowerPC, 68000, PDP-11, 8086 | WASM 1.0 only |
-| Primary audience | Retro computing, 8-bit micros | Embedding in modern apps (Rust, Zig, browser) |
+| Primary audience | Retro computing, 8-bit micros | Embedding in modern apps (Rust, C, browser) |
 | Recursion | Forbidden — enables static variable overlap analysis | Supported — WASM provides a proper call stack with frames |
 | Type system | Very strong, no implicit casts even between integer widths | TP-style ordinals, implicit widening, all stored as i32 |
 | Multiple return values | Yes: `sub swap(a, b): (o1, o2)` | No — single return value (Pascal convention) |
@@ -54,7 +54,7 @@ Compact Pascal faces no such pressure. WASM provides a proper call stack with fr
 
 ### Who runs the compiler
 
-Cowgol's aspiration is running the compiler *on* the target machine — compiling on a BBC Micro. Compact Pascal's aspiration is running the compiler *inside* your application — the WASM snapshot embedded in a Rust, Zig, or C library. Both are forms of "the compiler goes where you are," but pointing in opposite directions: backward to tiny vintage hardware, forward to sandboxed modern runtimes.
+Cowgol's aspiration is running the compiler *on* the target machine — compiling on a BBC Micro. Compact Pascal's aspiration is running the compiler *inside* your application — the WASM snapshot embedded in a Rust or C library. Both are forms of "the compiler goes where you are," but pointing in opposite directions: backward to tiny vintage hardware, forward to sandboxed modern runtimes.
 
 ### Code generation philosophy
 
@@ -70,7 +70,7 @@ Compact Pascal uses conventional stack frames in WASM linear memory. Memory usag
 
 ### One target vs. many
 
-Cowgol's `newgen` system is designed to add backends cheaply — the 80386 backend is 1.2 KLOC. Its value proposition is one language across every retro platform. Compact Pascal inverts this: one target (WASM), every modern platform. The embedding libraries (Rust crate, Zig module, C library) provide portability through WASM runtimes rather than through multiple native backends.
+Cowgol's `newgen` system is designed to add backends cheaply — the 80386 backend is 1.2 KLOC. Its value proposition is one language across every retro platform. Compact Pascal inverts this: one target (WASM), every modern platform. The embedding libraries (Rust crate, C library) provide portability through WASM runtimes rather than through multiple native backends.
 
 ## Potential Improvements Suggested by the Comparison
 
