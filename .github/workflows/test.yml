@@ -133,9 +133,20 @@ jobs:
       - name: Verify the win64 cross target is usable
         # Separated from the build so a missing target reads as a CI setup
         # problem rather than as a compiler defect.
+        #
+        # This compiles a trivial program rather than asking `fpc -Twin64 -iV`.
+        # The version query answers from the host compiler and succeeds even
+        # with no win64 RTL units installed, so it would wave through exactly
+        # the setup failure it exists to catch: the build step would then fail
+        # with "Can't find unit system", which reads like a compiler defect.
+        # The i386 form of this check happened to work, because a missing
+        # cross-compiler binary makes even -iV fail; win64 uses the same
+        # ppcx64 binary, so only a real compile proves the units are there.
         run: |
-          if ! fpc -Twin64 -iV >/dev/null 2>&1; then
-            echo "::error::fpc cannot target win64 on this runner. Fix the install step rather than assuming the compiler is at fault." >&2
+          printf 'begin end.\n' > /tmp/cross-probe.pas
+          if ! fpc -Twin64 -FE/tmp -o/tmp/cross-probe.exe /tmp/cross-probe.pas >/tmp/cross-probe.log 2>&1; then
+            echo "::error::fpc cannot target win64 on this runner. Fix the install step (fp-units-win-rtl provides the x86_64-win64 units) rather than assuming the compiler is at fault." >&2
+            cat /tmp/cross-probe.log >&2
             exit 1
           fi
           echo "win64 cross target available"
