@@ -685,7 +685,9 @@ When a program uses `write`/`writeln`, `read`/`readln`, or `halt`, the compiler 
 
 Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The generated code always passes a single iovec (`iovs_len = 1`).
 
-Programs that do not use any I/O or `halt` have **no implicit WASI imports** — the compiled WASM module is fully self-contained.
+Every compiled module declares the five core WASI imports whether or not it uses them: they are registered before parsing so that helper function indices are stable in a single pass, and an import list is positional, so an unused entry cannot simply be dropped. A program that does no I/O still imports `fd_write`, `fd_read`, `proc_exit`, `args_sizes_get`, and `args_get`, and never calls them. Earlier versions of this document claimed such a program had no imports; that was never true.
+
+Filesystem access is the exception, because it is opt-in: `path_open` and `fd_close` appear only when a program asks for them with `{$FILES ON}`. A host can therefore tell from the import list alone whether a module wants to touch files.
 
 Any WASI-compatible runtime (wasmtime, wasmer, wasm3, browser polyfill) provides these imports automatically.
 
@@ -879,7 +881,7 @@ A conforming implementation:
 
 - **Accepts every program this document defines** and rejects every program this document says is an error. Where the document says an error is reported at a particular point, such as a `forward` header mismatch at the definition, it is reported there.
 - **Emits WASM 1.0 (MVP)** with no post-MVP proposals. A module it produces runs on any compliant WASM 1.0 runtime.
-- **Uses WASI preview 1** for I/O and termination, emitting only the imports listed under [Implicit WASI Imports](#implicit-wasi-imports), and only when the program uses the corresponding feature. A program using no I/O and no `halt` must produce a module with no imports.
+- **Uses WASI preview 1** for I/O and termination, emitting only the imports listed under [Implicit WASI Imports](#implicit-wasi-imports). An implementation may declare an import it does not call, as the reference compiler does for the five core ones, but it may not declare `path_open` or `fd_close` unless the program asked for filesystem access. What a module *calls* must follow from what the program does; what it *declares* need not.
 - **Writes the compiled module to standard output and every diagnostic to standard error**, in the formats given under [Compiler Diagnostics](#compiler-diagnostics). Nothing else may reach standard output.
 - **Halts on the first error** with a nonzero exit status. Error recovery and multi-error reporting are not permitted, because a program's meaning after the first error is not defined.
 - **Is deterministic.** The same source, the same flags, and the same implementation version produce byte-identical output. Nothing may depend on the time, the filesystem, the environment, or address-space layout.
@@ -955,6 +957,11 @@ Global directives must appear before any declarations or statements. They affect
 | `{$MAXMEMORY n}` | 256 | Maximum WASM linear memory size in 64 KB pages (0 = no limit). |
 | `{$STACKSIZE n}` | 65536 | Stack size in bytes, allocated from linear memory. |
 | `{$DESCRIPTION 'text'}` | — | Embedded description string in the WASM custom section. |
+| `{$FILES ON}` | OFF | Request filesystem access. Adds `path_open` and `fd_close` to the module's imports. Must appear before the `program` header; cannot be switched off again. |
+
+`{$FILES ON}` is a capability request, not a convenience. Turning it on is visible in the compiled module's import list, so a host can refuse to instantiate a program that wants files without having to read its source. A host grants the actual access by preopening a directory; see [The Heap](#the-heap) for the memory side of the same idea, where the limit is likewise enforced by the host rather than by the language.
+
+The restriction to before the header is not arbitrary. Helper function indices are numbered from the import count, and those numbers become immediate operands in call instructions, so the count must be settled before any code is emitted. A single-pass compiler cannot revise it afterwards.
 
 ### Local Directives
 

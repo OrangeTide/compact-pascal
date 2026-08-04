@@ -15,7 +15,7 @@ An embeddable Pascal-to-WebAssembly compiler. The compiler is written in Pascal,
 
 Compact Pascal is a new language in the Pascal family. It inherits Pascal's syntax and strong typing while making deliberate departures for embeddability:
 
-- **No I/O runtime library** — `write`/`writeln`/`read`/`readln` are compiler intrinsics that lower to WASI host imports. No file types. Programs without I/O have zero implicit imports.
+- **No I/O runtime library** — `write`/`writeln`/`read`/`readln` are compiler intrinsics that lower to WASI host imports. No file types. Every module declares the five core WASI imports; filesystem access is opt-in and visible in the import list.
 - **Minimal runtime** — the compiled WASM output has no standard library overhead. Host applications provide exactly the functionality they want.
 - **Single-pass compiler** — fast compilation, especially important when the compiler itself runs inside a WASM interpreter.
 - **WASM 1.0 MVP only** — no WASM extensions, maximum portability across runtimes.

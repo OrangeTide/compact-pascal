@@ -95,6 +95,7 @@ const
   OpI32Store    = $36;
   OpI32Store8   = $3A;
   OpI32Store16  = $3B;
+  OpI64Const    = $42;
   OpI32Const    = $41;
   OpI32Eqz      = $45;
   OpI32Eq       = $46;
@@ -454,6 +455,10 @@ var
   idxFdRead: longint;      { fd_read import index, -1 if not imported }
   idxArgsSizesGet: longint; { args_sizes_get import index }
   idxArgsGet: longint;     { args_get import index }
+  idxPathOpen: longint;    { path_open import index, -1 until FILES is on }
+  optFileIO: boolean;      { whether filesystem access was requested }
+  emittedAnyCode: boolean; { true once any function body has been emitted }
+  idxFdClose: longint;     { fd_close import index }
   idxIntToStr: longint;    { int-to-string helper, -1 if not emitted }
 
   { Data segment addresses for I/O scratch areas }
@@ -1174,6 +1179,21 @@ begin
       optRangeChecks := ParseDirectiveSwitch;
     end else if (directive = 'Q') or (directive = 'OVERFLOWCHECKS') then begin
       optOverflowChecks := ParseDirectiveSwitch;
+    end else if directive = 'FILES' then begin
+      { Filesystem access is opt-in, and the opt-in is visible in the module:
+        asking for it adds path_open and fd_close to the import list, so a
+        host can see from the imports alone whether a program wants files.
+
+        It must be decided before any code is emitted, because helper
+        function slots are numbered from the import count and those numbers
+        are baked into call instructions as immediates. Requiring it before
+        the program header makes that checkable rather than hoped for. }
+      if ParseDirectiveSwitch then begin
+        if emittedAnyCode then
+          Error('FILES must be switched on before the program header');
+        optFileIO := true;
+      end else if optFileIO then
+        Error('FILES cannot be switched off once on');
     end else if directive = 'MEMORY' then begin
       intVal := ParseDirectiveInt;
       if (intVal < 1) or (intVal > 65536) then
@@ -2213,6 +2233,24 @@ begin
   p[0] := WasmI32; p[1] := WasmI32; p[2] := WasmI32; p[3] := WasmI32;
   r[0] := WasmI32;
   TypeI32x4I32 := AddWasmType(4, p, 1, r);
+end;
+
+{** Return the index of WASI path_open's signature:
+  (fd, dirflags, path, path_len, oflags, rights: i64, inheriting: i64,
+   fdflags, opened_fd_ptr) -> errno.
+
+  The two i64 parameters are the only place the compiler emits a 64-bit
+  value. It emits -1 for both, meaning "every right", and lets the host
+  narrow that to what the preopened directory actually allows. That keeps
+  64-bit support down to a single one-byte constant: SLEB128 of -1 is 0x7F. }
+function TypePathOpen: longint;
+var p: TWasmParamArr; r: TWasmResultArr;
+begin
+  p[0] := WasmI32; p[1] := WasmI32; p[2] := WasmI32; p[3] := WasmI32;
+  p[4] := WasmI32; p[5] := WasmI64; p[6] := WasmI64; p[7] := WasmI32;
+  p[8] := WasmI32;
+  r[0] := WasmI32;
+  TypePathOpen := AddWasmType(9, p, 1, r);
 end;
 
 { ---- Import management ---- }
@@ -6126,6 +6164,10 @@ begin
       types[pendingPtrType[i]].elemSize := 4;
   end;
   numPendingPtr := 0;
+  optFileIO := false;
+  emittedAnyCode := false;
+  idxPathOpen := -1;
+  idxFdClose := -1;
   stmtUsedResultBuf := false;
   stmtArenaBytes := 0;
 end;
@@ -12077,6 +12119,10 @@ begin
   numWasmTypes := 0;
   numTypes := 0;
   numPendingPtr := 0;
+  optFileIO := false;
+  emittedAnyCode := false;
+  idxPathOpen := -1;
+  idxFdClose := -1;
   stmtUsedResultBuf := false;
   stmtArenaBytes := 0;
   numFields := 0;
@@ -12253,6 +12299,8 @@ begin
   idxArgsSizesGet := AddImport('wasi_snapshot_preview1', 'args_sizes_get', TypeI32x2I32);
   idxArgsGet := AddImport('wasi_snapshot_preview1', 'args_get', TypeI32x2I32);
 
+
+
   InitSymTable;
   AddBuiltins;
 end;
@@ -12294,6 +12342,19 @@ begin
   NextToken;
 
   { Parse: program Ident ; Block . }
+  { Register the filesystem imports before the header is consumed, which is
+    after every global directive has been seen and before any code is
+    emitted. Helper slots are numbered from the import count and those
+    numbers become immediates in call instructions, so the count has to be
+    settled here or not at all. }
+  if optFileIO then begin
+    idxPathOpen := AddImport('wasi_snapshot_preview1', 'path_open',
+                             TypePathOpen);
+    idxFdClose := AddImport('wasi_snapshot_preview1', 'fd_close',
+                            TypeI32I32);
+  end;
+  emittedAnyCode := true;
+
   Expect(tkProgram);
   if tokKind <> tkIdent then
     Expected('program name');

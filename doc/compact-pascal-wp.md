@@ -202,7 +202,7 @@ wasmer run compiler.wasm < hello.pas > hello.wasm
 wasmer run hello.wasm
 ```
 
-Programs compiled by the compiler that use `write`/`writeln`/`read`/`readln` also emit WASI `fd_write`/`fd_read` calls, making them WASI-compatible out of the box. Programs that do not use I/O have no implicit WASI imports.
+Programs compiled by the compiler that use `write`/`writeln`/`read`/`readln` also emit WASI `fd_write`/`fd_read` calls, making them WASI-compatible out of the box. Every module declares the core WASI imports whether or not it calls them, because import indices are positional and are fixed before parsing begins. Filesystem access is opt-in and adds two more, so a host can see from the imports whether a module wants files.
 
 ### WASM Target
 
