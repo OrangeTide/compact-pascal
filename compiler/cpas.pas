@@ -30,8 +30,8 @@ const
   MaxScopes  = 32;
   MaxFuncs   = 256;   { max user-defined functions }
   { WASM global indices: 0 = $sp, 1..8 = display[0..7], 9 = __version,
-    10 = __stack_limit. }
-  GlobalStackLimit = 10;
+    10 = __heap_end. }
+  GlobalHeapEnd = 10;
 
   MaxIfdefDepth = 8;  { max nested IFDEF levels }
   MaxDefines    = 32; (* max conditional symbols: predefined + DEFINE + -d *)
@@ -511,6 +511,8 @@ var
   needsIntToStr: boolean;        { __int_to_str helper needed }
   needsWriteChar: boolean;       { __write_char helper needed }
   needsNilCheck: boolean;        { __nil_check helper needed }
+  needsHeap: boolean;            { __heap_alloc / __heap_free helpers needed }
+  addrHeapFree: longint;         { data word holding the free list head }
   addrSetTemp: longint;          { 32-byte temp for large set arithmetic results }
   needsSetTemp: boolean;         { whether set temp was allocated }
   addrSetTemp2: longint;         { second 32-byte temp for compound set expressions }
@@ -3431,6 +3433,20 @@ begin
   EmitI32Load(2, 0);
 end;
 
+procedure EmitPointerVarAddr(sym: longint);
+{** Push the address of a pointer variable, so a caller can load or store the
+  pointer itself rather than what it points at. Used by new and dispose,
+  which both write back to the variable. }
+begin
+  if syms[sym].isVarParam then
+    EmitVarParamPtr(sym)
+  else begin
+    EmitFramePtr(syms[sym].level);
+    EmitI32Const(syms[sym].offset);
+    EmitOp(OpI32Add);
+  end;
+end;
+
 { ---- Write/Writeln code generation ---- }
 
 procedure EmitWriteStringFd(fd, addr, len: longint);
@@ -3932,6 +3948,30 @@ begin
   EnsureWriteChar := numImports + 22; { slot 22 = __write_char }
 end;
 
+function EnsureHeapAlloc: longint;
+{** Ensure the heap helpers are registered and the free-list head exists.
+  __heap_alloc(size) -> addr is at slot 24. }
+begin
+  if not needsHeap then begin
+    needsHeap := true;
+    addrHeapFree := AllocDataAligned(4, 4);
+    DataBufEmit(secData, 0);
+    DataBufEmit(secData, 0);
+    DataBufEmit(secData, 0);
+    DataBufEmit(secData, 0);
+  end;
+  EnsureHeapAlloc := numImports + 24;
+end;
+
+function EnsureHeapFree: longint;
+{** __heap_free(addr) is at slot 25. Registers the free-list head too, since
+  a program can in principle dispose of something it never allocated and the
+  helper still needs somewhere to put it. }
+begin
+  EnsureHeapAlloc;
+  EnsureHeapFree := numImports + 25;
+end;
+
 function EnsureNilCheck: longint;
 {** Ensure the __nil_check helper is registered.
   __nil_check(addr) -> addr is at slot 23. Traps if addr is zero. }
@@ -4026,6 +4066,9 @@ var
   exprTypeIdx: longint;
   exprStrMax: longint;
   savedConcatPieces, savedConcatBase: longint;
+  heapIsNew: boolean;
+  heapTargetSize: longint;
+  argTyp, argTypeIdx: longint;
   pieceSaveBytes: longint;
   retMark, saveMark: longint;
   fldIdx: longint;
@@ -4746,24 +4789,64 @@ begin
                     EmitOp(OpI32Add);
                   end;
                   NextToken;
-                  { Handle postfix [index] for array element var params }
-                  while tokKind = tkLBrack do begin
-                    if syms[argSym].typ <> tyArray then
-                      Error('array type expected before ''[''');
-                    NextToken;
-                    ParseExpression(PrecNone);
-                    if types[syms[argSym].typeIdx].arrLo <> 0 then begin
-                      EmitI32Const(types[syms[argSym].typeIdx].arrLo);
-                      EmitOp(OpI32Sub);
+                  { Postfix selectors on a var argument. Only [index] was
+                    handled, which was enough while a designator could not
+                    reach through a pointer. `Insert(t^.left, v)` is the
+                    ordinary way to write a tree, so ^ and .field are handled
+                    too. Only the address is computed here; the argument is a
+                    reference, so no load follows. }
+                  argTyp := syms[argSym].typ;
+                  argTypeIdx := syms[argSym].typeIdx;
+                  while (tokKind = tkLBrack) or (tokKind = tkDot)
+                        or (tokKind = tkCaret) do begin
+                    if tokKind = tkCaret then begin
+                      if argTyp <> tyPointer then
+                        Error('pointer type expected before ''^''');
+                      if argTypeIdx < 0 then
+                        Error('cannot dereference nil');
+                      EmitI32Load(2, 0);
+                      EmitNilCheck;
+                      argTyp := types[argTypeIdx].elemType;
+                      argTypeIdx := types[argTypeIdx].elemTypeIdx;
+                      NextToken;
+                    end
+                    else if tokKind = tkDot then begin
+                      if argTyp <> tyRecord then
+                        Error('record type expected before ''.''');
+                      NextToken;
+                      if tokKind <> tkIdent then
+                        Expected('field name');
+                      fldIdx := LookupField(argTypeIdx, tokStr);
+                      if fldIdx < 0 then
+                        Error('unknown field: ' + tokStr);
+                      if fields[fldIdx].offset <> 0 then begin
+                        EmitI32Const(fields[fldIdx].offset);
+                        EmitOp(OpI32Add);
+                      end;
+                      argTyp := fields[fldIdx].typ;
+                      argTypeIdx := fields[fldIdx].typeIdx;
+                      NextToken;
+                    end
+                    else begin
+                      if argTyp <> tyArray then
+                        Error('array type expected before ''[''');
+                      NextToken;
+                      ParseExpression(PrecNone);
+                      if types[argTypeIdx].arrLo <> 0 then begin
+                        EmitI32Const(types[argTypeIdx].arrLo);
+                        EmitOp(OpI32Sub);
+                      end;
+                      if types[argTypeIdx].elemSize <> 1 then begin
+                        EmitI32Const(types[argTypeIdx].elemSize);
+                        EmitOp(OpI32Mul);
+                      end;
+                      EmitOp(OpI32Add);
+                      argTyp := types[argTypeIdx].elemType;
+                      argTypeIdx := types[argTypeIdx].elemTypeIdx;
+                      Expect(tkRBrack);
                     end;
-                    if types[syms[argSym].typeIdx].elemSize <> 1 then begin
-                      EmitI32Const(types[syms[argSym].typeIdx].elemSize);
-                      EmitOp(OpI32Mul);
-                    end;
-                    EmitOp(OpI32Add);
-                    argSym := -1; { no longer tracking original sym }
-                    Expect(tkRBrack);
                   end;
+                  argSym := -1; { no longer tracking the original symbol }
                 end;
               end else begin
                 ParseExpression(PrecNone);
@@ -6164,6 +6247,9 @@ var
   fi: longint;
   savedUsedResultBuf: boolean;
   savedConcatPieces, savedConcatBase: longint;
+  heapIsNew: boolean;
+  heapTargetSize: longint;
+  argTyp, argTypeIdx: longint;
 begin
   concatSPAllocs := 0;
   { A structured function result is a buffer taken from the stack, and it has
@@ -6199,7 +6285,59 @@ begin
     tkIdent: begin
       name := tokStr;
       { Built-in procedures handled before symbol lookup }
-      if name = 'DELETE' then begin
+      if (name = 'NEW') or (name = 'DISPOSE') then begin
+        { new(p) / dispose(p) — p is a pointer variable, and the size comes
+          from the pointer's target type rather than from an argument, so a
+          caller cannot get it wrong. }
+        heapIsNew := (name = 'NEW');
+        NextToken;
+        Expect(tkLParen);
+        if tokKind <> tkIdent then
+          Error('new/dispose requires a pointer variable');
+        sym := LookupSym(tokStr);
+        if sym < 0 then
+          Error('undeclared identifier: ' + tokStr);
+        if syms[sym].kind <> skVar then
+          Error('new/dispose requires a pointer variable');
+        if syms[sym].typ <> tyPointer then
+          Error('new/dispose requires a pointer variable');
+        if syms[sym].typeIdx < 0 then
+          Error('cannot allocate through an untyped pointer');
+        if syms[sym].isConstParam then
+          Error('cannot assign to const parameter ''' + tokStr + '''');
+        heapTargetSize := types[syms[sym].typeIdx].elemSize;
+        if heapTargetSize <= 0 then
+          Error('pointer target type has no size');
+        NextToken;
+        Expect(tkRParen);
+
+        if syms[sym].offset < 0 then
+          Error('cannot pass a value parameter to new/dispose');
+
+        if heapIsNew then begin
+          EmitPointerVarAddr(sym);
+          EmitI32Const(heapTargetSize);
+          EmitCall(EnsureHeapAlloc);
+          EmitI32Store(2, 0);
+        end else begin
+          { Free the block, then clear the pointer. Clearing is not standard
+            Pascal, which leaves the pointer dangling, but it turns a use
+            after dispose into a nil trap under stack checks instead of a
+            read of memory that now belongs to something else.
+
+            The address is computed twice rather than duplicated: WASM 1.0
+            has no dup, and spending a local here would collide with the
+            string and case temps. }
+          EmitPointerVarAddr(sym);
+          EmitI32Load(2, 0);
+          EmitNilCheck;
+          EmitCall(EnsureHeapFree);
+          EmitPointerVarAddr(sym);
+          EmitI32Const(0);
+          EmitI32Store(2, 0);
+        end;
+      end
+      else if name = 'DELETE' then begin
         { delete(var s, index, count) }
         NextToken;
         Expect(tkLParen);
@@ -6855,25 +6993,65 @@ begin
                   EmitI32Const(syms[argSym].offset);
                   EmitOp(OpI32Add);
                 end;
-                NextToken;
-                { Handle postfix [index] for array element var params }
-                while tokKind = tkLBrack do begin
-                  if syms[argSym].typ <> tyArray then
-                    Error('array type expected before ''[''');
                   NextToken;
-                  ParseExpression(PrecNone);
-                  if types[syms[argSym].typeIdx].arrLo <> 0 then begin
-                    EmitI32Const(types[syms[argSym].typeIdx].arrLo);
-                    EmitOp(OpI32Sub);
+                  { Postfix selectors on a var argument. Only [index] was
+                    handled, which was enough while a designator could not
+                    reach through a pointer. `Insert(t^.left, v)` is the
+                    ordinary way to write a tree, so ^ and .field are handled
+                    too. Only the address is computed here; the argument is a
+                    reference, so no load follows. }
+                  argTyp := syms[argSym].typ;
+                  argTypeIdx := syms[argSym].typeIdx;
+                  while (tokKind = tkLBrack) or (tokKind = tkDot)
+                        or (tokKind = tkCaret) do begin
+                    if tokKind = tkCaret then begin
+                      if argTyp <> tyPointer then
+                        Error('pointer type expected before ''^''');
+                      if argTypeIdx < 0 then
+                        Error('cannot dereference nil');
+                      EmitI32Load(2, 0);
+                      EmitNilCheck;
+                      argTyp := types[argTypeIdx].elemType;
+                      argTypeIdx := types[argTypeIdx].elemTypeIdx;
+                      NextToken;
+                    end
+                    else if tokKind = tkDot then begin
+                      if argTyp <> tyRecord then
+                        Error('record type expected before ''.''');
+                      NextToken;
+                      if tokKind <> tkIdent then
+                        Expected('field name');
+                      fldIdx := LookupField(argTypeIdx, tokStr);
+                      if fldIdx < 0 then
+                        Error('unknown field: ' + tokStr);
+                      if fields[fldIdx].offset <> 0 then begin
+                        EmitI32Const(fields[fldIdx].offset);
+                        EmitOp(OpI32Add);
+                      end;
+                      argTyp := fields[fldIdx].typ;
+                      argTypeIdx := fields[fldIdx].typeIdx;
+                      NextToken;
+                    end
+                    else begin
+                      if argTyp <> tyArray then
+                        Error('array type expected before ''[''');
+                      NextToken;
+                      ParseExpression(PrecNone);
+                      if types[argTypeIdx].arrLo <> 0 then begin
+                        EmitI32Const(types[argTypeIdx].arrLo);
+                        EmitOp(OpI32Sub);
+                      end;
+                      if types[argTypeIdx].elemSize <> 1 then begin
+                        EmitI32Const(types[argTypeIdx].elemSize);
+                        EmitOp(OpI32Mul);
+                      end;
+                      EmitOp(OpI32Add);
+                      argTyp := types[argTypeIdx].elemType;
+                      argTypeIdx := types[argTypeIdx].elemTypeIdx;
+                      Expect(tkRBrack);
+                    end;
                   end;
-                  if types[syms[argSym].typeIdx].elemSize <> 1 then begin
-                    EmitI32Const(types[syms[argSym].typeIdx].elemSize);
-                    EmitOp(OpI32Mul);
-                  end;
-                  EmitOp(OpI32Add);
-                  argSym := -1;
-                  Expect(tkRBrack);
-                end;
+                  argSym := -1; { no longer tracking the original symbol }
               end;
             end else begin
               ParseExpression(PrecNone);
@@ -8475,7 +8653,7 @@ begin
       subtraction, comparing against limit + frameSize rather than checking
       $sp afterwards.
       WAT: global.get $sp
-           global.get $__stack_limit
+           global.get $__heap_end
            i32.const <frameSize>
            i32.add
            i32.lt_u
@@ -8493,7 +8671,7 @@ begin
       frameless function cannot overflow it. }
     if optStackChecks then begin
       EmitGlobalGet(0);
-      EmitGlobalGet(GlobalStackLimit);
+      EmitGlobalGet(GlobalHeapEnd);
       EmitI32Const(curFrameSize);
       EmitOp(OpI32Add);
       EmitOp(OpI32LtU);
@@ -8723,7 +8901,7 @@ end;
 
   Slots 0..22 are reserved for the compiler-generated runtime helpers
   (_start, __write_int, __read_int, string ops, checked arithmetic,
-  set ops, etc.). Slots 24+ are user-defined functions. }
+  set ops, etc.). Slots 26+ are user-defined functions. }
 procedure AssembleFunctionSection;
 var i: longint;
 begin
@@ -8777,7 +8955,11 @@ begin
   SmallEmitULEB128(secFunc, TypeI32x2Void);
   { Slot 23: __nil_check uses type i32 -> i32 (always present) }
   SmallEmitULEB128(secFunc, TypeI32I32);
-  { Slots 24+: User-defined functions (skip imports) }
+  { Slot 24: __heap_alloc uses type i32 -> i32 (always present) }
+  SmallEmitULEB128(secFunc, TypeI32I32);
+  { Slot 25: __heap_free uses type i32 -> void (always present) }
+  SmallEmitULEB128(secFunc, TypeI32Void);
+  { Slots 26+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
     if funcs[i].bodyStart <> -2 then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
@@ -8812,7 +8994,7 @@ var
   i: longint;
 begin
   SmallBufInit(secGlobal);
-  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth + 2); { $sp + 8 display + __version + __stack_limit }
+  SmallBufEmit(secGlobal, 1 + MaxDisplayDepth + 2); { $sp + 8 display + __version + __heap_end }
   { Global 0: $sp (stack pointer) }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
   SmallBufEmit(secGlobal, 1);        { mutable }
@@ -8834,14 +9016,22 @@ begin
   SmallBufEmit(secGlobal, OpI32Const);
   SmallEmitSLEB128(secGlobal, VersionYear * 65536 + VersionMonth * 256 + VersionPatch);
   SmallBufEmit(secGlobal, OpEnd);
-  { Global 10: __stack_limit (immutable, the first address the stack must not
-    reach). The stack grows down from the top of memory toward the data
-    segment, so the limit is the data segment's high-water mark. dataPos is
-    final by the time this section is assembled, which is why the limit lives
-    in a global rather than as an immediate in each prologue: frame code is
-    emitted long before the last string literal is allocated. }
+  { Global 10: __heap_end — the first address the stack must not reach, and
+    the address the next heap block will be carved from. One global serves
+    both because they are the same number: the heap grows up from the data
+    segment and the stack grows down from the top of memory, so the boundary
+    between them is a single value.
+
+    It starts at the data segment's high-water mark and moves up as the heap
+    grows. dataPos is final by the time this section is assembled, which is
+    why this lives in a global rather than as an immediate in each prologue:
+    frame code is emitted long before the last string literal is allocated.
+
+    Mutable since the heap arrived. While there was no heap it was constant,
+    and the earlier comment said immutable as though that were a property
+    rather than a consequence. }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
-  SmallBufEmit(secGlobal, 0);        { immutable }
+  SmallBufEmit(secGlobal, 1);        { mutable }
   SmallBufEmit(secGlobal, OpI32Const);
   SmallEmitSLEB128(secGlobal, dataPos);
   SmallBufEmit(secGlobal, OpEnd);
@@ -8931,6 +9121,44 @@ end;
 procedure EmitHelperULEB128(value: longint);
 begin
   EmitULEB128(helperCode, value);
+end;
+
+{** Emit global.get <idx> into the helper code buffer.
+  ;; WAT: global.get <idx> }
+procedure EmitHelperGlobalGet(idx: longint);
+var start: longint;
+begin
+  start := helperCode.len;
+  CodeBufEmit(helperCode, OpGlobalGet);
+  EmitULEB128(helperCode, idx);
+  FinishOp(helperCode, start);
+end;
+
+{** Emit global.set <idx> into the helper code buffer.
+  ;; WAT: global.set <idx> }
+procedure EmitHelperGlobalSet(idx: longint);
+var start: longint;
+begin
+  start := helperCode.len;
+  CodeBufEmit(helperCode, OpGlobalSet);
+  EmitULEB128(helperCode, idx);
+  FinishOp(helperCode, start);
+end;
+
+{** Emit i32.load with the given alignment and offset. }
+procedure EmitHelperI32Load(align, offset: longint);
+begin
+  EmitHelper(OpI32Load);
+  EmitHelperULEB128(align);
+  EmitHelperULEB128(offset);
+end;
+
+{** Emit i32.store with the given alignment and offset. }
+procedure EmitHelperI32Store(align, offset: longint);
+begin
+  EmitHelper(OpI32Store);
+  EmitHelperULEB128(align);
+  EmitHelperULEB128(offset);
 end;
 
 {** Emit local.get <idx> into the helper code buffer.
@@ -9097,6 +9325,164 @@ begin
   EmitHelperI32Const(addrNwritten);
   EmitHelperCall(idxFdWrite);
   EmitHelper(OpDrop);
+end;
+
+procedure BuildHeapAllocHelper;
+(** Build __heap_alloc(size: i32) -> i32 into helperCode.
+
+  A first-fit free list over blocks carved from the space between the data
+  segment and the stack. Each block carries an 8-byte header:
+
+      [ size: i32 ][ next: i32 ][ payload ... ]
+
+  `size` is the whole block including the header, rounded up to 8 so every
+  payload is 8-aligned. `next` links free blocks; it is dead in a block that
+  is in use.
+
+  Deliberately not done: no splitting of an oversized free block, and no
+  coalescing of adjacent free ones. A program that allocates and frees the
+  same shapes, which is what a list or a tree does, reuses its blocks exactly.
+  A program that allocates many sizes will fragment, and that is the
+  programmer's problem — stated in the language reference rather than papered
+  over with an allocator nobody asked for.
+
+  Parameters:
+    local 0 = requested payload size
+  Locals:
+    local 1 = total, the rounded block size including the header
+    local 2 = prev, the free-list predecessor of cur
+    local 3 = cur, the free block being examined
+    local 4 = blk, the block being carved when the free list has nothing
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* total = (size + 8 + 7) and not 7 *)
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(15);
+  EmitHelper(OpI32Add);
+  EmitHelperI32Const(-8);
+  EmitHelper(OpI32And);
+  EmitHelperLocalSet(1);
+
+  (* prev = 0; cur = free list head *)
+  EmitHelperI32Const(0);
+  EmitHelperLocalSet(2);
+  EmitHelperI32Const(addrHeapFree);
+  EmitHelperI32Load(2, 0);
+  EmitHelperLocalSet(3);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);   (* label 1: no block found *)
+  EmitHelper(OpLoop);  EmitHelper(WasmVoid);   (* label 0: walk *)
+
+    (* if cur = 0 then leave the loop and carve a new block *)
+    EmitHelperLocalGet(3);
+    EmitHelper(OpI32Eqz);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* if block size >= total then take it *)
+    EmitHelperLocalGet(3);
+    EmitHelperI32Load(2, 0);
+    EmitHelperLocalGet(1);
+    EmitHelper(OpI32GeU);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+
+      (* unlink: head or predecessor takes cur's successor *)
+      EmitHelperLocalGet(2);
+      EmitHelper(OpI32Eqz);
+      EmitHelper(OpIf); EmitHelper(WasmVoid);
+        EmitHelperI32Const(addrHeapFree);
+        EmitHelperLocalGet(3);
+        EmitHelperI32Load(2, 4);
+        EmitHelperI32Store(2, 0);
+      EmitHelper(OpElse);
+        EmitHelperLocalGet(2);
+        EmitHelperLocalGet(3);
+        EmitHelperI32Load(2, 4);
+        EmitHelperI32Store(2, 4);
+      EmitHelper(OpEnd);
+
+      (* return cur + 8 *)
+      EmitHelperLocalGet(3);
+      EmitHelperI32Const(8);
+      EmitHelper(OpI32Add);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+
+    (* prev = cur; cur = cur^.next *)
+    EmitHelperLocalGet(3);
+    EmitHelperLocalSet(2);
+    EmitHelperLocalGet(3);
+    EmitHelperI32Load(2, 4);
+    EmitHelperLocalSet(3);
+    EmitHelper(OpBr); EmitHelperULEB128(0);
+
+  EmitHelper(OpEnd);   (* end loop *)
+  EmitHelper(OpEnd);   (* end block *)
+
+  (* Carve a new block at the heap end. *)
+  EmitHelperGlobalGet(GlobalHeapEnd);
+  EmitHelperLocalSet(4);
+
+  (* The heap must not reach the stack. Unsigned compare, and > rather than
+     >=, so a heap that grows exactly up to $sp is still legal. This is the
+     other half of the prologue's stack guard: one of them catches growth
+     from each side. *)
+  EmitHelperLocalGet(4);
+  EmitHelperLocalGet(1);
+  EmitHelper(OpI32Add);
+  EmitHelperGlobalGet(0);
+  EmitHelper(OpI32GtU);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpUnreachable);
+  EmitHelper(OpEnd);
+
+  (* Move the heap end, which also raises the stack's floor. *)
+  EmitHelperLocalGet(4);
+  EmitHelperLocalGet(1);
+  EmitHelper(OpI32Add);
+  EmitHelperGlobalSet(GlobalHeapEnd);
+
+  (* blk^.size = total; return blk + 8 *)
+  EmitHelperLocalGet(4);
+  EmitHelperLocalGet(1);
+  EmitHelperI32Store(2, 0);
+  EmitHelperLocalGet(4);
+  EmitHelperI32Const(8);
+  EmitHelper(OpI32Add);
+end;
+
+procedure BuildHeapFreeHelper;
+(** Build __heap_free(addr: i32) into helperCode.
+
+  Pushes the block onto the front of the free list. Nothing is merged and
+  nothing is returned to the heap end, so freeing the most recent allocation
+  does not lower the heap.
+
+  Parameters:
+    local 0 = payload address
+  Locals:
+    local 1 = blk, the block header address
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* blk = addr - 8 *)
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(8);
+  EmitHelper(OpI32Sub);
+  EmitHelperLocalSet(1);
+
+  (* blk^.next = head *)
+  EmitHelperLocalGet(1);
+  EmitHelperI32Const(addrHeapFree);
+  EmitHelperI32Load(2, 0);
+  EmitHelperI32Store(2, 4);
+
+  (* head = blk *)
+  EmitHelperI32Const(addrHeapFree);
+  EmitHelperLocalGet(1);
+  EmitHelperI32Store(2, 0);
 end;
 
 procedure BuildWriteCharHelper;
@@ -10554,7 +10940,7 @@ procedure AssembleCodeSectionFixed;
   slot 3 = __str_assign, slot 4 = __write_str, slot 5 = __str_compare,
   slot 6 = __read_str, slot 7 = __str_append, slot 8 = __str_copy,
   slot 9 = __str_pos, slot 10 = __str_delete, slot 11 = __str_insert,
-  slot 21 = __int_to_str, slot 22 = __write_char, slot 23 = __nil_check, slots 24+ = user funcs. }
+  slot 21 = __int_to_str, slot 22 = __write_char, slot 23 = __nil_check, slot 24 = __heap_alloc, slot 25 = __heap_free, slots 26+ = user funcs. }
 var
   bodyLen: longint;
   i, j: longint;
@@ -11061,7 +11447,42 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 24+: User-defined function bodies (skip imports) }
+  { Slot 24: __heap_alloc body — always present (empty stub if unused) }
+  if needsHeap then begin
+    BuildHeapAllocHelper;
+    { 4 extra locals beyond the one parameter }
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);       { 1 local declaration block }
+    CodeBufEmit(secCode, 4);       { 4 locals: total, prev, cur, blk }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slot 25: __heap_free body — always present (empty stub if unused) }
+  if needsHeap then begin
+    BuildHeapFreeHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);       { 1 local declaration block }
+    CodeBufEmit(secCode, 1);       { 1 local: blk }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 26+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
@@ -11294,9 +11715,13 @@ begin
           writeln(stderr, '  ;; __write_char')
         else if val = numImports + 23 then
           writeln(stderr, '  ;; __nil_check')
+        else if val = numImports + 24 then
+          writeln(stderr, '  ;; __heap_alloc')
+        else if val = numImports + 25 then
+          writeln(stderr, '  ;; __heap_free')
         else begin
           { User function }
-          i := val - numImports - 24;
+          i := val - numImports - 26;
           if (i >= 0) and (i < numFuncs) then
             writeln(stderr, '  ;; ', funcs[i].name)
           else
@@ -11473,7 +11898,7 @@ begin
   writeln(stderr);
 
   { Helper slots — list active ones }
-  for i := 1 to 23 do begin
+  for i := 1 to 25 do begin
     case i of
       1: if needsWriteInt then slotName := '__write_int' else continue;
       2: if needsReadInt then slotName := '__read_int' else continue;
@@ -11498,6 +11923,8 @@ begin
       21: if needsIntToStr then slotName := '__int_to_str' else continue;
       22: if needsWriteChar then slotName := '__write_char' else continue;
       23: if needsNilCheck then slotName := '__nil_check' else continue;
+      24: if needsHeap then slotName := '__heap_alloc' else continue;
+      25: if needsHeap then slotName := '__heap_free' else continue;
     end;
     writeln(stderr, 'func[', numImports + i, '] ', slotName, '  (helper, code in code section)');
   end;
@@ -11506,11 +11933,11 @@ begin
   { User-defined functions }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then begin
-      writeln(stderr, 'func[', numImports + 24 + i, '] ', funcs[i].name,
+      writeln(stderr, 'func[', numImports + 26 + i, '] ', funcs[i].name,
               '  (import)');
       continue;
     end;
-    writeln(stderr, 'func[', numImports + 24 + i, '] ', funcs[i].name,
+    writeln(stderr, 'func[', numImports + 26 + i, '] ', funcs[i].name,
             '  params=', funcs[i].nparams,
             '  locals=', funcs[i].nlocals,
             '  bytes=', funcs[i].bodyLen);
@@ -11656,7 +12083,7 @@ begin
   numStructCopies := 0;
   numVarInits := 0;
   numImports := 0;
-  numDefinedFuncs := 24; { slots 0-23: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str, __write_char, __nil_check }
+  numDefinedFuncs := 26; { slots 0-25: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str, __write_char, __nil_check, __heap_alloc, __heap_free }
   numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
@@ -11707,6 +12134,8 @@ begin
   needsIntToStr := false;
   needsWriteChar := false;
   needsNilCheck := false;
+  needsHeap := false;
+  addrHeapFree := -1;
   breakDepth := -1;
   continueDepth := -1;
   exitDepth := -1;
