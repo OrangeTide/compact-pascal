@@ -31,8 +31,8 @@ finished.
 
 **1.0 means trustworthy, not capable.** Closed specification, CI gating every
 change, a proven embedding, and failures that are loud instead of silent. It is
-deliberately still stack-only, single-file, and heapless. That is a real limit
-and it is stated here rather than discovered later.
+deliberately still single-file, and it was still heapless when 1.0 was scoped.
+That is a real limit and it is stated here rather than discovered later.
 
 What makes the language capable enough for arbitrary programs comes after, and
 is roughly as much work again:
@@ -40,7 +40,7 @@ is roughly as much work again:
 | Phase | Goal | Status |
 |---|---|---|
 | H | Structured and string return types — `function F: string` | Done |
-| I | Heap: `New` and `Dispose` | |
+| I | Heap: `New` and `Dispose` | Done |
 | J | File system access and the `text` type; `{$I}` inside the compiler | |
 | K | System units — `uses` against runtime-provided bindings | |
 | L | Pascal units — write and compile your own, separately | |
@@ -53,9 +53,11 @@ any date as a guess.
 
 ### The two limits people ask about first
 
-**Allocation.** There is no heap today. Every size is fixed at compile time, so
-no list, tree, or growable buffer can be written. Phase I fixes it; it needs
-pointers from Phase E first.
+**Allocation.** Solved in Phase I. `New` and `Dispose` work over a first-fit
+free list, so lists and trees can be written. The allocator does not split or
+coalesce blocks, so a program mixing many sizes will fragment; one that
+allocates and frees the same shapes reuses its memory exactly. Running out
+traps rather than returning `nil`.
 
 **Program size.** A program is one file. `{$I}` is expanded by the host before
 the compiler sees it, so the standalone compiler silently skips the directive
@@ -98,9 +100,9 @@ Recorded so nobody waits for something that is not coming.
   codes.
 - **Generics, closures, reflection, async.** See the white paper for why each
   conflicts with the architecture rather than merely being unbuilt.
-- **Dynamic arrays.** Not planned as a language feature. Once Phase I lands a
-  heap, a pointer to a manually sized block covers the same ground without a
-  hidden allocation in the type system.
+- **Dynamic arrays.** Not planned as a language feature. With the Phase I heap
+  in place, a pointer to a manually sized block covers the same ground without
+  a hidden allocation in the type system.
 - **Floating point, and Unicode `rune` support.** Deferred without a date.
 
 ## Standing invariants

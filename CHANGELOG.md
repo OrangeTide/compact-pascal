@@ -29,6 +29,20 @@ behind a decision lives in the Findings section of `PLAN.md`.
 - `write` and `writeln` reject a pointer argument.
 - **`{$S+/-}` (`{$STACKCHECKS}`) directive**, on by default. Controls the stack
   overflow guard, the frame balance check, and the nil check.
+- **A heap: `New` and `Dispose`.** A first-fit free list between the data
+  segment and the stack, so lists and trees can be written at last. The size
+  comes from the pointer's target type, not from an argument.
+
+  `Dispose` sets the pointer to `nil`, which standard Pascal does not. It turns
+  a use after dispose, and a double dispose, into a trap instead of a read of
+  memory that now belongs to something else. Other pointers to the same block
+  are still dangling.
+
+  The allocator does not split or coalesce blocks, does not compact, does not
+  collect garbage, and does not return memory to the heap end. Running out
+  traps rather than returning `nil`. See "The Heap" in the reference.
+- **A `var` argument may now be a field or a dereference**, not only an array
+  element: `Insert(t^.left, v)` works. Previously only `[index]` was accepted.
 - **Functions may return a `string`, `string[n]`, record, or array.**
   `function F: string` was previously rejected outright. The result is
   caller-allocated and released at the end of the statement; loops release each
@@ -65,7 +79,10 @@ behind a decision lives in the Findings section of `PLAN.md`.
   caller's pieces. `a + Wrap(b)` produced the wrong string, and a recursive
   string function returned empty. Pieces are now protected across a call.
 
-**Known limitations:** `with p^ do` is rejected; use `p^.field`. Assignment
+**Known limitations:** a user procedure cannot be named `Insert`, `Delete`,
+`New`, or `Dispose`; those names are matched as built-ins before symbol lookup,
+and the resulting error talks about the built-in's arguments. `with p^ do` is
+rejected; use `p^.field`. Assignment
 between pointer types with different targets is not yet checked. Concatenating
 two or more `char` values in one expression, `a + '.' + b + '.'`, aliases a
 shared conversion buffer and gives the wrong answer; concatenate strings

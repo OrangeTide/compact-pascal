@@ -506,6 +506,52 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**The heap boundary and the stack limit are one global.** Phase D put a
+`__stack_limit` global at the data segment's high-water mark and called it
+immutable. That was a consequence of there being no heap, not a property, and
+the comment stated it as though it were the latter. The global is now
+`__heap_end`, mutable, and serves both roles: the allocator raises it when it
+carves a block, the prologue guard compares against it before reserving a
+frame. Growth from either side is caught by the check on the other, and there
+is no way for the two to disagree because there is only one number.
+
+Had the limit stayed fixed, the Phase D stack guard would have been quietly
+wrong the moment a heap existed: it would have let a frame overwrite heap
+blocks and reported nothing.
+
+**`Dispose` clears the pointer.** Standard Pascal leaves it dangling and says
+nothing about using it afterwards. Clearing costs one store and converts two
+common mistakes into a nil trap: use after dispose, and double dispose. The
+second is the valuable one, since pushing the same block onto the free list
+twice makes a cycle that a later allocation walks forever.
+
+It is not a memory-safety guarantee and the reference says so. Only the pointer
+passed in is cleared; any other pointer to the same block is still dangling,
+and nothing can find them.
+
+**Exhaustion traps rather than returning nil.** The alternative is what most
+Pascals do: `New` returns nil and the program is expected to check. No program
+checks. A trap at the point of failure is worth more than a nil that surfaces
+as a corrupt read later, and it matches what `{$R+}` and the stack guard
+already do. Documented rather than assumed, because it means a program cannot
+recover from exhaustion at all.
+
+**The var-argument path was the sixth selector loop.** It accepted only
+`[index]`, which was enough while no designator could reach through a pointer.
+A tree insert wants `Ins(t^.left, v)`, so it learned `^` and `.field`. That
+makes six near-identical selector loops in the compiler: two learned `^` in
+Phase E, this one now, and three `with` paths still have not. Collapsing them
+is still owed, and the list of things waiting on it is now three:
+`with p^ do`, assigning to a field of a function result, and whatever the next
+phase needs.
+
+**Built-in names shadow user procedures.** `Insert`, `Delete`, `New`, and
+`Dispose` are matched before symbol lookup, so a user procedure named `Insert`
+is unreachable and the error names the built-in's argument rules, which is
+baffling. Found while writing the tree test, whose insert had to be renamed.
+Pre-existing and unfixed; the fix is to look the name up first and fall back to
+the built-in only when it is not a user symbol.
+
 **A structured result buffer is stack-allocated with a compile-time depth
 counter.** The buffer cannot come from the frame, because the frame size is
 fixed before the body is compiled, which was the original blocker. It comes
@@ -1637,23 +1683,31 @@ name as a designator over the hidden parameter, which is the same selector-loop
 duplication that `with p^ do` ran into; both should be fixed together after the
 five near-identical loops are collapsed.
 
-### Phase I: Heap — `New` and `Dispose` — 2 weeks
+### Phase I: Heap — `New` and `Dispose` — DONE
 
 Depends on Phase E. The hard ceiling on what programs are expressible: today
 every size is fixed at compile time, so no list, tree, or growable buffer can
 be written at all.
 
-- [ ] Free-list allocator in linear memory, growing upward from the data
-      segment end toward the stack.
-- [ ] `New(p)` and `Dispose(p)`, sized from the pointer's target type.
-- [ ] Collision detection against the stack pointer, trapping under `{$S+}`
-      rather than silently overlapping. The stack guard from Phase D is the
-      other half of this.
-- [ ] Document the allocator's guarantees: no compaction, no garbage
-      collection, fragmentation is the programmer's problem.
+- [x] Free-list allocator in linear memory, growing upward from the data
+      segment end toward the stack. First fit, 8-byte header, no splitting and
+      no coalescing.
+- [x] `New(p)` and `Dispose(p)`, sized from the pointer's target type.
+      `Dispose` also clears the pointer, which standard Pascal does not; see
+      Findings.
+- [x] Collision detection against the stack pointer. It is one shared
+      boundary rather than two checks: the Phase D global became mutable and
+      the allocator raises it, so each side is guarded by the other's check.
+      Unconditional rather than under a directive, since a soft failure would
+      mean returning nil and no program checks for it.
+- [x] Document the allocator's guarantees: no splitting, no coalescing, no
+      compaction, no garbage collection, no return to the heap end, and
+      exhaustion traps rather than returning nil.
 
 **Exit:** a linked list and a binary tree build, traverse, and free without
-leaking; a deliberate heap-stack collision traps.
+leaking; a deliberate heap-stack collision traps. All met: `t113` is the list,
+`t114` the tree plus two thousand allocate-free cycles that do not grow the
+heap, `t115` the collision.
 
 ### Phase J: File system access and the `text` type — 3 weeks
 

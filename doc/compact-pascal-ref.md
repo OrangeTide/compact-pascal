@@ -119,7 +119,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 
 - **No file types.** The `file` type and associated operations are omitted.
 - **Built-in I/O is a compiler intrinsic.** `write`, `writeln`, `read`, `readln` are supported but compile to WASI preview 1 `fd_write`/`fd_read` calls rather than being part of the runtime. Any WASI-compatible host provides these automatically. See [Built-in I/O](#built-in-io).
-- **Dynamic allocation deferred.** `New`/`Dispose` are planned (Phase 6) but not available in the initial release. Phase 1 uses stack-only allocation.
+- **Dynamic allocation.** `New` and `Dispose` over a first-fit free list. No garbage collection, no compaction. See [The Heap](#the-heap).
 - **Short-circuit evaluation.** `and then` and `or else` operators from ISO 10206 are supported. See [Short-Circuit Evaluation](#short-circuit-evaluation).
 - **TP-style short strings.** Strings use the Turbo Pascal length-byte representation, not ISO 7185 packed arrays of char. See [String Representation](#string-representation).
 - **Type casts.** Turbo Pascal-style type casts (`integer(ch)`) are supported.
@@ -261,7 +261,7 @@ Short strings live on the stack or in records — no heap allocation is required
 
 The embedding libraries provide helper functions to copy between host strings (Rust `&str`/`String`, C `const char *`) and the Pascal string representation in the WASM memory space.
 
-A richer dynamically-allocated string type (pointer + length, no 255-character limit) is planned for Phase 6b when `New`/`Dispose` and heap allocation become available.
+A richer dynamically-allocated string type (pointer + length, no 255-character limit) is planned for a later phase, now that a heap exists to hold one.
 
 ### String Parameter Passing
 
@@ -497,7 +497,7 @@ This is the language's only exception to declare-before-use, and it exists becau
 
 ### What Pointers Do Not Do Yet
 
-There is no heap. `New` and `Dispose` are not available, so every pointer must be aimed at storage that already exists: a variable, a field, or an array element. Pointer arithmetic does not exist and is not planned. See `ROADMAP.md` for the phase that adds allocation.
+Pointer arithmetic does not exist and is not planned. A pointer is aimed at storage by `@x` or by [`New`](#memory-allocation), and nothing else produces one.
 
 The compiler checks that a pointer is not assigned to a non-pointer and that a non-pointer is not assigned to a pointer. It does not yet check that the *targets* agree, so assigning a `^integer` to a `^TRec` compiles. Treat that as a gap to be closed, not as permission.
 
@@ -600,14 +600,18 @@ These functions and procedures are compiler intrinsics, always available without
 |---|---|---|
 | `fillchar(var x; count, value: integer)` | `var any × integer × integer` | Fill `count` bytes starting at `x` with the byte `value`. Used to zero-initialize records and arrays. |
 
-### Memory Allocation (Phase 6)
+### Memory Allocation
 
 | Procedure | Signature | Description |
 |---|---|---|
-| `New(p)` | `var ^T` | Allocate a new record of type `T` and set `p` to point to it. |
-| `Dispose(p)` | `var ^T` | Deallocate the record pointed to by `p`. |
+| `New(p)` | `var ^T` | Allocate a block big enough for a `T` and set `p` to point at it. |
+| `Dispose(p)` | `var ^T` | Release the block `p` points at and set `p` to `nil`. |
 
-These are not available in Phase 1 (stack-only allocation). They will use a free-list allocator in WASM linear memory.
+The size comes from the pointer's target type, not from an argument, so it cannot be given wrongly. The argument must be a pointer *variable*: a value parameter has no address to write back to.
+
+`Dispose` sets the pointer to `nil`. This is a deliberate departure — standard Pascal leaves it dangling and says nothing about using it afterwards. Clearing it costs one store and turns both a use after `Dispose` and a double `Dispose` into a trap under `{$S+}`, instead of a read of memory that now belongs to something else. Other pointers to the same block are *not* cleared and remain dangling; nothing can find them.
+
+See [The Heap](#the-heap) for what the allocator does and does not guarantee.
 
 ### Predefined Constants
 
@@ -698,10 +702,27 @@ Compiled programs use this layout in WASM linear memory:
 
 - **Nil guard (bytes 0-3):** Reserved, zeroed. Dereferencing a `nil` pointer reads zeros rather than corrupting data.
 - **Data segment:** Global variables, string literals, and typed constants. Laid out by the compiler at compile time starting at address 4.
-- **Heap:** Grows upward from end of data segment. Available in Phase 6 (`New`/`Dispose`); unused in Phase 1.
+- **Heap:** Grows upward from the end of the data segment. See [The Heap](#the-heap).
 - **Stack:** Grows downward from top of memory.
 
 The initial memory size is controlled by `{$MEMORY}` (default: 1 page = 64 KB). Maximum memory is controlled by `{$MAXMEMORY}` (default: 256 pages = 16 MB).
+
+**The heap and the stack share one boundary**, held in a mutable WASM global. It starts at the end of the data segment and rises as the heap grows. Both guards read it: `New` refuses to carve a block that would cross the stack pointer, and every procedure prologue refuses to reserve a frame that would cross the heap. Growth from either side is caught by the check on the other.
+
+### The Heap
+
+`New` carves blocks from the space between the data segment and the stack. Each block carries an 8-byte header, so a block costs its payload rounded up to 8 bytes, plus 8.
+
+Free blocks are held on a single list and reused first-fit. What the allocator does **not** do is as important as what it does:
+
+- **No splitting.** A free block big enough for a smaller request is handed over whole. The remainder is not recovered until that block is freed again.
+- **No coalescing.** Two adjacent free blocks stay two blocks. A large request will not be satisfied by several small neighbours.
+- **No return to the operating system.** Freeing the most recently allocated block does not lower the heap boundary.
+- **No garbage collection**, and none is planned. Every `New` needs a matching `Dispose`.
+
+The practical consequence: **a program that allocates and frees the same shapes reuses its memory exactly.** That covers lists, trees, and pools, which is what a heap is usually for here. A program that mixes many sizes will fragment, and no amount of freeing will fix it. That is the programmer's problem, and it is stated here rather than hidden behind an allocator that would cost more than this language wants to spend.
+
+**Running out is a trap, not a `nil`.** `New` does not fail softly. If the block would cross the stack pointer the program traps, in the same way an out-of-range index traps under `{$R+}`. A program that wants to survive exhaustion must bound its own allocation; there is no way to ask how much is left.
 
 ### Stack
 
@@ -837,6 +858,16 @@ Range checking is off by default and enabled with `{$R+}`.
   rejected.** The compiler checks pointer against non-pointer but does not
   compare the targets. This is an implementation gap, not a language rule; do
   not write code that relies on it.
+- **A second pointer to a disposed block is dangling.** `Dispose` clears the
+  pointer it was given and nothing else. Reading through another pointer to
+  the same block reads whatever the allocator has since put there, and writing
+  through one corrupts the free list. Not detected at any directive setting.
+- **`Dispose` on a pointer that did not come from `New` is undefined.** The
+  allocator reads a block header eight bytes below the address it is given. A
+  pointer from `@x` has no such header, so this corrupts the free list rather
+  than reporting anything. Not detected.
+- **A block is never zeroed.** `New` hands back whatever was last in that
+  memory. Initialize every field; the nil guard protects only address zero.
 
 ## Conformance
 
