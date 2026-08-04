@@ -43,6 +43,11 @@ behind a decision lives in the Findings section of `PLAN.md`.
   traps rather than returning `nil`. See "The Heap" in the reference.
 - **A `var` argument may now be a field or a dereference**, not only an array
   element: `Insert(t^.left, v)` works. Previously only `[index]` was accepted.
+- **`{$FILES ON}` global directive**, requesting filesystem access. It adds
+  `path_open` and `fd_close` to the module's imports, so a host can see from
+  the import list whether a program wants files. It must appear before the
+  `program` header. No language surface uses it yet; the `text` type and
+  `Assign`/`Reset`/`ReadLn` are still to come.
 - **Functions may return a `string`, `string[n]`, record, or array.**
   `function F: string` was previously rejected outright. The result is
   caller-allocated and released at the end of the statement; loops release each
@@ -118,6 +123,15 @@ instead. That last one is long-standing, not new.
   reporting success for a descriptor that does not exist.
 - Three examples: `hello`, `calculator`, and `host-callback`, each covered by
   the test suite and run in CI.
+
+### Corrected documentation
+
+- **"Programs without I/O have zero implicit imports" was never true.** Every
+  compiled module declares the five core WASI imports whether or not it calls
+  them, because import indices are positional and are fixed before parsing so
+  that helper function indices stay stable in a single pass. The claim was in
+  the language reference, the white paper, and the README. The conformance
+  requirement now distinguishes what a module declares from what it calls.
 
 ### Documentation
 

@@ -506,6 +506,39 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Filesystem access is opt-in because always-on imports broke the embedding.**
+The five core WASI imports are registered before parsing so that helper
+function slots, numbered from the import count, are stable in a single pass.
+Adding `path_open` and `fd_close` the same way seemed natural and broke every
+Rust host at once: the bridge implements five WASI functions, so a snapshot
+declaring seven could not be instantiated and the whole crate test suite
+failed on the first run after the change.
+
+The fix is better than what it replaced. `{$FILES ON}` makes the request
+visible in the module's import list, so a host can refuse a program that wants
+files without reading its source. That fits the sandbox story the embedding
+guide already tells: capability is what the host grants, and now it is legible
+before instantiation rather than only at the first call.
+
+The directive has to precede the program header, and the compiler enforces it
+rather than trusting it. Import indices are positional and helper slot numbers
+become immediates in call instructions, so the count cannot be revised once
+code exists.
+
+**Three documents claimed programs without I/O have no imports. None did.** An
+empty program has always declared five. The claim was in the reference, the
+white paper, and the README, and it was checked by nobody until adding an
+import made the import list worth looking at. The conformance requirement now
+separates what a module *declares* from what it *calls*, which is the
+distinction that was missing: a positional import list cannot drop an unused
+entry without renumbering every call, and renumbering is what registering up
+front exists to avoid.
+
+This is the sixth defect in this project found by verifying a documentation
+claim. It is also the second where the claim was in a *conformance*
+requirement, which is the worst place for one, since it is what a second
+implementation would be held to.
+
 **The heap boundary and the stack limit are one global.** Phase D put a
 `__stack_limit` global at the data segment's high-water mark and called it
 immutable. That was a consequence of there being no heap, not a property, and
@@ -1709,7 +1742,7 @@ leaking; a deliberate heap-stack collision traps. All met: `t113` is the list,
 `t114` the tree plus two thousand allocate-free cycles that do not grow the
 heap, `t115` the collision.
 
-### Phase J: File system access and the `text` type — 3 weeks
+### Phase J: File system access and the `text` type — IN PROGRESS
 
 Two things at once, because they are the same underlying work: the compiler
 needs to read files for `{$I}`, and programs need file I/O for anything real.
@@ -1719,9 +1752,15 @@ standalone compiler cannot build a multi-file program at all. It silently skips
 the directive and then fails on the undeclared identifier, which is a poor
 diagnostic for what is really a missing capability.
 
-- [ ] WASI file access: `path_open`, `fd_read`, `fd_write`, `fd_close`,
-      `fd_seek`. Host grants a preopened directory; nothing is reachable
-      outside it.
+- [x] WASI file access: `path_open`, `fd_read`, `fd_write`, `fd_close`. Host
+      grants a preopened directory; nothing is reachable outside it. `fd_seek`
+      is not imported: text I/O is sequential and nothing in the phase needs
+      it. Add it when a `file of T` type wants random access.
+
+      Gated behind a new `{$FILES ON}` global directive rather than always
+      present. Registering them unconditionally broke every Rust host, since
+      the embedding bridge implements five WASI functions and a module
+      importing seven cannot instantiate. See Findings.
 - [ ] The `text` type, promoted from the two predefined handles to a real type
       with a handle table.
 - [ ] `Assign`, `Reset`, `Rewrite`, `Close`, `ReadLn`, `WriteLn`, `Eof`,
@@ -1734,7 +1773,31 @@ diagnostic for what is really a missing capability.
 
 **Exit:** the compiler compiles a multi-file program from the CLI with no host
 help; a program opens, writes, reopens, and reads back a file; `IOResult`
-reports a missing file rather than trapping under `{$I-}`.
+reports a missing file rather than trapping under `{$I-}`. **Not yet met.**
+
+**Status: the WASI layer is in, the language surface is not.** The remaining
+four items are the bulk of the phase and are sequenced:
+
+1. `text` as a real type with a handle table. Everything else needs it, since
+   `Assign(f, name)` has to have somewhere to put the name before `Reset`
+   turns it into a descriptor.
+2. The eight procedures, then `IOResult` and `{$I-}` on top. `{$I-}` is a
+   local directive like `{$R+}`, so the machinery exists; what is new is that
+   a suppressed error has to be *recorded* rather than dropped.
+3. Compiler-side `{$I}`. This needs a source stack in the scanner, not just
+   file access: `ReadCh` reads one character at a time and would have to read
+   from the current source rather than from stdin. Both builds need it, so the
+   compiler source gains an `{$IFDEF FPC}` pair like the one `ReadCh` already
+   carries.
+4. Nesting depth and cycle checks, which are cheap once the source stack
+   exists and hold the depth and the open names.
+
+The risk worth naming before starting item 3: the self-hosted compiler must
+call the file primitives from Pascal, so they have to be reachable from the
+language, not only from the compiler's own code generator. That makes them
+part of the language surface whether or not the `text` type is ready, and it
+is the reason to do items 1 and 2 first rather than reaching for `{$I}` early
+because its exit test is the crisp one.
 
 ### Phase K: System units — 2 weeks
 
