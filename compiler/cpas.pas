@@ -221,11 +221,26 @@ const
   tyEnum      = 7;
   tySet       = 8;
   tyPointer   = 9;
+  tyText      = 10;
 
   { Type descriptor table limits }
   MaxTypes    = 256;
   MaxFields   = 512;
   MaxPendingPtr = 32;   { unresolved forward pointer references per type block }
+  { text file control block: fd, mode, buffer length, buffer position, eof
+    flag, the assigned name as a short string, then the buffer itself. }
+  TextOfsFd     = 0;
+  TextOfsMode   = 4;
+  TextOfsLen    = 8;
+  TextOfsPos    = 12;
+  TextOfsEof    = 16;
+  TextOfsName   = 20;
+  TextOfsBuf    = 276;
+  TextBufSize   = 256;
+  TextRecSize   = 536;
+  TextModeClosed = 0;
+  TextModeRead   = 1;
+  TextModeWrite  = 2;
   { 17 slots of 4 bytes per nesting level, four levels deep. }
   ConcatScratchBytes = 272;
 
@@ -517,6 +532,9 @@ var
   needsWriteChar: boolean;       { __write_char helper needed }
   needsNilCheck: boolean;        { __nil_check helper needed }
   needsHeap: boolean;            { __heap_alloc / __heap_free helpers needed }
+  needsText: boolean;            { text file helpers needed }
+  addrIOResult: longint;         { data word holding the last I/O errno }
+  optIOChecks: boolean;          { I+ traps on I/O error, I- records it }
   addrHeapFree: longint;         { data word holding the free list head }
   addrSetTemp: longint;          { 32-byte temp for large set arithmetic results }
   needsSetTemp: boolean;         { whether set temp was allocated }
@@ -1211,6 +1229,12 @@ begin
       ParseDirectiveString(optDescription);
     end else if directive = 'EXTLITERALS' then begin
       optExtLiterals := ParseDirectiveSwitch;
+    end else if (directive = 'I') and ((ch = '+') or (ch = '-')) then begin
+      { I followed by a plus or minus is the I/O check switch, not an
+        include. Turbo Pascal overloaded the letter and so does this: an
+        include always has a file name after it, so the next character
+        decides which one was meant. }
+      optIOChecks := ParseDirectiveSwitch;
     end else if (directive = 'I') or (directive = 'INCLUDE') then begin
       { Include files are resolved by host before compilation }
       while (not atEof) and (ch <> '}') do
@@ -2765,6 +2789,11 @@ begin
   idx := AddSym('WORD', skType, tyInteger);
   idx := AddSym('SHORTINT', skType, tyInteger);
   idx := AddSym('LONGINT', skType, tyInteger);
+  { A text file variable. Its size is the control block below, not 4: it
+    holds the descriptor, the buffer, and the assigned name, so that Assign
+    can record a name before Reset turns it into anything. }
+  idx := AddSym('TEXT', skType, tyText);
+  syms[idx].size := TextRecSize;
 
   { Built-in constants }
   idx := AddSym('TRUE', skConst, tyBoolean);
@@ -2968,6 +2997,8 @@ begin
       outStrMax := 0;
     end else begin
       outSize := 4;  { integer, boolean, char, enum — all i32 }
+      if outTyp = tyText then
+        outSize := TextRecSize;
     end;
   end else if tokKind = tkCaret then begin
     { Pointer type: ^TypeIdentifier. The grammar allows only a name here, not
@@ -3469,6 +3500,51 @@ begin
   EmitI32Const(syms[sym].offset);
   EmitOp(OpI32Add);
   EmitI32Load(2, 0);
+end;
+
+procedure EnsureIOResultSlot;
+{** Allocate the data word IOResult reads. }
+var j: longint;
+begin
+  if addrIOResult < 0 then begin
+    addrIOResult := AllocDataAligned(4, 4);
+    for j := 1 to 4 do DataBufEmit(secData, 0);
+  end;
+end;
+
+procedure EmitTextVarAddr(sym: longint);
+{** Push the address of a text file's control block. }
+begin
+  if syms[sym].isVarParam then
+    EmitVarParamPtr(sym)
+  else begin
+    EmitFramePtr(syms[sym].level);
+    EmitI32Const(syms[sym].offset);
+    EmitOp(OpI32Add);
+  end;
+end;
+
+procedure EmitIOResultStore;
+{** Consume an errno from the operand stack, recording it for IOResult.
+
+  With I/O checks on, the default, a nonzero errno traps at the point of
+  failure, which is what a program that never checks should get. With them
+  off it is stored and the program carries on; IOResult hands it over once
+  and clears it. That is Turbo Pascal's contract, including the clearing:
+  reading IOResult twice gives zero the second time. }
+begin
+  EnsureIOResultSlot;
+  curFuncNeedsCaseTemp := true;
+  EmitLocalSet(curCaseTempIdx);
+  EmitI32Const(addrIOResult);
+  EmitLocalGet(curCaseTempIdx);
+  EmitI32Store(2, 0);
+  if optIOChecks then begin
+    EmitLocalGet(curCaseTempIdx);
+    EmitOp(OpIf); EmitOp(WasmVoid);
+      EmitOp(OpUnreachable);
+    EmitOp(OpEnd);
+  end;
 end;
 
 procedure EmitPointerVarAddr(sym: longint);
@@ -3986,6 +4062,19 @@ begin
   EnsureWriteChar := numImports + 22; { slot 22 = __write_char }
 end;
 
+function EnsureTextHelpers: longint;
+{** Ensure the text file helpers are registered. __text_open is at slot 26;
+  the other three follow it. Registering one registers all four, since they
+  call each other and a program that opens a file will close it. }
+begin
+  if not optFileIO then
+    Error('file operations require FILES to be switched on before the program header');
+  EnsureIOBuffers;
+  EnsureReadBuffers;
+  needsText := true;
+  EnsureTextHelpers := numImports + 26;
+end;
+
 function EnsureHeapAlloc: longint;
 {** Ensure the heap helpers are registered and the free-list head exists.
   __heap_alloc(size) -> addr is at slot 24. }
@@ -4105,6 +4194,7 @@ var
   exprStrMax: longint;
   savedConcatPieces, savedConcatBase: longint;
   heapIsNew: boolean;
+  textOp: string[63];
   heapTargetSize: longint;
   argTyp, argTypeIdx: longint;
   pieceSaveBytes: longint;
@@ -4124,6 +4214,7 @@ var
   concatSPAllocs: longint;
   retBufSize: longint;
   wantAddr: boolean;
+  textEofSym: longint;
   leftTypeIdx: longint;
   ptrTgtTyp, ptrTgtIdx, ptrTgtSize, ptrTgtStrMax: longint;
 begin
@@ -4412,13 +4503,42 @@ begin
         EmitOp(OpI32And);
         exprType := tyInteger;
       end
-      else if tokStr = 'EOF' then begin
-        { eof — returns true when last fd_read returned 0 bytes }
+      else if tokStr = 'IORESULT' then begin
+        { Hands over the last I/O error and clears it, so a second read gives
+          zero. Turbo Pascal's contract, and the clearing is the part that
+          matters: it makes "did that work" a question with one answer. }
         NextToken;
-        EnsureReadBuffers;
-        EmitI32Const(addrNread);
+        EnsureIOResultSlot;
+        EmitI32Const(addrIOResult);
         EmitI32Load(2, 0);
-        EmitOp(OpI32Eqz);
+        EmitI32Const(addrIOResult);
+        EmitI32Const(0);
+        EmitI32Store(2, 0);
+        exprType := tyInteger;
+      end
+      else if tokStr = 'EOF' then begin
+        NextToken;
+        if tokKind = tkLParen then begin
+          { eof(f) — true once a read has run off the end of the file }
+          NextToken;
+          if tokKind <> tkIdent then
+            Error('a text file variable is required here');
+          textEofSym := LookupSym(tokStr);
+          if (textEofSym < 0) or (syms[textEofSym].kind <> skVar)
+             or (syms[textEofSym].typ <> tyText) then
+            Error('a text file variable is required here');
+          EnsureTextHelpers;
+          EmitTextVarAddr(textEofSym);
+          EmitI32Load(2, TextOfsEof);
+          NextToken;
+          Expect(tkRParen);
+        end else begin
+          { eof — returns true when last fd_read returned 0 bytes }
+          EnsureReadBuffers;
+          EmitI32Const(addrNread);
+          EmitI32Load(2, 0);
+          EmitOp(OpI32Eqz);
+        end;
         exprType := tyBoolean;
       end
       else begin
@@ -5584,10 +5704,66 @@ procedure ParseWriteArgs(withNewline: boolean);
   Supports write(stderr, ...) for output to fd 2. }
 var
   addr, slen, i, fd: longint;
+  textSym: longint;
 begin
   fd := 1; { default: stdout }
   if tokKind = tkLParen then begin
     NextToken;
+    { A text file as the first argument routes everything through the file's
+      buffer instead of straight to a descriptor. Handled as its own loop
+      rather than by threading a "which file" through the stdout path,
+      because the two share no code: one builds an iovec per call, the other
+      appends to a buffer that flushes when full. }
+    if tokKind = tkIdent then begin
+      textSym := LookupSym(tokStr);
+      if (textSym >= 0) and (syms[textSym].kind = skVar)
+         and (syms[textSym].typ = tyText) then begin
+        NextToken;
+        while tokKind = tkComma do begin
+          NextToken;
+          if tokKind = tkString then begin
+            EmitTextVarAddr(textSym);
+            EmitI32Const(EmitDataPascalString(tokStr));
+            EmitCall(EnsureTextHelpers + 4);   { __text_write_str }
+            NextToken;
+          end else begin
+            ParseExpression(PrecNone);
+            if exprType = tyString then begin
+              if concatPieces > 0 then
+                Error('concatenation in a file write is not supported yet; ' +
+                      'assign it to a string variable first');
+              curFuncNeedsStringTemp := true;
+              EmitLocalSet(curStringTempIdx);
+              EmitTextVarAddr(textSym);
+              EmitLocalGet(curStringTempIdx);
+              EmitCall(EnsureTextHelpers + 4);
+            end else if exprType = tyChar then begin
+              curFuncNeedsStringTemp := true;
+              EmitLocalSet(curStringTempIdx);
+              EmitTextVarAddr(textSym);
+              EmitLocalGet(curStringTempIdx);
+              EmitCall(EnsureTextHelpers + 3);  { __text_write_byte }
+            end else begin
+              { Integers go through the same decimal conversion the console
+                path uses, then out as a string. }
+              EnsureIntToStr;
+              EmitI32Const(addrIntBuf);
+              EmitCall(EnsureIntToStrHelper);
+              EmitTextVarAddr(textSym);
+              EmitI32Const(addrIntBuf);
+              EmitCall(EnsureTextHelpers + 4);
+            end;
+          end;
+        end;
+        Expect(tkRParen);
+        if withNewline then begin
+          EmitTextVarAddr(textSym);
+          EmitI32Const(10);
+          EmitCall(EnsureTextHelpers + 3);
+        end;
+        exit;
+      end;
+    end;
     { Check for stderr as first argument }
     if (tokKind = tkIdent) and (tokStr = 'STDERR') then begin
       fd := 2;
@@ -5745,11 +5921,56 @@ var
   name: string;
   ridx: longint;
   lastWasString: boolean;
+  readTextSym: longint;
+  consumedLParen: boolean;
 begin
-  ridx := EnsureReadInt;
-  lastWasString := false;
+  consumedLParen := false;
+  { readln(f, s) reads a line from a text file rather than from stdin. Only
+    a string destination is supported: reading a number from a file would
+    need a decimal scanner over the file buffer, and the console one reads
+    stdin directly. Read the line, then parse it. }
   if tokKind = tkLParen then begin
     NextToken;
+    if tokKind = tkIdent then begin
+      sym := LookupSym(tokStr);
+      if (sym >= 0) and (syms[sym].kind = skVar) and (syms[sym].typ = tyText) then begin
+        EnsureTextHelpers;
+        readTextSym := sym;
+        NextToken;
+        while tokKind = tkComma do begin
+          NextToken;
+          if tokKind <> tkIdent then
+            Error('readln from a file requires a string variable');
+          sym := LookupSym(tokStr);
+          if sym < 0 then
+            Error('undeclared identifier: ' + tokStr);
+          if (syms[sym].kind <> skVar) or (syms[sym].typ <> tyString) then
+            Error('readln from a file requires a string variable');
+          EmitTextVarAddr(readTextSym);
+          if syms[sym].isVarParam then
+            EmitVarParamPtr(sym)
+          else begin
+            EmitFramePtr(syms[sym].level);
+            EmitI32Const(syms[sym].offset);
+            EmitOp(OpI32Add);
+          end;
+          EmitI32Const(syms[sym].strMax);
+          EmitCall(EnsureTextHelpers + 5);   { __text_read_line }
+          NextToken;
+        end;
+        Expect(tkRParen);
+        exit;
+      end;
+    end;
+    { Not a file: the '(' is already consumed and we are sitting on the first
+      argument, which is where the console path below expects to be. }
+    consumedLParen := true;
+  end;
+  ridx := EnsureReadInt;
+  lastWasString := false;
+  if consumedLParen or (tokKind = tkLParen) then begin
+    if not consumedLParen then
+      NextToken;
     while tokKind <> tkRParen do begin
       if tokKind <> tkIdent then
         Error('variable expected in read');
@@ -6290,6 +6511,7 @@ var
   savedUsedResultBuf: boolean;
   savedConcatPieces, savedConcatBase: longint;
   heapIsNew: boolean;
+  textOp: string[63];
   heapTargetSize: longint;
   argTyp, argTypeIdx: longint;
 begin
@@ -6327,7 +6549,73 @@ begin
     tkIdent: begin
       name := tokStr;
       { Built-in procedures handled before symbol lookup }
-      if (name = 'NEW') or (name = 'DISPOSE') then begin
+      if (name = 'ASSIGN') or (name = 'RESET') or (name = 'REWRITE')
+         or (name = 'CLOSE') then begin
+        { assign(f, name) / reset(f) / rewrite(f) / close(f) }
+        textOp := name;
+        NextToken;
+        Expect(tkLParen);
+        if tokKind <> tkIdent then
+          Error('a text file variable is required here');
+        sym := LookupSym(tokStr);
+        if sym < 0 then
+          Error('undeclared identifier: ' + tokStr);
+        if (syms[sym].kind <> skVar) or (syms[sym].typ <> tyText) then
+          Error('a text file variable is required here');
+        if syms[sym].offset < 0 then
+          Error('a text file cannot be a value parameter');
+        NextToken;
+
+        if textOp = 'ASSIGN' then begin
+          { Record the name. Reset and Rewrite read it from the block, so a
+            program can assign once and reopen as often as it likes. }
+          EmitTextVarAddr(sym);
+          EmitI32Const(TextOfsName);
+          EmitOp(OpI32Add);
+          EmitI32Const(255);
+          Expect(tkComma);
+          ParseExpression(PrecNone);
+          if exprType <> tyString then
+            Error('assign() requires a file name string');
+          EmitCall(EnsureStrAssign);
+          { A freshly assigned file is closed, whatever it was before. }
+          EmitTextVarAddr(sym);
+          EmitI32Const(TextModeClosed);
+          EmitI32Store(2, TextOfsMode);
+          EmitTextVarAddr(sym);
+          EmitI32Const(-1);
+          EmitI32Store(2, TextOfsFd);
+        end
+        else if textOp = 'CLOSE' then begin
+          { Emitted inline rather than as a fifth helper: it is four short
+            steps and none of them is shared. Closing something never opened
+            is deliberately harmless — a program that closes in an error path
+            and again at the end should not have to remember which ran. }
+          EmitTextVarAddr(sym);
+          EmitCall(EnsureTextHelpers + 1);   { __text_flush }
+          EmitTextVarAddr(sym);
+          EmitI32Load(2, TextOfsFd);
+          EmitCall(idxFdClose);
+          EmitOp(OpDrop);
+          EmitTextVarAddr(sym);
+          EmitI32Const(-1);
+          EmitI32Store(2, TextOfsFd);
+          EmitTextVarAddr(sym);
+          EmitI32Const(TextModeClosed);
+          EmitI32Store(2, TextOfsMode);
+        end
+        else begin
+          EmitTextVarAddr(sym);
+          if textOp = 'REWRITE' then
+            EmitI32Const(1)
+          else
+            EmitI32Const(0);
+          EmitCall(EnsureTextHelpers);
+          EmitIOResultStore;
+        end;
+        Expect(tkRParen);
+      end
+      else if (name = 'NEW') or (name = 'DISPOSE') then begin
         { new(p) / dispose(p) — p is a pointer variable, and the size comes
           from the pointer's target type rather than from an argument, so a
           caller cannot get it wrong. }
@@ -8943,7 +9231,7 @@ end;
 
   Slots 0..22 are reserved for the compiler-generated runtime helpers
   (_start, __write_int, __read_int, string ops, checked arithmetic,
-  set ops, etc.). Slots 26+ are user-defined functions. }
+  set ops, etc.). Slots 32+ are user-defined functions. }
 procedure AssembleFunctionSection;
 var i: longint;
 begin
@@ -9001,7 +9289,19 @@ begin
   SmallEmitULEB128(secFunc, TypeI32I32);
   { Slot 25: __heap_free uses type i32 -> void (always present) }
   SmallEmitULEB128(secFunc, TypeI32Void);
-  { Slots 26+: User-defined functions (skip imports) }
+  { Slot 26: __text_open uses type i32,i32 -> i32 }
+  SmallEmitULEB128(secFunc, TypeI32x2I32);
+  { Slot 27: __text_flush uses type i32 -> void }
+  SmallEmitULEB128(secFunc, TypeI32Void);
+  { Slot 28: __text_read_byte uses type i32 -> i32 }
+  SmallEmitULEB128(secFunc, TypeI32I32);
+  { Slot 29: __text_write_byte uses type i32,i32 -> void }
+  SmallEmitULEB128(secFunc, TypeI32x2Void);
+  { Slot 30: __text_write_str uses type i32,i32 -> void }
+  SmallEmitULEB128(secFunc, TypeI32x2Void);
+  { Slot 31: __text_read_line uses type i32,i32,i32 -> void }
+  SmallEmitULEB128(secFunc, TypeI32x3Void);
+  { Slots 32+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
     if funcs[i].bodyStart <> -2 then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
@@ -9367,6 +9667,372 @@ begin
   EmitHelperI32Const(addrNwritten);
   EmitHelperCall(idxFdWrite);
   EmitHelper(OpDrop);
+end;
+
+procedure BuildTextOpenHelper;
+(** Build __text_open(t: i32, forWrite: i32) -> errno into helperCode.
+
+  Opens the file whose name Assign recorded in the control block, relative to
+  the host's first preopened directory. Returns 0 on success and the WASI
+  errno otherwise, which Reset and Rewrite turn into either a trap or an
+  IOResult depending on the directive in force.
+
+  The preopened directory is assumed to be file descriptor 3. WASI does not
+  guarantee that; a guest is supposed to walk fd_prestat_get from 3 upward and
+  match the directory it wants. Every host this compiler targets grants
+  exactly one directory and it lands on 3, so the walk would be three imports
+  and a loop to arrive at the same answer. Stated here because it is an
+  assumption, not a fact.
+
+  Parameters:
+    local 0 = control block address
+    local 1 = nonzero to open for writing
+  Locals:
+    local 2 = errno from path_open
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* buffer starts empty and not at end of file *)
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(0);
+  EmitHelperI32Store(2, TextOfsLen);
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(0);
+  EmitHelperI32Store(2, TextOfsPos);
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(0);
+  EmitHelperI32Store(2, TextOfsEof);
+
+  (* path_open(3, 0, name+1, namelen, oflags, -1, -1, 0, &t^.fd) *)
+  EmitHelperI32Const(3);
+  EmitHelperI32Const(0);
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(TextOfsName + 1);
+  EmitHelper(OpI32Add);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(TextOfsName);
+
+  (* oflags: CREAT|TRUNC (1 or 8 = 9) for writing, 0 for reading *)
+  EmitHelperLocalGet(1);
+  EmitHelper(OpIf); EmitHelper(WasmI32);
+    EmitHelperI32Const(9);
+  EmitHelper(OpElse);
+    EmitHelperI32Const(0);
+  EmitHelper(OpEnd);
+
+  (* Rights and inheriting rights: every bit WASI preview 1 defines, which is
+     0 through 28, so 0x1FFFFFFF. Not -1: a host validates the field against
+     the rights it knows and rejects an unknown bit, so all-ones fails
+     outright rather than being narrowed. wasmtime reports it as an integer
+     conversion error, which does not sound like "you asked for a right that
+     does not exist" but is what it means.
+
+     The constant is emitted as a literal SLEB128 because it is the only
+     64-bit value the compiler produces and a general emitter would be five
+     lines used once. *)
+  EmitHelper(OpI64Const);
+  CodeBufEmit(helperCode, $FF); CodeBufEmit(helperCode, $FF);
+  CodeBufEmit(helperCode, $FF); CodeBufEmit(helperCode, $FF);
+  CodeBufEmit(helperCode, $01);
+  EmitHelper(OpI64Const);
+  CodeBufEmit(helperCode, $FF); CodeBufEmit(helperCode, $FF);
+  CodeBufEmit(helperCode, $FF); CodeBufEmit(helperCode, $FF);
+  CodeBufEmit(helperCode, $01);
+  EmitHelperI32Const(0);        (* fdflags *)
+  EmitHelperLocalGet(0);        (* opened fd goes straight into the block *)
+  EmitHelperCall(idxPathOpen);
+  EmitHelperLocalTee(2);
+
+  (* On failure leave the block closed so Close and Eof stay well defined. *)
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(-1);
+    EmitHelperI32Store(2, TextOfsFd);
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(TextModeClosed);
+    EmitHelperI32Store(2, TextOfsMode);
+  EmitHelper(OpElse);
+    EmitHelperLocalGet(0);
+    EmitHelperLocalGet(1);
+    EmitHelper(OpIf); EmitHelper(WasmI32);
+      EmitHelperI32Const(TextModeWrite);
+    EmitHelper(OpElse);
+      EmitHelperI32Const(TextModeRead);
+    EmitHelper(OpEnd);
+    EmitHelperI32Store(2, TextOfsMode);
+  EmitHelper(OpEnd);
+
+  EmitHelperLocalGet(2);
+end;
+
+procedure BuildTextFlushHelper;
+(** Build __text_flush(t: i32) into helperCode.
+
+  Writes the buffered bytes and empties the buffer. A no-op unless the block
+  is open for writing with something in it, so callers need not check.
+
+  Parameters:
+    local 0 = control block address
+*)
+begin
+  CodeBufInit(helperCode);
+
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    (* iovec.buf = t + TextOfsBuf; iovec.len = t^.len *)
+    EmitHelperI32Const(addrIovec);
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(TextOfsBuf);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Store(2, 0);
+    EmitHelperI32Const(addrIovec + 4);
+    EmitHelperLocalGet(0);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+    EmitHelperI32Store(2, 0);
+
+    EmitHelperLocalGet(0);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsFd);
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(1);
+    EmitHelperI32Const(addrNwritten);
+    EmitHelperCall(idxFdWrite);
+    EmitHelper(OpDrop);
+
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(0);
+    EmitHelperI32Store(2, TextOfsLen);
+  EmitHelper(OpEnd);
+end;
+
+procedure BuildTextReadByteHelper;
+(** Build __text_read_byte(t: i32) -> i32 into helperCode.
+
+  Returns the next byte, or -1 at end of file. Refills from the descriptor
+  when the buffer runs out; a refill that returns nothing sets the end-of-file
+  flag that Eof reads.
+
+  Parameters:
+    local 0 = control block address
+*)
+begin
+  CodeBufInit(helperCode);
+
+  (* if pos >= len then refill *)
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsPos);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+  EmitHelper(OpI32GeU);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelperI32Const(addrIovec);
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(TextOfsBuf);
+    EmitHelper(OpI32Add);
+    EmitHelperI32Store(2, 0);
+    EmitHelperI32Const(addrIovec + 4);
+    EmitHelperI32Const(TextBufSize);
+    EmitHelperI32Store(2, 0);
+
+    EmitHelperLocalGet(0);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsFd);
+    EmitHelperI32Const(addrIovec);
+    EmitHelperI32Const(1);
+    EmitHelperI32Const(addrNread);
+    EmitHelperCall(idxFdRead);
+    EmitHelper(OpDrop);
+
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(addrNread);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelperI32Store(2, TextOfsLen);
+    EmitHelperLocalGet(0);
+    EmitHelperI32Const(0);
+    EmitHelperI32Store(2, TextOfsPos);
+
+    (* nothing read means end of file *)
+    EmitHelperI32Const(addrNread);
+    EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(0);
+    EmitHelper(OpI32Eqz);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperLocalGet(0);
+      EmitHelperI32Const(1);
+      EmitHelperI32Store(2, TextOfsEof);
+      EmitHelperI32Const(-1);
+      EmitHelper(OpReturn);
+    EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* return buf[pos] and advance *)
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(TextOfsBuf);
+  EmitHelper(OpI32Add);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsPos);
+  EmitHelper(OpI32Add);
+  EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+  EmitHelperLocalGet(0);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsPos);
+  EmitHelperI32Const(1);
+  EmitHelper(OpI32Add);
+  EmitHelperI32Store(2, TextOfsPos);
+end;
+
+procedure BuildTextWriteByteHelper;
+(** Build __text_write_byte(t: i32, b: i32) into helperCode.
+
+  Appends to the buffer, flushing first when it is full.
+
+  Parameters:
+    local 0 = control block address
+    local 1 = byte value
+*)
+begin
+  CodeBufInit(helperCode);
+
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+  EmitHelperI32Const(TextBufSize);
+  EmitHelper(OpI32GeU);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelperLocalGet(0);
+    EmitHelperCall(numImports + 27);     (* __text_flush *)
+  EmitHelper(OpEnd);
+
+  EmitHelperLocalGet(0);
+  EmitHelperI32Const(TextOfsBuf);
+  EmitHelper(OpI32Add);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+  EmitHelper(OpI32Add);
+  EmitHelperLocalGet(1);
+  EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+
+  EmitHelperLocalGet(0);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+  EmitHelperI32Const(1);
+  EmitHelper(OpI32Add);
+  EmitHelperI32Store(2, TextOfsLen);
+end;
+
+procedure BuildTextWriteStrHelper;
+(** Build __text_write_str(t: i32, s: i32) into helperCode.
+
+  Appends a Pascal short string's characters to the file. Byte at a time
+  through the buffer rather than one bulk copy, because the string may be
+  longer than the space left and splitting it here would need a second copy
+  path for no gain: the buffer flushes itself when full.
+
+  Parameters:
+    local 0 = control block address
+    local 1 = string address (length byte first)
+  Locals:
+    local 2 = index, 1..length
+*)
+begin
+  CodeBufInit(helperCode);
+
+  EmitHelperI32Const(1);
+  EmitHelperLocalSet(2);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);
+  EmitHelper(OpLoop);  EmitHelper(WasmVoid);
+    EmitHelperLocalGet(2);
+    EmitHelperLocalGet(1);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelper(OpI32GtU);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    EmitHelperLocalGet(0);
+    EmitHelperLocalGet(1);
+    EmitHelperLocalGet(2);
+    EmitHelper(OpI32Add);
+    EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+    EmitHelperCall(numImports + 29);   (* __text_write_byte *)
+
+    EmitHelperLocalGet(2);
+    EmitHelperI32Const(1);
+    EmitHelper(OpI32Add);
+    EmitHelperLocalSet(2);
+    EmitHelper(OpBr); EmitHelperULEB128(0);
+  EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+end;
+
+procedure BuildTextReadLineHelper;
+(** Build __text_read_line(t: i32, dst: i32, max: i32) into helperCode.
+
+  Reads up to the next newline into a Pascal short string. The newline is
+  consumed and not stored. Characters past `max` are read and discarded, so a
+  long line advances the file rather than being seen again as a second line.
+  A carriage return immediately before the newline is dropped, so a file
+  written on Windows reads the same as one written anywhere else.
+
+  Parameters:
+    local 0 = control block address
+    local 1 = destination string address
+    local 2 = maximum length
+  Locals:
+    local 3 = length so far
+    local 4 = the byte just read
+*)
+begin
+  CodeBufInit(helperCode);
+
+  EmitHelperI32Const(0);
+  EmitHelperLocalSet(3);
+
+  EmitHelper(OpBlock); EmitHelper(WasmVoid);
+  EmitHelper(OpLoop);  EmitHelper(WasmVoid);
+    EmitHelperLocalGet(0);
+    EmitHelperCall(numImports + 28);   (* __text_read_byte *)
+    EmitHelperLocalTee(4);
+
+    (* end of file ends the line *)
+    EmitHelperI32Const(-1);
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* newline ends the line *)
+    EmitHelperLocalGet(4);
+    EmitHelperI32Const(10);
+    EmitHelper(OpI32Eq);
+    EmitHelper(OpBrIf); EmitHelperULEB128(1);
+
+    (* store it when there is room and it is not a carriage return *)
+    EmitHelperLocalGet(4);
+    EmitHelperI32Const(13);
+    EmitHelper(OpI32Ne);
+    EmitHelperLocalGet(3);
+    EmitHelperLocalGet(2);
+    EmitHelper(OpI32LtU);
+    EmitHelper(OpI32And);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperLocalGet(1);
+      EmitHelperLocalGet(3);
+      EmitHelper(OpI32Add);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Add);
+      EmitHelperLocalGet(4);
+      EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
+      EmitHelperLocalGet(3);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Add);
+      EmitHelperLocalSet(3);
+    EmitHelper(OpEnd);
+
+    EmitHelper(OpBr); EmitHelperULEB128(0);
+  EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* write the length byte *)
+  EmitHelperLocalGet(1);
+  EmitHelperLocalGet(3);
+  EmitHelper(OpI32Store8); EmitHelperULEB128(0); EmitHelperULEB128(0);
 end;
 
 procedure BuildHeapAllocHelper;
@@ -10982,7 +11648,7 @@ procedure AssembleCodeSectionFixed;
   slot 3 = __str_assign, slot 4 = __write_str, slot 5 = __str_compare,
   slot 6 = __read_str, slot 7 = __str_append, slot 8 = __str_copy,
   slot 9 = __str_pos, slot 10 = __str_delete, slot 11 = __str_insert,
-  slot 21 = __int_to_str, slot 22 = __write_char, slot 23 = __nil_check, slot 24 = __heap_alloc, slot 25 = __heap_free, slots 26+ = user funcs. }
+  slot 21 = __int_to_str, slot 22 = __write_char, slot 23 = __nil_check, slot 24 = __heap_alloc, slot 25 = __heap_free, slots 26-31 = text file helpers, slots 32+ = user funcs. }
 var
   bodyLen: longint;
   i, j: longint;
@@ -11524,7 +12190,98 @@ begin
     CodeBufEmit(secCode, OpEnd);
   end;
 
-  { Slots 26+: User-defined function bodies (skip imports) }
+  { Slots 26-29: text file helpers — always present (empty stubs if unused) }
+  if needsText then begin
+    BuildTextOpenHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 1);       { 1 local: errno }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  if needsText then begin
+    BuildTextFlushHelper;
+    bodyLen := 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 0);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  if needsText then begin
+    BuildTextReadByteHelper;
+    bodyLen := 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 0);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  if needsText then begin
+    BuildTextWriteByteHelper;
+    bodyLen := 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 0);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  if needsText then begin
+    BuildTextWriteStrHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 1);       { 1 local: index }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  if needsText then begin
+    BuildTextReadLineHelper;
+    bodyLen := 1 + 1 + 1 + helperCode.len + 1;
+    EmitULEB128(secCode, bodyLen);
+    CodeBufEmit(secCode, 1);
+    CodeBufEmit(secCode, 2);       { 2 locals: length, byte }
+    CodeBufEmit(secCode, WasmI32);
+    CopyBufToCode(helperCode);
+    CodeBufEmit(secCode, OpEnd);
+  end else begin
+    EmitULEB128(secCode, 3);
+    CodeBufEmit(secCode, 0);
+    CodeBufEmit(secCode, OpUnreachable);
+    CodeBufEmit(secCode, OpEnd);
+  end;
+
+  { Slots 32+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then continue; { skip imports }
     if funcs[i].nlocals > 0 then begin
@@ -11763,7 +12520,7 @@ begin
           writeln(stderr, '  ;; __heap_free')
         else begin
           { User function }
-          i := val - numImports - 26;
+          i := val - numImports - 32;
           if (i >= 0) and (i < numFuncs) then
             writeln(stderr, '  ;; ', funcs[i].name)
           else
@@ -11940,7 +12697,7 @@ begin
   writeln(stderr);
 
   { Helper slots — list active ones }
-  for i := 1 to 25 do begin
+  for i := 1 to 31 do begin
     case i of
       1: if needsWriteInt then slotName := '__write_int' else continue;
       2: if needsReadInt then slotName := '__read_int' else continue;
@@ -11967,6 +12724,12 @@ begin
       23: if needsNilCheck then slotName := '__nil_check' else continue;
       24: if needsHeap then slotName := '__heap_alloc' else continue;
       25: if needsHeap then slotName := '__heap_free' else continue;
+      26: if needsText then slotName := '__text_open' else continue;
+      27: if needsText then slotName := '__text_flush' else continue;
+      28: if needsText then slotName := '__text_read_byte' else continue;
+      29: if needsText then slotName := '__text_write_byte' else continue;
+      30: if needsText then slotName := '__text_write_str' else continue;
+      31: if needsText then slotName := '__text_read_line' else continue;
     end;
     writeln(stderr, 'func[', numImports + i, '] ', slotName, '  (helper, code in code section)');
   end;
@@ -11975,11 +12738,11 @@ begin
   { User-defined functions }
   for i := 0 to numFuncs - 1 do begin
     if funcs[i].bodyStart = -2 then begin
-      writeln(stderr, 'func[', numImports + 26 + i, '] ', funcs[i].name,
+      writeln(stderr, 'func[', numImports + 32 + i, '] ', funcs[i].name,
               '  (import)');
       continue;
     end;
-    writeln(stderr, 'func[', numImports + 26 + i, '] ', funcs[i].name,
+    writeln(stderr, 'func[', numImports + 32 + i, '] ', funcs[i].name,
             '  params=', funcs[i].nparams,
             '  locals=', funcs[i].nlocals,
             '  bytes=', funcs[i].bodyLen);
@@ -12129,7 +12892,7 @@ begin
   numStructCopies := 0;
   numVarInits := 0;
   numImports := 0;
-  numDefinedFuncs := 26; { slots 0-25: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str, __write_char, __nil_check, __heap_alloc, __heap_free }
+  numDefinedFuncs := 32; { slots 0-31: _start, __write_int, __read_int, __str_assign, __write_str, __str_compare, __read_str, __str_append, __str_copy, __str_pos, __str_delete, __str_insert, __range_check, __checked_add, __checked_sub, __checked_mul, __set_union, __set_intersect, __set_diff, __set_eq, __set_subset, __int_to_str, __write_char, __nil_check, __heap_alloc, __heap_free, __text_open, __text_flush, __text_read_byte, __text_write_byte, __text_write_str, __text_read_line }
   numFuncs := 0;
   numSyms := 0;
   scopeDepth := 0;
@@ -12181,6 +12944,9 @@ begin
   needsWriteChar := false;
   needsNilCheck := false;
   needsHeap := false;
+  needsText := false;
+  addrIOResult := -1;
+  optIOChecks := true;
   addrHeapFree := -1;
   breakDepth := -1;
   continueDepth := -1;
