@@ -52,6 +52,22 @@ pub const ERRNO_SUCCESS: i32 = 0;
 pub const ERRNO_BADF: i32 = 8;
 /// `EFAULT` — a pointer or length from the guest is outside linear memory.
 pub const ERRNO_FAULT: i32 = 21;
+/// `EINVAL` — the guest passed something malformed, such as a non-UTF-8 path.
+pub const ERRNO_INVAL: i32 = 28;
+/// `ENOENT` — no such file.
+pub const ERRNO_NOENT: i32 = 44;
+/// `ENOTCAPABLE` — the host has not granted this capability.
+pub const ERRNO_NOTCAPABLE: i32 = 76;
+
+/// Map a host I/O error onto a WASI errno. Only the cases a guest can act on
+/// are distinguished; everything else is reported as EIO.
+fn io_errno(e: &std::io::Error) -> i32 {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => ERRNO_NOENT,
+        std::io::ErrorKind::PermissionDenied => 2,
+        _ => 29,
+    }
+}
 
 /// WASI context holding I/O buffers and the argument vector.
 pub struct WasiContext {
@@ -66,6 +82,12 @@ pub struct WasiContext {
     /// limiter hook, which is why it lives on the context rather than beside
     /// the engine.
     pub limits: wasmi::StoreLimits,
+    /// Directory the guest may open files in. `None`, the default, refuses
+    /// every open: the compiler snapshot declares path_open so it can resolve
+    /// includes, and declaring is not the same as being allowed.
+    pub preopen_dir: Option<std::path::PathBuf>,
+    open_files: std::collections::HashMap<i32, std::fs::File>,
+    next_fd: i32,
 }
 
 impl WasiContext {
@@ -77,6 +99,9 @@ impl WasiContext {
             use_real_io: false,
             args: Vec::new(),
             limits: wasmi::StoreLimitsBuilder::new().build(),
+            preopen_dir: None,
+            open_files: std::collections::HashMap::new(),
+            next_fd: 4,
         }
     }
 
@@ -88,6 +113,9 @@ impl WasiContext {
             use_real_io: true,
             args: Vec::new(),
             limits: wasmi::StoreLimitsBuilder::new().build(),
+            preopen_dir: None,
+            open_files: std::collections::HashMap::new(),
+            next_fd: 4,
         }
     }
 
@@ -116,10 +144,10 @@ pub fn add_wasi_imports(
 ) -> Result<(), Box<dyn std::error::Error>> {
     linker.func_wrap("wasi_snapshot_preview1", "fd_write",
         |mut caller: Caller<'_, WasiContext>, fd: i32, iovs: i32, iovs_len: i32, nwritten_ptr: i32| -> i32 {
-            // Only stdout and stderr exist. Anything else is reported rather
-            // than accepted and dropped, which would look to the guest like a
-            // successful write to a file that was never opened.
-            if fd != 1 && fd != 2 {
+            // stdout, stderr, or a file this host opened. Anything else is
+            // reported rather than accepted and dropped, which would look to
+            // the guest like a successful write to a file it never opened.
+            if fd != 1 && fd != 2 && !caller.data().open_files.contains_key(&fd) {
                 return ERRNO_BADF;
             }
 
@@ -147,7 +175,12 @@ pub fn add_wasi_imports(
                 };
 
                 let ctx = caller.data_mut();
-                if ctx.use_real_io {
+                if let Some(file) = ctx.open_files.get_mut(&fd) {
+                    use std::io::Write;
+                    if file.write_all(&chunk).is_err() {
+                        return 29;
+                    }
+                } else if ctx.use_real_io {
                     use std::io::Write;
                     if fd == 1 {
                         let _ = std::io::stdout().write_all(&chunk);
@@ -171,10 +204,10 @@ pub fn add_wasi_imports(
 
     linker.func_wrap("wasi_snapshot_preview1", "fd_read",
         |mut caller: Caller<'_, WasiContext>, fd: i32, iovs: i32, iovs_len: i32, nread_ptr: i32| -> i32 {
-            // Only stdin exists. Previously any other fd fell through the loop
-            // and reported a successful read of zero bytes, which a guest
-            // reads as end of file rather than as a bad descriptor.
-            if fd != 0 {
+            // stdin, or a file this host opened. Previously any other fd fell
+            // through the loop and reported a successful read of zero bytes,
+            // which a guest reads as end of file rather than as an error.
+            if fd != 0 && !caller.data().open_files.contains_key(&fd) {
                 return ERRNO_BADF;
             }
 
@@ -193,7 +226,10 @@ pub fn add_wasi_imports(
                 };
 
                 let mut tmp = vec![0u8; buf_len as usize];
-                let n = if caller.data().use_real_io {
+                let n = if let Some(file) = caller.data_mut().open_files.get_mut(&fd) {
+                    use std::io::Read;
+                    file.read(&mut tmp).unwrap_or(0)
+                } else if caller.data().use_real_io {
                     use std::io::Read;
                     std::io::stdin().read(&mut tmp).unwrap_or(0)
                 } else {
@@ -216,6 +252,86 @@ pub fn add_wasi_imports(
                 return ERRNO_FAULT;
             }
             ERRNO_SUCCESS
+        }
+    )?;
+
+    // The compiler snapshot imports path_open and fd_close so it can resolve
+    // {$I} includes itself. A module declares those whether or not it calls
+    // them, so they must be linked or nothing instantiates.
+    //
+    // Both refuse by default. A host that wants a guest to reach the
+    // filesystem opts in by setting WasiContext::preopen_dir, which is the
+    // same shape as the {$FILES ON} directive on the guest side: capability is
+    // granted, never assumed.
+    linker.func_wrap("wasi_snapshot_preview1", "path_open",
+        |mut caller: Caller<'_, WasiContext>,
+         _dirfd: i32, _dirflags: i32, path_ptr: i32, path_len: i32,
+         oflags: i32, _rights: i64, _inheriting: i64, _fdflags: i32,
+         opened_fd_ptr: i32| -> i32 {
+            let Some(dir) = caller.data().preopen_dir.clone() else {
+                return ERRNO_NOTCAPABLE;
+            };
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return ERRNO_FAULT,
+            };
+
+            let name = {
+                let data = memory.data(&caller);
+                let start = path_ptr as usize;
+                let end = start + path_len as usize;
+                if end > data.len() {
+                    return ERRNO_FAULT;
+                }
+                match std::str::from_utf8(&data[start..end]) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => return ERRNO_INVAL,
+                }
+            };
+
+            // The guest's path is confined to the granted directory, for the
+            // same reason expand_includes confines its own: joining an
+            // absolute path onto a base discards the base.
+            let requested = std::path::Path::new(&name);
+            for component in requested.components() {
+                match component {
+                    std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+                    _ => return ERRNO_NOTCAPABLE,
+                }
+            }
+
+            // oflags bit 0 is CREAT, bit 3 is TRUNC; the guest sets both to
+            // rewrite and neither to read.
+            let for_write = oflags & 0b1001 != 0;
+            let path = dir.join(requested);
+            let opened = if for_write {
+                std::fs::File::create(&path)
+            } else {
+                std::fs::File::open(&path)
+            };
+            let file = match opened {
+                Ok(f) => f,
+                Err(e) => return io_errno(&e),
+            };
+
+            let ctx = caller.data_mut();
+            let fd = ctx.next_fd;
+            ctx.next_fd += 1;
+            ctx.open_files.insert(fd, file);
+
+            if !write_u32(&mut caller, &memory, opened_fd_ptr as u32, fd as u32) {
+                return ERRNO_FAULT;
+            }
+            ERRNO_SUCCESS
+        }
+    )?;
+
+    linker.func_wrap("wasi_snapshot_preview1", "fd_close",
+        |mut caller: Caller<'_, WasiContext>, fd: i32| -> i32 {
+            match caller.data_mut().open_files.remove(&fd) {
+                Some(_) => ERRNO_SUCCESS,
+                None => ERRNO_BADF,
+            }
         }
     )?;
 

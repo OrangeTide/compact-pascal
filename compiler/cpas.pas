@@ -2,6 +2,7 @@
 {$IFNDEF FPC}
 {$MEMORY 192}
 {$MAXMEMORY 256}
+{$FILES ON}
 {$ENDIF}
 program cpas;
 {** Compact Pascal compiler — targets WASM 1.0 binary format.
@@ -227,6 +228,10 @@ const
   MaxTypes    = 256;
   MaxFields   = 512;
   MaxPendingPtr = 32;   { unresolved forward pointer references per type block }
+  { Include nesting. A limit rather than a consequence of memory: it is in
+    the language reference and a program can rely on it. Each level costs a
+    text control block. }
+  MaxIncludeDepth = 8;
   { text file control block: fd, mode, buffer length, buffer position, eof
     flag, the assigned name as a short string, then the buffer itself. }
   TextOfsFd     = 0;
@@ -396,6 +401,12 @@ var
   tokInt: longint;
   tokStr: string;
   srcLine, srcCol: longint;
+  { Include stack. Depth 0 means the main source on standard input. }
+  incFile: array[0..MaxIncludeDepth-1] of text;
+  incName: array[0..MaxIncludeDepth-1] of string[127];
+  incLine: array[0..MaxIncludeDepth-1] of longint;
+  incCol: array[0..MaxIncludeDepth-1] of longint;
+  incDepth: longint;
   atEof: boolean;
 
   { Symbol table }
@@ -472,6 +483,9 @@ var
   idxArgsGet: longint;     { args_get import index }
   idxPathOpen: longint;    { path_open import index, -1 until FILES is on }
   optFileIO: boolean;      { whether filesystem access was requested }
+  optIncludes: boolean;    { -I: the compiler resolves includes itself }
+  addrTextRef: longint;    { data word holding an indexed text file address }
+  textRefIndexed: boolean; { current text reference came from an array }
   emittedAnyCode: boolean; { true once any function body has been emitted }
   idxFdClose: longint;     { fd_close import index }
   idxIntToStr: longint;    { int-to-string helper, -1 if not emitted }
@@ -833,12 +847,43 @@ var
   scanner can peek one character ahead. Tracks srcLine / srcCol for
   diagnostics. Two variants: the FPC build reads from the input file
   handle, the TP/self-hosted build uses default stdin via WASI. }
+procedure PopInclude;
+{** Close the current include and resume the file that included it.
+
+  Separate from ReadCh so the recursion there stays one level: an include
+  whose last line is itself an include would otherwise need to unwind several
+  at once. }
+begin
+  incDepth := incDepth - 1;
+  close(incFile[incDepth]);
+  srcLine := incLine[incDepth];
+  srcCol := incCol[incDepth];
+end;
+
 {$IFDEF FPC}
 procedure ReadCh;
 begin
   if hasPushback then begin
     ch := pushbackCh;
     hasPushback := false;
+    exit;
+  end;
+  { Written as a loop with an explicit break rather than a compound
+      condition: `and` is not short-circuit here, so testing eof against
+      incFile[incDepth - 1] alongside incDepth > 0 would index element -1
+      whenever no include was open. }
+  while incDepth > 0 do begin
+    if not eof(incFile[incDepth - 1]) then
+      break;
+    PopInclude;
+  end;
+  if incDepth > 0 then begin
+    read(incFile[incDepth - 1], ch);
+    if ch = #10 then begin
+      srcLine := srcLine + 1;
+      srcCol := 0;
+    end else
+      srcCol := srcCol + 1;
     exit;
   end;
   if eof(input) then begin
@@ -860,6 +905,24 @@ begin
   if hasPushback then begin
     ch := pushbackCh;
     hasPushback := false;
+    exit;
+  end;
+  { Written as a loop with an explicit break rather than a compound
+      condition: `and` is not short-circuit here, so testing eof against
+      incFile[incDepth - 1] alongside incDepth > 0 would index element -1
+      whenever no include was open. }
+  while incDepth > 0 do begin
+    if not eof(incFile[incDepth - 1]) then
+      break;
+    PopInclude;
+  end;
+  if incDepth > 0 then begin
+    read(incFile[incDepth - 1], ch);
+    if ch = #10 then begin
+      srcLine := srcLine + 1;
+      srcCol := 0;
+    end else
+      srcCol := srcCol + 1;
     exit;
   end;
   read(ch);
@@ -1069,6 +1132,8 @@ var
   switchOn: boolean;
   i: longint;
   symName: string[63];
+  incPath: string;
+  incIdx: longint;
   condTrue: boolean;
   foundElse: boolean;
 
@@ -1236,9 +1301,42 @@ begin
         decides which one was meant. }
       optIOChecks := ParseDirectiveSwitch;
     end else if (directive = 'I') or (directive = 'INCLUDE') then begin
-      { Include files are resolved by host before compilation }
-      while (not atEof) and (ch <> '}') do
-        ReadCh;
+      ParseDirectiveString(incPath);
+      { Whether the compiler resolves includes itself is a property of the
+        compiler, requested with -I, and not of the program being compiled.
+        Conflating it with the FILES directive would mean a program that includes a
+        file but does no I/O of its own had to declare a capability it never
+        uses, and would import two WASI functions it never calls.
+
+        Off by default because an embedder may already have expanded the
+        includes before handing the source over, as the Rust crate's
+        expand_includes does. Opening them a second time would be wrong. }
+      if not optIncludes then begin
+        while (not atEof) and (ch <> '}') do
+          ReadCh;
+      end else begin
+        if incDepth >= MaxIncludeDepth then
+          Error('include nesting too deep (max 8)');
+        for incIdx := 0 to incDepth - 1 do
+          if incName[incIdx] = incPath then
+            Error('include cycle: ' + incPath + ' includes itself');
+        { Consume the rest of the directive from the file we are leaving,
+          before the source switches. }
+        while (not atEof) and (ch <> '}') do
+          ReadCh;
+        incName[incDepth] := incPath;
+        incLine[incDepth] := srcLine;
+        incCol[incDepth] := srcCol;
+        assign(incFile[incDepth], incPath);
+        {$I-}
+        reset(incFile[incDepth]);
+        {$I+}
+        if IOResult <> 0 then
+          Error('cannot open include file: ' + incPath);
+        incDepth := incDepth + 1;
+        srcLine := 1;
+        srcCol := 0;
+      end;
     end else if directive = 'ALIGN' then begin
       intVal := ParseDirectiveInt;
       if (intVal <> 1) and (intVal <> 2) and (intVal <> 4) and (intVal <> 8) then
@@ -1454,8 +1552,8 @@ begin
   else if s = 'SHR' then LookupKeyword := tkShr;
 end;
 
-{ Pending token mechanism for when scanner reads too far }
 var
+{ Pending token mechanism for when scanner reads too far }
   pendingTok: boolean;
   pendingKind: longint;
   pendingInt: longint;
@@ -3512,16 +3610,90 @@ begin
   end;
 end;
 
-procedure EmitTextVarAddr(sym: longint);
-{** Push the address of a text file's control block. }
+procedure EnsureTextRefSlot;
+{** Allocate the data word that holds the current text file's address. }
+var j: longint;
 begin
-  if syms[sym].isVarParam then
+  if addrTextRef < 0 then begin
+    addrTextRef := AllocDataAligned(4, 4);
+    for j := 1 to 4 do DataBufEmit(secData, 0);
+  end;
+end;
+
+procedure EmitTextVarAddr(sym: longint);
+{** Push the address of a text file's control block.
+
+  `sym` is ignored when the file came from an array element: the address was
+  worked out once at the start of the statement and parked in a data word,
+  because an operation like Close needs it four times and re-evaluating an
+  index expression four times would be both wasteful and wrong. }
+begin
+  if textRefIndexed then begin
+    EnsureTextRefSlot;
+    EmitI32Const(addrTextRef);
+    EmitI32Load(2, 0);
+  end
+  else if syms[sym].isVarParam then
     EmitVarParamPtr(sym)
   else begin
     EmitFramePtr(syms[sym].level);
     EmitI32Const(syms[sym].offset);
     EmitOp(OpI32Add);
   end;
+end;
+
+function ParseTextRef: longint;
+{** Parse a designator naming a text file and make its address available to
+  EmitTextVarAddr. Accepts a plain variable or one element of an array of
+  text; the compiler's own include stack is the second form.
+
+  Returns the symbol index. Sets textRefIndexed, which the caller must clear
+  when it is done with the reference. }
+var sym, idxTyp: longint;
+begin
+  textRefIndexed := false;
+  if tokKind <> tkIdent then
+    Error('a text file variable is required here');
+  sym := LookupSym(tokStr);
+  if sym < 0 then
+    Error('undeclared identifier: ' + tokStr);
+  if syms[sym].kind <> skVar then
+    Error('a text file variable is required here');
+  NextToken;
+
+  if tokKind = tkLBrack then begin
+    idxTyp := syms[sym].typeIdx;
+    if (syms[sym].typ <> tyArray) or (idxTyp < 0)
+       or (types[idxTyp].elemType <> tyText) then
+      Error('a text file variable is required here');
+    NextToken;
+    EnsureTextRefSlot;
+    EmitI32Const(addrTextRef);
+    if syms[sym].isVarParam then
+      EmitVarParamPtr(sym)
+    else begin
+      EmitFramePtr(syms[sym].level);
+      EmitI32Const(syms[sym].offset);
+      EmitOp(OpI32Add);
+    end;
+    ParseExpression(PrecNone);
+    if types[idxTyp].arrLo <> 0 then begin
+      EmitI32Const(types[idxTyp].arrLo);
+      EmitOp(OpI32Sub);
+    end;
+    EmitI32Const(types[idxTyp].elemSize);
+    EmitOp(OpI32Mul);
+    EmitOp(OpI32Add);
+    EmitI32Store(2, 0);
+    Expect(tkRBrack);
+    textRefIndexed := true;
+  end
+  else if syms[sym].typ <> tyText then
+    Error('a text file variable is required here')
+  else if syms[sym].offset < 0 then
+    Error('a text file cannot be a value parameter');
+
+  ParseTextRef := sym;
 end;
 
 procedure EmitIOResultStore;
@@ -4521,12 +4693,8 @@ begin
         if tokKind = tkLParen then begin
           { eof(f) — true once a read has run off the end of the file }
           NextToken;
-          if tokKind <> tkIdent then
-            Error('a text file variable is required here');
-          textEofSym := LookupSym(tokStr);
-          if (textEofSym < 0) or (syms[textEofSym].kind <> skVar)
-             or (syms[textEofSym].typ <> tyText) then
-            Error('a text file variable is required here');
+          EnsureTextHelpers;
+          textEofSym := ParseTextRef;
           { Eof looks ahead rather than reporting whether a read has already
             failed. Reading the next byte and putting it back costs one
             buffered comparison and makes `while not eof(f)` stop where a
@@ -4551,8 +4719,8 @@ begin
             EmitOp(OpI32Sub);
             EmitI32Store(2, TextOfsPos);
           EmitOp(OpEnd);
-          NextToken;
           Expect(tkRParen);
+          textRefIndexed := false;
         end else begin
           { eof — returns true when last fd_read returned 0 bytes }
           EnsureReadBuffers;
@@ -5738,8 +5906,10 @@ begin
     if tokKind = tkIdent then begin
       textSym := LookupSym(tokStr);
       if (textSym >= 0) and (syms[textSym].kind = skVar)
-         and (syms[textSym].typ = tyText) then begin
-        NextToken;
+         and ((syms[textSym].typ = tyText)
+              or ((syms[textSym].typ = tyArray) and (syms[textSym].typeIdx >= 0)
+                  and (types[syms[textSym].typeIdx].elemType = tyText))) then begin
+        textSym := ParseTextRef;
         while tokKind = tkComma do begin
           NextToken;
           if tokKind = tkString then begin
@@ -5782,6 +5952,7 @@ begin
           EmitI32Const(10);
           EmitCall(EnsureTextHelpers + 3);
         end;
+        textRefIndexed := false;
         exit;
       end;
     end;
@@ -5954,32 +6125,67 @@ begin
     NextToken;
     if tokKind = tkIdent then begin
       sym := LookupSym(tokStr);
-      if (sym >= 0) and (syms[sym].kind = skVar) and (syms[sym].typ = tyText) then begin
+      if (sym >= 0) and (syms[sym].kind = skVar)
+         and ((syms[sym].typ = tyText)
+              or ((syms[sym].typ = tyArray) and (syms[sym].typeIdx >= 0)
+                  and (types[syms[sym].typeIdx].elemType = tyText))) then begin
         EnsureTextHelpers;
-        readTextSym := sym;
-        NextToken;
+        readTextSym := ParseTextRef;
         while tokKind = tkComma do begin
           NextToken;
           if tokKind <> tkIdent then
-            Error('readln from a file requires a string variable');
+            Error('read from a file requires a string or char variable');
           sym := LookupSym(tokStr);
           if sym < 0 then
             Error('undeclared identifier: ' + tokStr);
-          if (syms[sym].kind <> skVar) or (syms[sym].typ <> tyString) then
-            Error('readln from a file requires a string variable');
-          EmitTextVarAddr(readTextSym);
-          if syms[sym].isVarParam then
-            EmitVarParamPtr(sym)
-          else begin
-            EmitFramePtr(syms[sym].level);
-            EmitI32Const(syms[sym].offset);
-            EmitOp(OpI32Add);
-          end;
-          EmitI32Const(syms[sym].strMax);
-          EmitCall(EnsureTextHelpers + 5);   { __text_read_line }
+          if (syms[sym].kind <> skVar) then
+            Error('read from a file requires a string or char variable');
+          if syms[sym].typ = tyChar then begin
+            { read(f, c) takes one character, or chr(0) at end of file. A
+              scanner wants exactly this, and Eof is the way to tell the two
+              apart. }
+            if withNewline then
+              Error('readln cannot read a single character; use read');
+            if syms[sym].isVarParam then
+              EmitVarParamPtr(sym)
+            else begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            EmitTextVarAddr(readTextSym);
+            EmitCall(EnsureTextHelpers + 2);   { __text_read_byte }
+            curFuncNeedsCaseTemp := true;
+            EmitLocalTee(curCaseTempIdx);
+            EmitI32Const(-1);
+            EmitOp(OpI32Eq);
+            EmitOp(OpIf); EmitOp(WasmI32);
+              EmitI32Const(0);
+            EmitOp(OpElse);
+              EmitLocalGet(curCaseTempIdx);
+            EmitOp(OpEnd);
+            EmitI32Store8(0);
+          end
+          else if syms[sym].typ = tyString then begin
+            if not withNewline then
+              Error('read from a file into a string requires readln');
+            EmitTextVarAddr(readTextSym);
+            if syms[sym].isVarParam then
+              EmitVarParamPtr(sym)
+            else begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+            EmitI32Const(syms[sym].strMax);
+            EmitCall(EnsureTextHelpers + 5);   { __text_read_line }
+          end
+          else
+            Error('read from a file requires a string or char variable');
           NextToken;
         end;
         Expect(tkRParen);
+        textRefIndexed := false;
         exit;
       end;
     end;
@@ -6406,12 +6612,6 @@ begin
       types[pendingPtrType[i]].elemSize := 4;
   end;
   numPendingPtr := 0;
-  optFileIO := false;
-  emittedAnyCode := false;
-  idxPathOpen := -1;
-  idxFdClose := -1;
-  stmtUsedResultBuf := false;
-  stmtArenaBytes := 0;
 end;
 
 procedure CheckPointerAssign(dTyp: longint);
@@ -6576,16 +6776,7 @@ begin
         textOp := name;
         NextToken;
         Expect(tkLParen);
-        if tokKind <> tkIdent then
-          Error('a text file variable is required here');
-        sym := LookupSym(tokStr);
-        if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
-        if (syms[sym].kind <> skVar) or (syms[sym].typ <> tyText) then
-          Error('a text file variable is required here');
-        if syms[sym].offset < 0 then
-          Error('a text file cannot be a value parameter');
-        NextToken;
+        sym := ParseTextRef;
 
         if textOp = 'ASSIGN' then begin
           { Record the name. Reset and Rewrite read it from the block, so a
@@ -6635,6 +6826,7 @@ begin
           EmitIOResultStore;
         end;
         Expect(tkRParen);
+        textRefIndexed := false;
       end
       else if (name = 'NEW') or (name = 'DISPOSE') then begin
         { new(p) / dispose(p) — p is a pointer variable, and the size comes
@@ -12903,7 +13095,11 @@ begin
   numWasmTypes := 0;
   numTypes := 0;
   numPendingPtr := 0;
+  incDepth := 0;
   optFileIO := false;
+  optIncludes := false;
+  addrTextRef := -1;
+  textRefIndexed := false;
   emittedAnyCode := false;
   idxPathOpen := -1;
   idxFdClose := -1;
@@ -13030,6 +13226,8 @@ begin
       skipArg := false
     else if ParamStr(i) = '-dump' then
       optDump := true
+    else if ParamStr(i) = '-I' then
+      optIncludes := true
     else if ParamStr(i) = '-v' then
       optVerbose := true
     else if ParamStr(i) = '-debug' then

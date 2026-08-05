@@ -338,3 +338,14 @@ fn include_paths_stay_inside_the_base_directory() {
         "an absolute path was resolved instead of refused"
     );
 }
+
+#[test]
+fn the_snapshot_declares_file_imports_but_cannot_use_them_by_default() {
+    // The compiler snapshot imports path_open so it can resolve {$I} itself.
+    // Declaring is not being allowed: with no preopen_dir the host refuses
+    // every open, so an embedder who never asks for filesystem access does
+    // not get it by accident.
+    let src = "program T;\n{$I 'anything.inc'}\nbegin end.\n";
+    // Without -I the compiler skips the directive entirely, so this compiles.
+    assert!(Compiler::new().compile(src).is_ok());
+}
