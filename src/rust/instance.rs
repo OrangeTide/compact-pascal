@@ -80,6 +80,11 @@ pub struct Limits {
     /// it. A Pascal program's `{$MAXMEMORY}` is its own ceiling; this one is
     /// the host's, and the lower of the two wins.
     pub memory_bytes: Option<usize>,
+    /// Directory the program may open files in. `None`, the default, refuses
+    /// every open, so a program compiled with `{$FILES ON}` runs but finds it
+    /// has nothing to open. Paths are confined to this directory: `..`, an
+    /// absolute path, and a drive prefix are all refused.
+    pub preopen_dir: Option<std::path::PathBuf>,
 }
 
 impl Limits {
@@ -168,6 +173,7 @@ impl InstanceBuilder {
     pub fn build(self, wasm: &[u8]) -> Result<Instance, RuntimeError> {
         let mut ctx = WasiContext::with_real_io();
         ctx.limits = self.limits.store_limits();
+        ctx.preopen_dir = self.limits.preopen_dir.clone();
         let mut store = wasmi::Store::new(&self.engine, ctx);
         store.limiter(|ctx| &mut ctx.limits);
         if let Some(fuel) = self.limits.fuel {

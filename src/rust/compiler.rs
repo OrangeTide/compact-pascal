@@ -112,6 +112,11 @@ pub struct Options {
     pub defines: Vec<String>,
     /// Emit `Info:` lines describing what the compiler decided.
     pub verbose: bool,
+    /// Directory the compiler may read `{$I}` include files from. `None`, the
+    /// default, leaves includes to the host: `expand_includes` or nothing.
+    /// Setting it passes `-I` and grants the compiler that one directory,
+    /// confined the same way `expand_includes` confines its own.
+    pub include_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Options {
@@ -121,6 +126,7 @@ impl Default for Options {
             stack_checks: true,
             defines: Vec::new(),
             verbose: false,
+            include_dir: None,
         }
     }
 }
@@ -133,6 +139,9 @@ impl Options {
         args.push(if self.stack_checks { "-S+" } else { "-S-" }.to_string());
         if self.verbose {
             args.push("-v".to_string());
+        }
+        if self.include_dir.is_some() {
+            args.push("-I".to_string());
         }
         for d in &self.defines {
             args.push(format!("-d{d}"));
@@ -184,6 +193,7 @@ impl Compiler {
         let mut ctx = WasiContext::new();
         ctx.stdin = StdioBuffer::from_bytes(source.as_bytes());
         ctx.args = self.options.to_args();
+        ctx.preopen_dir = self.options.include_dir.clone();
         let mut store = wasmi::Store::new(&engine, ctx);
 
         let module = Module::new(&engine, self.snapshot)

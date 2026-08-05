@@ -18,6 +18,7 @@ compiled program runs in the same sandbox as the compiler.
 - [Calling back into the host](#calling-back-into-the-host)
 - [Strings across the boundary](#strings-across-the-boundary)
 - [Include files](#include-files)
+- [Granting a program its own files](#granting-a-program-its-own-files)
 - [What the sandbox does and does not protect](#what-the-sandbox-does-and-does-not-protect)
 - [API stability](#api-stability)
 
@@ -292,6 +293,54 @@ The check is on the written path and does not touch the filesystem, so a
 symlink inside the base directory that points outside it is still followed.
 Do not place one there in a directory you serve untrusted source from.
 
+### Letting the compiler resolve them instead
+
+The compiler can open include files itself. Give it a directory and it opens
+them relative to that, with the same confinement:
+
+```rust
+let compiler = Compiler::with_options(Options {
+    include_dir: Some(PathBuf::from("./pascal")),
+    ..Options::default()
+});
+```
+
+Which one to use is a real choice, not a default to accept:
+
+- **`expand_includes`** when the sources are not files. An editor buffer, a
+  database row, a zip entry: the compiler never learns where the text came
+  from, and you can inspect the expansion before compiling.
+- **`include_dir`** when they are ordinary files on disk. Fewer moving parts,
+  and the compiler reports a missing include with the line that asked for it
+  rather than failing before compilation starts.
+
+Do not do both. Source that a host has already expanded has no directives
+left, so nothing happens; source that still has them would be opened twice.
+
+## Granting a program its own files
+
+A compiled program that declares `{$FILES ON}` can open files, but only in a
+directory you hand it. Nothing is granted by default:
+
+```rust
+use compact_pascal::{InstanceBuilder, Limits};
+
+let builder = InstanceBuilder::with_limits(Limits {
+    preopen_dir: Some(PathBuf::from("./sandbox")),
+    ..Limits::default()
+})?;
+let mut instance = builder.build(&result.wasm)?;
+```
+
+Without `preopen_dir`, every open fails and the program traps at its first
+`Reset` or `Rewrite`, which is the default and the safe one. Paths are
+confined to the granted directory exactly as include paths are.
+
+**The compiler snapshot itself declares `path_open` and `fd_close`,** because
+it can resolve includes. Declaring an import is not the same as being allowed
+to use it: a host that never sets `include_dir` or `preopen_dir` refuses every
+open, and a program that never says `{$FILES ON}` cannot even ask.
+
 ## What the sandbox does and does not protect
 
 Compiled programs run in a WebAssembly sandbox. That is a real boundary, and
@@ -338,7 +387,8 @@ versions may break.
 
 - The names, signatures, and behavior of `Compiler`, `CompileResult`,
   `CompileError`, `Instance`, `InstanceBuilder`, `RuntimeError`, `Diagnostic`,
-  `Severity`, `Options`, and `Limits`.
+  `Severity`, `Options`, and `Limits`, including `Options::include_dir` and
+  `Limits::preopen_dir`.
 - The meaning of each `CompileError` and `RuntimeError` variant.
 - The diagnostic tag format the compiler emits, since it is what `Diagnostic`
   parses.

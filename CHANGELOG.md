@@ -68,11 +68,14 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Rust crate
 
-- **`WasiContext::preopen_dir`** grants a guest access to one directory.
-  `None`, the default, refuses every open. The compiler snapshot now declares
-  `path_open` and `fd_close` because it can resolve includes itself, and
-  declaring an import is not the same as being allowed to use it: a host that
-  never sets this keeps the behavior it had.
+- **`Options::include_dir`** lets the compiler resolve `{$I}` itself, against
+  one directory. **`Limits::preopen_dir`** grants a compiled program its own
+  directory to open files in. Both are `None` by default, and with neither set
+  every open is refused.
+
+  The compiler snapshot now declares `path_open` and `fd_close` because it can
+  resolve includes, and declaring an import is not the same as being allowed
+  to use it: a host that sets neither field keeps exactly the behavior it had.
 - **Functions may return a `string`, `string[n]`, record, or array.**
   `function F: string` was previously rejected outright. The result is
   caller-allocated and released at the end of the statement; loops release each

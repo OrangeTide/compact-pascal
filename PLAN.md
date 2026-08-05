@@ -506,6 +506,34 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Reading a file open for writing returned the write buffer.** Found by
+reviewing the phase rather than by a test: `__text_read_byte` did not check the
+mode, so a `readln` on a file open for writing served whatever was sitting in
+the buffer waiting to be written. A program reading a file it was writing got
+its own output back and no error. Both helpers now check the mode and do
+nothing, reported as end of file on the read side because a byte read has no
+error channel.
+
+**A file that is not closed loses what is buffered, silently.** There is no
+flush at program exit and there cannot be a cheap one: the state lives in the
+variable, and a variable that has gone out of scope cannot be found again
+without a registry, which is the thing the control-block design exists to
+avoid. Documented as a hazard rather than fixed. A registry is the fix if this
+ever bites in practice.
+
+**`preopen_dir` was dead API for an hour.** It was added to `WasiContext` so
+the bridge could serve the compiler's includes, and `WasiContext` is
+constructed internally by both `Compiler::compile` and `InstanceBuilder::build`
+— so no crate user could set it. A capability nobody can grant is not a
+capability. It is now `Options::include_dir` for the compiler and
+`Limits::preopen_dir` for a compiled program, each covered by a test that
+checks both the denied and the granted path.
+
+The general shape is worth remembering: adding a field to an internal struct
+looks like exposing a feature and is not. The test that would have caught it
+immediately is the one that uses the feature from outside the crate, which is
+what `tests/integration.rs` is for.
+
 **Reading includes is a compiler capability, not a program capability.** The
 first attempt gated compiler-side `{$I}` on `{$FILES ON}`, which conflates two
 different things: whether the compiler may read include files, and whether the

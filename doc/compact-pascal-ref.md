@@ -519,6 +519,16 @@ The value is the host's WASI errno, not a Pascal error code. Compare it against 
 - **A line longer than the destination string is truncated**, and the rest of that line is discarded rather than being seen as a second line.
 - **The number of open files is whatever the host allows.** There is no table and no limit here.
 
+### Hazards
+
+These are consequences of the design rather than gaps in it, and each one costs data rather than merely being surprising.
+
+- **A file that is not closed loses whatever is still buffered.** Nothing flushes at program exit: the state lives in the variable, and a variable that has gone out of scope cannot be found again. `Close` every file you `Rewrite`.
+- **`Assign` to a file that is already open abandons the descriptor.** It does not close it first. Close before reassigning.
+- **Reading a file open for writing yields nothing**, and writing to one open for reading does nothing. Both are reported as if the file were at its end rather than as an error, because a byte read has no error channel. Neither corrupts the other direction's buffer.
+- **`Reset` on a file that was never assigned is undefined.** The name is read from the control block, and an unassigned local holds whatever the stack last had there. In practice it fails and sets `IOResult`, but it may open a file whose name is stack debris. Always `Assign` first.
+- **`Read(f, c)` returns `chr(0)` at end of file**, which is indistinguishable from a NUL byte in the file. Use `Eof(f)` to tell them apart.
+
 ## Pointers
 
 A pointer type is written `^T`, where `T` is the name of a type. A pointer holds a byte address in linear memory and occupies four bytes, the same as an `integer`.

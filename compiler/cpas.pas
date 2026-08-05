@@ -10032,6 +10032,21 @@ procedure BuildTextReadByteHelper;
 begin
   CodeBufInit(helperCode);
 
+  (* A file not open for reading has nothing to give. Without this the read
+     would serve whatever is in the buffer, and for a file open for writing
+     that is the data waiting to be written: reading a file you are writing
+     handed back your own output. Reported as end of file rather than as an
+     error because there is no errno path through a byte read; Eof is built
+     on this, so it answers true, which is the honest answer. *)
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsMode);
+  EmitHelperI32Const(TextModeRead);
+  EmitHelper(OpI32Ne);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelperI32Const(-1);
+    EmitHelper(OpReturn);
+  EmitHelper(OpEnd);
+
   (* if pos >= len then refill *)
   EmitHelperLocalGet(0);
   EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsPos);
@@ -10105,6 +10120,17 @@ procedure BuildTextWriteByteHelper;
 *)
 begin
   CodeBufInit(helperCode);
+
+  (* A file not open for writing is left alone. The buffer belongs to the
+     read path in that state, and appending to it would corrupt the reader's
+     position rather than doing anything useful. *)
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsMode);
+  EmitHelperI32Const(TextModeWrite);
+  EmitHelper(OpI32Ne);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelper(OpReturn);
+  EmitHelper(OpEnd);
 
   EmitHelperLocalGet(0);
   EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);

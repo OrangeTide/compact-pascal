@@ -349,3 +349,67 @@ fn the_snapshot_declares_file_imports_but_cannot_use_them_by_default() {
     // Without -I the compiler skips the directive entirely, so this compiles.
     assert!(Compiler::new().compile(src).is_ok());
 }
+
+#[test]
+fn the_crate_can_let_the_compiler_resolve_includes() {
+    use compact_pascal::Options;
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join("cpas-include-test");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut inc = std::fs::File::create(dir.join("shared.inc")).unwrap();
+    writeln!(inc, "const FromInclude = 4242;").unwrap();
+    drop(inc);
+
+    let src = "program T;\n{$I 'shared.inc'}\nbegin writeln(FromInclude) end.\n";
+
+    // Without a directory the compiler skips the directive, so the constant
+    // is undeclared. That is the pre-existing behavior and it must not change
+    // for a host that never asks for filesystem access.
+    assert!(Compiler::new().compile(src).is_err());
+
+    // With one, the compiler opens the file itself.
+    let opts = Options {
+        include_dir: Some(dir.clone()),
+        ..Options::default()
+    };
+    let result = Compiler::with_options(opts)
+        .compile(src)
+        .expect("the include should have been resolved");
+    assert!(!result.wasm.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_program_can_be_granted_a_directory_to_write_in() {
+    use compact_pascal::{InstanceBuilder, Limits};
+
+    let dir = std::env::temp_dir().join("cpas-preopen-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = "{$FILES ON}\nprogram T;\nvar f: text;\nbegin\n\
+               assign(f, 'out.txt'); rewrite(f);\n\
+               writeln(f, 'written by the guest');\n\
+               close(f);\nend.\n";
+    let wasm = Compiler::new().compile(src).unwrap().wasm;
+
+    // Denied by default, so the open fails and the program traps under the
+    // I/O check that is on unless a program turns it off.
+    let mut denied = InstanceBuilder::new().unwrap().build(&wasm).unwrap();
+    assert!(denied.run().is_err(), "an ungranted program should not have opened anything");
+
+    let granted = InstanceBuilder::with_limits(Limits {
+        preopen_dir: Some(dir.clone()),
+        ..Limits::default()
+    })
+    .unwrap();
+    let mut instance = granted.build(&wasm).unwrap();
+    instance.run().unwrap();
+
+    let written = std::fs::read_to_string(dir.join("out.txt")).unwrap();
+    assert_eq!(written.trim(), "written by the guest");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
