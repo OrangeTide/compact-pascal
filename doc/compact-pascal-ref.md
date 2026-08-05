@@ -509,7 +509,19 @@ The path is passed to the host as written. A host is expected to reject `..` and
     writeln('cannot open the file');
 ```
 
-The value is the host's WASI errno, not a Pascal error code. Compare it against zero rather than against a number; the numbering is the host's and this document does not fix it.
+`IOResult` values fall into two ranges:
+
+| Range | Meaning |
+|---|---|
+| `0` | The last operation succeeded. |
+| `1`–`199` | The host's WASI errno, passed through unchanged. This document does not fix the numbering; it is whatever the runtime reports. |
+| `200`+ | Defined by this language, for conditions the host has no errno for. |
+
+| Code | Meaning |
+|---|---|
+| `200` | Read past the end of the file. |
+
+Compare against zero to ask whether something worked. Compare against a specific number only in the `200`+ range, since that is the only part this document controls.
 
 ### What text files do not do yet
 
@@ -527,7 +539,7 @@ These are consequences of the design rather than gaps in it, and each one costs 
 - **`Assign` to a file that is already open abandons the descriptor.** It does not close it first. Close before reassigning.
 - **Reading a file open for writing yields nothing**, and writing to one open for reading does nothing. Both are reported as if the file were at its end rather than as an error, because a byte read has no error channel. Neither corrupts the other direction's buffer.
 - **`Reset` on a file that was never assigned is undefined.** The name is read from the control block, and an unassigned local holds whatever the stack last had there. In practice it fails and sets `IOResult`, but it may open a file whose name is stack debris. Always `Assign` first.
-- **`Read(f, c)` returns `chr(0)` at end of file**, which is indistinguishable from a NUL byte in the file. Use `Eof(f)` to tell them apart.
+- **`Read(f, c)` past the end of the file is an error**, not a quiet `chr(0)`. Under `{$I+}` it traps; under `{$I-}` it sets `IOResult` to 200 and leaves `c` as `chr(0)`. A zero byte is a legal thing to find in a file, so returning one for "there was nothing there" would leave a program unable to tell the two apart. A loop that tests `Eof(f)` first never reaches this.
 
 ## Pointers
 
@@ -997,6 +1009,7 @@ An implementation may impose limits, but not below these. A program staying with
 | `{$IFDEF}` nesting depth | 8 | 8 |
 | Unresolved forward pointer references per type block | 32 | 32 |
 | Include nesting depth | 8 | 8 |
+| First language-defined `IOResult` code | 200 | 200 |
 | Operands in one string concatenation | 16 | 17 |
 | String length | 255 | 255 |
 | Set base type values | 256 | 256 |

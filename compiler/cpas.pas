@@ -232,6 +232,9 @@ const
     the language reference and a program can rely on it. Each level costs a
     text control block. }
   MaxIncludeDepth = 8;
+  { IOResult codes above the host's range. WASI preview 1 errnos stop well
+    below 200, so a language-defined code cannot be mistaken for one. }
+  IOErrPastEof = 200;
   { text file control block: fd, mode, buffer length, buffer position, eof
     flag, the assigned name as a short string, then the buffer itself. }
   TextOfsFd     = 0;
@@ -6141,9 +6144,13 @@ begin
           if (syms[sym].kind <> skVar) then
             Error('read from a file requires a string or char variable');
           if syms[sym].typ = tyChar then begin
-            { read(f, c) takes one character, or chr(0) at end of file. A
-              scanner wants exactly this, and Eof is the way to tell the two
-              apart. }
+            { read(f, c) takes one character. Reading past the end is an
+              error rather than a quiet chr(0): a zero byte is a legal thing
+              to find in a file, so returning one for "there was nothing
+              there" gives a program no way to tell the two apart. Turbo
+              Pascal makes this runtime error 100 for the same reason.
+
+              A correct loop tests Eof first and never reaches this. }
             if withNewline then
               Error('readln cannot read a single character; use read');
             if syms[sym].isVarParam then
@@ -6160,6 +6167,13 @@ begin
             EmitI32Const(-1);
             EmitOp(OpI32Eq);
             EmitOp(OpIf); EmitOp(WasmI32);
+              EnsureIOResultSlot;
+              EmitI32Const(addrIOResult);
+              EmitI32Const(IOErrPastEof);
+              EmitI32Store(2, 0);
+              if optIOChecks then begin
+                EmitOp(OpUnreachable);
+              end;
               EmitI32Const(0);
             EmitOp(OpElse);
               EmitLocalGet(curCaseTempIdx);

@@ -506,6 +506,26 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Reading past the end of a file is an error, and that needed a code range.**
+`Read(f, c)` returned `chr(0)` past the end, which a program cannot tell from a
+NUL byte legitimately in the file. A correct `while not eof(f)` loop never
+reaches it, so the first instinct was to document the hazard and move on, as
+was done for the unclosed-file loss and the dangling second pointer.
+
+The distinction that made this one different: those two cost data when a
+program is *wrong*, while this one hands back a plausible value when a program
+is wrong, which is the failure mode this project has spent the whole roadmap
+eliminating — the nil check, the stack guard, the frame balance check, and
+`Dispose` clearing its pointer are all the same trade. Turbo Pascal makes it
+runtime error 100 for the same reason.
+
+The cost is a wrinkle in `IOResult`. It carried the host's WASI errno verbatim,
+and there is no WASI errno for "past the end". Rather than reuse `EIO`, which
+would make a device failure and a program bug look alike, codes from 200 up are
+reserved for this language. WASI preview 1 errnos stop well below that, so the
+two cannot be confused, and the reference now documents the split as a table
+rather than leaving a reader to infer it.
+
 **Reading a file open for writing returned the write buffer.** Found by
 reviewing the phase rather than by a test: `__text_read_byte` did not check the
 mode, so a `readln` on a file open for writing served whatever was sitting in

@@ -56,7 +56,14 @@ behind a decision lives in the Findings section of `PLAN.md`.
   error instead; `IOResult` returns it and clears it, so reading twice gives
   zero the second time, as in Turbo Pascal.
 
-  `Read(f, c)` takes a single character; `ReadLn(f, s)` takes a line. Not yet:
+  `Read(f, c)` takes a single character; `ReadLn(f, s)` takes a line. Reading
+  past the end of a file is an error rather than a quiet `chr(0)`: a zero byte
+  is a legal thing to find in a file, so returning one for "there was nothing
+  there" would leave a program unable to tell the two apart. It traps under
+  `{$I+}` and sets `IOResult` to 200 under `{$I-}`. `IOResult` values below 200
+  are the host's WASI errno; 200 and above are defined by this language.
+
+  Not yet:
   no `Append`, no `Seek`, no `file of T`, no reading a number straight from a
   file, and a concatenation in a file write is rejected rather than compiled.
   See "Text Files" in the reference.
