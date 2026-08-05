@@ -751,7 +751,7 @@ When a program uses `write`/`writeln`, `read`/`readln`, or `halt`, the compiler 
 | `fd_write` | `(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) → errno: i32` | Program uses `write`/`writeln` |
 | `proc_exit` | `(code: i32) → noreturn` | Program uses `halt` |
 
-> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-debug`, `-progress`, `-O0`, `-O1`, `-dSYMBOL`, and the check switches `-R+`/`-R-` and `-S+`/`-S-`. The check switches set the state a source file starts with; a directive in the source still overrides from the point it appears. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
+> **Note:** The compiler binary itself also imports `args_sizes_get` and `args_get`, which it uses to read command-line flags such as `-dump`, `-v`, `-debug`, `-progress`, `-O0`, `-O1`, `-dSYMBOL`, `-I`, and the check switches `-R+`/`-R-` and `-S+`/`-S-`. The check switches set the state a source file starts with; a directive in the source still overrides from the point it appears. It does not take a source file path: the source always arrives on stdin, and any argument that is not a recognized flag is rejected with `Error: unknown option: <arg>`. These imports appear in the compiler's own WASM module but are not emitted by the compiler for compiled programs.
 
 Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The generated code always passes a single iovec (`iovs_len = 1`).
 
@@ -986,6 +986,7 @@ An implementation may impose limits, but not below these. A program staying with
 | Conditional symbols defined at once | 32 | 32 |
 | `{$IFDEF}` nesting depth | 8 | 8 |
 | Unresolved forward pointer references per type block | 32 | 32 |
+| Include nesting depth | 8 | 8 |
 | Operands in one string concatenation | 16 | 17 |
 | String length | 255 | 255 |
 | Set base type values | 256 | 256 |
@@ -1044,7 +1045,7 @@ Local directives may appear anywhere in the source. They take effect from the po
 | `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue, a frame balance check in every epilogue, and a nil check on every pointer dereference. |
 | `{$I+/-}` | — | ON | Trap on a file operation that fails. With it off the error is recorded for `IOResult` instead. Distinguished from `{$I 'file'}` by the character after the `I`. |
 | `{$ALIGN n}` | — | 4 | Record field alignment in bytes (1, 2, 4, or 8). Each field within a record is placed at the next multiple of `n`; the total record size is padded to a multiple of `n`. |
-| `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
+| `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the compiler with `-I`, or by the host beforehand. See [Include Files](#include-files). |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |
 | `{$IMPORT 'module' name}` | — | — | Declare the next procedure or function as a WASM import from `module` with import name `name`. |
 | `{$EXTLITERALS ON/OFF}` | — | OFF | Enable C-style numeric literal prefixes: `0x` (hex), `0o` (octal), `0b` (binary). |
@@ -1126,13 +1127,33 @@ begin
 end.
 ```
 
-### Include File Resolution
+### Include Files
 
-The `{$INCLUDE}` directive is resolved by the **host application**, not by the compiler. Before invoking the compiler, the embedding library (or fpc during bootstrap) scans the source for `{$I}` / `{$INCLUDE}` directives and replaces them with the contents of the referenced files. The compiler receives a single, fully-expanded source stream on stdin.
+`{$I 'filename'}` inserts the contents of a file. There are two ways it gets resolved, and which one applies is the caller's choice, not the program's.
 
-This design keeps the compiler's I/O interface minimal (three file descriptors, no filesystem access). The Rust crate provides `expand_includes` for this, confining resolution to a base directory the host chooses. A host in another language performs the expansion itself. If the host cannot locate an included file, the embedding library reports an error before compilation begins.
+**The compiler resolves it**, given `-I`:
 
-During fpc bootstrap, the compiler runs as a native executable and fpc handles `{$I}` natively.
+```
+cpas -I < main.pas > main.wasm
+```
+
+Names are relative to the compiler's working directory. When the compiler is itself running as WASM, that is the directory the host preopened, and nothing outside it is reachable.
+
+**Or the host resolves it first**, expanding every directive before the compiler sees the source. The Rust crate's `expand_includes` does this, confining resolution to a base directory the caller chooses. This is the older path and it stays supported: an embedder that wants to serve includes from a database, a zip file, or an editor buffer can, because the compiler never needs to know where the text came from.
+
+Without `-I` the compiler **skips** the directive. That is what makes the two paths safe together: source already expanded by a host has no directives left, and one that still has them would otherwise be opened twice.
+
+| Limit | Value |
+|---|---|
+| Nesting depth | 8 |
+| A file including itself, directly or through others | Error |
+| A file that cannot be opened | Error |
+
+The depth is a specified limit rather than a consequence of available memory, so a program can rely on it. Each level costs one text control block.
+
+A cycle is detected by comparing names against the files currently open, so `a` including `b` including `a` is caught at the second `a` rather than looping until the depth limit. The name is compared as written; two different spellings of the same file are two different files to this check.
+
+During fpc bootstrap, the compiler runs as a native executable and fpc handles `{$I}` in the compiler's own source natively. That is unrelated to how the compiler handles `{$I}` in the source it is compiling.
 
 ### Interaction with Single-Pass Compilation
 

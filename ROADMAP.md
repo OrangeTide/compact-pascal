@@ -41,7 +41,7 @@ is roughly as much work again:
 |---|---|---|
 | H | Structured and string return types — `function F: string` | Done |
 | I | Heap: `New` and `Dispose` | Done |
-| J | File system access and the `text` type; `{$I}` inside the compiler | Started |
+| J | File system access and the `text` type; `{$I}` inside the compiler | Done |
 | K | System units — `uses` against runtime-provided bindings | |
 | L | Pascal units — write and compile your own, separately | |
 | M | Method pointers and interfaces | |
@@ -59,10 +59,12 @@ coalesce blocks, so a program mixing many sizes will fragment; one that
 allocates and frees the same shapes reuses its memory exactly. Running out
 traps rather than returning `nil`.
 
-**Program size.** A program is one file. `{$I}` is expanded by the host before
-the compiler sees it, so the standalone compiler silently skips the directive
-and then fails on the undeclared identifier. Phase J moves include handling into
-the compiler; Phases K and L add real units on top.
+**Program size.** Solved for includes in Phase J. `cpas -I` resolves `{$I}`
+itself, eight levels deep, with cycles and missing files diagnosed, so a
+multi-file program builds from the command line with no host help. The
+host-side expansion path stays supported and is still the default. Real units,
+where a file is compiled once rather than textually inserted, are Phases K and
+L.
 
 ## What is deliberately not planned
 

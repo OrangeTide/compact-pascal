@@ -506,6 +506,50 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Reading includes is a compiler capability, not a program capability.** The
+first attempt gated compiler-side `{$I}` on `{$FILES ON}`, which conflates two
+different things: whether the compiler may read include files, and whether the
+program being compiled may touch the filesystem. A program that includes a
+file but does no I/O of its own would have had to declare a capability it never
+uses and import two WASI functions it never calls. It is a `-I` flag on the
+compiler instead.
+
+Off by default, because an embedder may have expanded the includes already —
+the Rust crate's `expand_includes` does — and opening them a second time would
+be wrong. Skipping the directive without `-I` is what makes the two paths safe
+together.
+
+**Giving the compiler includes made the snapshot need filesystem imports.**
+The compiler's own source declares `{$FILES ON}`, so the snapshot declares
+`path_open` and `fd_close`, so the Rust bridge had to implement them or nothing
+would instantiate. That is the same breakage the opt-in directive was
+introduced to avoid, arriving from the other direction, and this time it could
+not be designed away: a compiler that reads files needs the imports.
+
+The bridge refuses by default. A host opts in with
+`WasiContext::preopen_dir`, and paths are confined to it exactly as
+`expand_includes` confines its own. Declaring an import and being allowed to
+use it stay separate.
+
+**Three failures on the way, each worth remembering.**
+
+A `sed` pattern matched `numPendingPtr := 0` in `ResolvePendingPointers` as
+well as in `Init`, so every `type` block silently reset the compiler's
+file-access state. It presented as `{$FILES ON}` not working in one particular
+large file while working in every small reproduction, which is a slow way to
+discover that an edit landed in two places.
+
+`(incDepth > 0) and eof(incFile[incDepth - 1])` is not short-circuit in this
+language, so it indexed element -1 whenever no include was open, read a garbage
+descriptor, and corrupted the scanner's line counter into a nine-digit number.
+`and then` exists but fpc in TP mode does not have it, and this source has to
+compile under both, so it is a loop with an explicit break.
+
+The text operations accepted only a plain variable, so the compiler could not
+use its own array of them. They take a designator now, evaluated once into a
+data word because `Close` needs the address four times and re-evaluating an
+index expression four times is both wasteful and wrong.
+
 **`Eof(f)` looks ahead rather than reporting a read that already failed.** The
 first implementation set a flag when a refill returned nothing, which is the
 cheap thing to do and is wrong: `while not eof(f) do readln(f, s)` ran one
@@ -1781,7 +1825,7 @@ leaking; a deliberate heap-stack collision traps. All met: `t113` is the list,
 `t114` the tree plus two thousand allocate-free cycles that do not grow the
 heap, `t115` the collision.
 
-### Phase J: File system access and the `text` type — IN PROGRESS
+### Phase J: File system access and the `text` type — DONE
 
 Two things at once, because they are the same underlying work: the compiler
 needs to read files for `{$I}`, and programs need file I/O for anything real.
@@ -1808,36 +1852,25 @@ diagnostic for what is really a missing capability.
 - [x] `Assign`, `Reset`, `Rewrite`, `Close`, `ReadLn`, `WriteLn`, `Eof`,
       `IOResult`, with the TP semantics including the clearing. `Eof` looks
       ahead rather than reporting a read that already failed; see Findings.
-- [ ] Compiler-side `{$I}`: the compiler resolves and expands includes itself.
-      The host-side path stays supported for embedders that want it, but the
-      standalone CLI stops being single-file-only.
-- [ ] Nesting depth limit and a cycle check on includes, both diagnosed.
+- [x] Compiler-side `{$I}`: the compiler resolves and expands includes itself
+      under `-I`. The host-side path stays supported and is still the default,
+      so an embedder that already expanded them does not open them twice.
+- [x] Nesting depth limit and a cycle check on includes, both diagnosed. The
+      depth is a fixed array of eight text blocks, so the limit is in the
+      language reference rather than being whatever the stack allowed.
 
 **Exit:** the compiler compiles a multi-file program from the CLI with no host
 help; a program opens, writes, reopens, and reads back a file; `IOResult`
 reports a missing file rather than trapping under `{$I-}`. **Not yet met.**
 
-**Status: programs have file I/O; the compiler does not use it yet.** Two of
-the four exit conditions are met. A program opens, writes, reopens, and reads
-back a file (`t117`), and `IOResult` reports a missing file rather than
-trapping under `{$I-}` (`t118`), with the trap under `{$I+}` pinned by `t119`.
+**All four exit conditions met.** `t117` writes, reopens, and reads a file;
+`t118` and `t119` pin IOResult against a missing file with checks off and on;
+`c006` through `c008` cover the include path — a working multi-file build, a
+missing file, and a cycle.
 
-What remains is compiler-side `{$I}`, and it is not blocked on file access any
-more, which is the useful part: the primitives now exist and are exercised.
-The work left is the scanner, not the runtime.
-
-`ReadCh` reads one character at a time from stdin. Includes need a source
-stack: pushing the current position, switching to a file, and popping at its
-end. Both builds need it, so the compiler source gains an `{$IFDEF FPC}` pair
-like the one `ReadCh` already carries — fpc side on real file handles,
-self-hosted side on the text helpers this phase added. The nesting depth and
-cycle checks are cheap once that stack exists, since it already holds the
-depth and the open names.
-
-One thing to settle first: the self-hosted compiler would have to declare a
-`text` variable per nesting level, at 536 bytes each. Eight levels is 4 KB of
-the compiler's own frame, which is affordable but is a decision rather than a
-detail, and a fixed array of blocks may be better than a stack of locals.
+The include stack is a fixed array of eight text blocks, chosen over a stack of
+locals so the depth is a specified limit in the reference rather than a
+consequence of how much stack happened to be available.
 
 ### Phase K: System units — 2 weeks
 

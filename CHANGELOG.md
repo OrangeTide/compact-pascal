@@ -56,9 +56,23 @@ behind a decision lives in the Findings section of `PLAN.md`.
   error instead; `IOResult` returns it and clears it, so reading twice gives
   zero the second time, as in Turbo Pascal.
 
-  Not yet: `ReadLn` reads strings only, there is no `Read` without the line
-  break, no `Append`, no `Seek`, no `file of T`, and a concatenation in a file
-  write is rejected rather than compiled. See "Text Files" in the reference.
+  `Read(f, c)` takes a single character; `ReadLn(f, s)` takes a line. Not yet:
+  no `Append`, no `Seek`, no `file of T`, no reading a number straight from a
+  file, and a concatenation in a file write is rejected rather than compiled.
+  See "Text Files" in the reference.
+- **The compiler resolves `{$I}` itself under `-I`.** A multi-file program
+  builds from the command line with no host help, eight levels deep, with
+  cycles and missing files diagnosed instead of silently skipped. Without the
+  flag the directive is skipped as before, so source an embedder already
+  expanded is not opened twice.
+
+### Rust crate
+
+- **`WasiContext::preopen_dir`** grants a guest access to one directory.
+  `None`, the default, refuses every open. The compiler snapshot now declares
+  `path_open` and `fd_close` because it can resolve includes itself, and
+  declaring an import is not the same as being allowed to use it: a host that
+  never sets this keeps the behavior it had.
 - **Functions may return a `string`, `string[n]`, record, or array.**
   `function F: string` was previously rejected outright. The result is
   caller-allocated and released at the end of the statement; loops release each
