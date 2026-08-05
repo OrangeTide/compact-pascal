@@ -506,6 +506,38 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Local validation before pushing, not CI as the first opinion.** `make
+preflight` runs everything this machine can check. CI takes minutes to answer,
+cannot be stepped through, and is a worse place to learn something than a
+terminal. It is a second opinion.
+
+Building it found three things immediately, which is the argument for it:
+
+- **The preopened directory is not always file descriptor 3.** Running the
+  suite under wasmer as well as wasmtime exposed the assumption recorded a
+  phase earlier as "an assumption, not a fact". Every file test failed under
+  wasmer. The compiler now walks `fd_prestat_get` upward from 3, which is what
+  WASI actually specifies, and reading files works on both runtimes.
+- **wasmer 7.1 will not create a file inside a `--dir` preopen**, answering
+  `ENOTDIR` to `path_open` with `O_CREAT`. Opening an existing file works, and
+  rewriting one that already exists works, so this is that runtime's limit
+  rather than a defect here. Pinned as an expected-failure set so it notices
+  if wasmer changes or if a different test breaks.
+- **A third host break from adding an import.** `fd_prestat_get` broke every
+  Rust host exactly as `path_open` did. Three times now: the rule is that any
+  new import to the compiler is a change to the embedding contract, and
+  `check-rust` in preflight is what makes that immediate instead of eventual.
+
+**The one thing preflight cannot cover is macOS**, so that is the single class
+of failure that will still reach CI first. Written down in `CONTRIBUTING.md`
+with the bash 3.2 constraints that follow from it.
+
+**Documentation examples are checked by a script now.** Three defects in this
+project were found by running a documentation example by hand. Two of the
+thirty-nine fenced blocks in the reference and white paper are self-contained
+programs; the rest are fragments and are counted rather than silently skipped,
+so the skip count going up is a visible signal.
+
 **Reading past the end of a file is an error, and that needed a code range.**
 `Read(f, c)` returned `chr(0)` past the end, which a program cannot tell from a
 NUL byte legitimately in the file. A correct `while not eof(f)` loop never
@@ -1637,7 +1669,7 @@ rule; an external reviewer reads it end to end with no open questions.
 investigating, document the workaround, and proceed. Do not let this reach
 week three.
 
-### Phase C: CI and fixpoint gating — 1.5 weeks
+### Phase C: CI and fixpoint gating — DONE
 
 - [x] `.github/workflows/test.yml`: full suite plus byte-for-byte fixpoint
       check on every push and PR. Adds `make check-fixpoint`, which also
@@ -1651,15 +1683,21 @@ week three.
       do. Verified end to end locally before re-enabling: extracted the units
       from the `.deb` without installing, cross-compiled, ran under Wine, and
       confirmed byte-identical output. Blocking from the start as a result.
-- [ ] **Release artifact.** A CI rule that zips `snapshot/compiler.wasm` with a
-      short README covering `wasmtime run compiler.wasm < prog.pas > prog.wasm`
-      and attaches it to a tag. Least-effort distribution: no packaging, no
+- [x] **Release artifact.** `make release` zips `snapshot/compiler.wasm` with a
+      short README and the licence. Least-effort distribution: no packaging, no
       installer, no platform matrix, just the one file that already works
-      anywhere wasmtime does. Today the answer to "how do I get this" is "clone
-      the repo and install fpc", which is not an answer. Feeds the 1.0 release
-      story in Phase F.
+      anywhere wasmtime does.
+
+      Built by a local target rather than only by a tag-triggered workflow, on
+      the same reasoning as `preflight`: an artifact that is only ever built by
+      CI is only ever found broken by CI. The build verifies itself before
+      packaging — the module must validate, compile a program, and that program
+      must run — and refuses if it differs from the committed snapshot.
+      Attaching it to a tag is a separate decision and is not automated.
 - [x] Local `make test-all` running the same matrix a developer can reproduce.
       Verified against a fresh clone.
+- [x] `make preflight`: everything this machine can check, including six things
+      CI does not. See Findings.
 - [x] Pin `fpc`, `wasmtime`, and `wasm-validate` versions. Implemented as
       assertions rather than version-locked installs: the protection wanted is
       that a toolchain change is loud, and asserting gives that without

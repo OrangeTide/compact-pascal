@@ -23,7 +23,7 @@ finished.
 |---|---|---|
 | A | Specification closure | Done |
 | B | FFI snapshot hang | Done |
-| C | CI, fixpoint gating, release artifact | Done except the release artifact |
+| C | CI, fixpoint gating, release artifact | Done |
 | D | Runtime safety instrumentation | Done |
 | E | Pointer types | Done |
 | F | Rust embedding to production grade | Done — **1.0 is ready to cut** |
@@ -123,11 +123,19 @@ Every phase boundary holds these, without exception:
 
 ## Getting it
 
-There is no install story yet, and that is a gap rather than a decision. Phase C
-adds a release artifact: a zip holding `compiler.wasm` and a short README, good
-for `wasmtime run compiler.wasm < prog.pas > prog.wasm` and nothing more. No
-packaging, no installer, no platform matrix. Until then, clone the repository
-and build with fpc.
+`make release` builds a zip holding `compiler.wasm`, a README, and the licence.
+It is deliberately the smallest useful thing: a user with a WASM runtime needs
+nothing else, and a user without one is not helped by a zip. No installer, no
+native binary, no platform matrix.
+
+```
+wasmtime run compiler.wasm < hello.pas > hello.wasm
+wasmtime run hello.wasm
+```
+
+The build verifies itself before packaging: the module must validate, compile a
+program, and that program must run. Releases are cut deliberately rather than
+on every tag.
 
 ## Reporting problems
 

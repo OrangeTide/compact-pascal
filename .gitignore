@@ -21,3 +21,6 @@ compiler/*.ppu
 # Deploy artifacts
 pages/playground/compiler.wasm
 pages/playground/samples/cpas.pas
+
+# Release staging, rebuilt by make release
+build/release/

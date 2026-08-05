@@ -326,6 +326,46 @@ pub fn add_wasi_imports(
         }
     )?;
 
+    // The guest walks fd_prestat_get upward from 3 to find the directory it
+    // was granted, because WASI does not fix which descriptor that is. This
+    // host offers exactly one, on 3, and only when the caller granted it.
+    //
+    // Answering EBADF when nothing was granted is what makes the walk end
+    // instead of running to its limit.
+    linker.func_wrap("wasi_snapshot_preview1", "fd_prestat_get",
+        |mut caller: Caller<'_, WasiContext>, fd: i32, prestat_ptr: i32| -> i32 {
+            let Some(dir) = caller.data().preopen_dir.clone() else {
+                return ERRNO_BADF;
+            };
+            if fd != 3 {
+                return ERRNO_BADF;
+            }
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return ERRNO_FAULT,
+            };
+            // prestat is { tag: u8, pad, name_len: u32 }. Tag 0 is a
+            // directory; the name is "." as far as a guest is concerned,
+            // since every path it opens is already relative to this one.
+            let name_len = dir.as_os_str().len().min(u32::MAX as usize) as u32;
+            {
+                let mem = memory.data_mut(&mut caller);
+                let at = prestat_ptr as usize;
+                if at + 8 > mem.len() {
+                    return ERRNO_FAULT;
+                }
+                mem[at] = 0;
+                mem[at + 1] = 0;
+                mem[at + 2] = 0;
+                mem[at + 3] = 0;
+            }
+            if !write_u32(&mut caller, &memory, prestat_ptr as u32 + 4, name_len) {
+                return ERRNO_FAULT;
+            }
+            ERRNO_SUCCESS
+        }
+    )?;
+
     linker.func_wrap("wasi_snapshot_preview1", "fd_close",
         |mut caller: Caller<'_, WasiContext>, fd: i32| -> i32 {
             match caller.data_mut().open_files.remove(&fd) {

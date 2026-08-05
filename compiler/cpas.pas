@@ -491,6 +491,8 @@ var
   textRefIndexed: boolean; { current text reference came from an array }
   emittedAnyCode: boolean; { true once any function body has been emitted }
   idxFdClose: longint;     { fd_close import index }
+  idxFdPrestatGet: longint; { fd_prestat_get import index }
+  addrPreopenFd: longint;  { data word caching the preopened directory fd }
   idxIntToStr: longint;    { int-to-string helper, -1 if not emitted }
 
   { Data segment addresses for I/O scratch areas }
@@ -4237,6 +4239,18 @@ begin
   EnsureWriteChar := numImports + 22; { slot 22 = __write_char }
 end;
 
+procedure EnsurePreopenSlot;
+{** Allocate the word caching the preopened directory descriptor. Zero means
+  not yet looked up, which is safe because 0 is standard input and can never
+  be a preopened directory. }
+var j: longint;
+begin
+  if addrPreopenFd < 0 then begin
+    addrPreopenFd := AllocDataAligned(4, 4);
+    for j := 1 to 4 do DataBufEmit(secData, 0);
+  end;
+end;
+
 function EnsureTextHelpers: longint;
 {** Ensure the text file helpers are registered. __text_open is at slot 26;
   the other three follow it. Registering one registers all four, since they
@@ -4246,6 +4260,7 @@ begin
     Error('file operations require FILES to be switched on before the program header');
   EnsureIOBuffers;
   EnsureReadBuffers;
+  EnsurePreopenSlot;
   needsText := true;
   EnsureTextHelpers := numImports + 26;
 end;
@@ -9931,8 +9946,68 @@ begin
   EmitHelperI32Const(0);
   EmitHelperI32Store(2, TextOfsEof);
 
-  (* path_open(3, 0, name+1, namelen, oflags, -1, -1, 0, &t^.fd) *)
-  EmitHelperI32Const(3);
+  (* Find the preopened directory, once, and remember it.
+
+     WASI does not say which descriptor a host preopens a directory on. It
+     says a guest should walk fd_prestat_get upward from 3 and look at what
+     it finds. Assuming 3 worked under wasmtime and failed under wasmer,
+     which is exactly the kind of thing a second runtime is for.
+
+     The walk stops at 16: a host that has not offered a directory by then is
+     not going to, and the open that follows will fail with a reportable
+     errno rather than hanging. *)
+  EmitHelperI32Const(addrPreopenFd);
+  EmitHelperI32Load(2, 0);
+  EmitHelper(OpI32Eqz);
+  EmitHelper(OpIf); EmitHelper(WasmVoid);
+    EmitHelperI32Const(3);
+    EmitHelperLocalSet(3);
+    EmitHelper(OpBlock); EmitHelper(WasmVoid);
+    EmitHelper(OpLoop);  EmitHelper(WasmVoid);
+      (* give up past 16 *)
+      EmitHelperLocalGet(3);
+      EmitHelperI32Const(16);
+      EmitHelper(OpI32GtU);
+      EmitHelper(OpBrIf); EmitHelperULEB128(1);
+      (* fd_prestat_get(fd, scratch) = 0 means this descriptor is a preopen *)
+      EmitHelperLocalGet(3);
+      EmitHelperI32Const(addrIovec);
+      EmitHelperCall(idxFdPrestatGet);
+      EmitHelper(OpI32Eqz);
+      EmitHelper(OpIf); EmitHelper(WasmVoid);
+        (* tag 0 is a directory; anything else is not what we want *)
+        EmitHelperI32Const(addrIovec);
+        EmitHelper(OpI32Load8u); EmitHelperULEB128(0); EmitHelperULEB128(0);
+        EmitHelper(OpI32Eqz);
+        EmitHelper(OpIf); EmitHelper(WasmVoid);
+          EmitHelperI32Const(addrPreopenFd);
+          EmitHelperLocalGet(3);
+          EmitHelperI32Store(2, 0);
+          EmitHelper(OpBr); EmitHelperULEB128(3);
+        EmitHelper(OpEnd);
+      EmitHelper(OpEnd);
+      EmitHelperLocalGet(3);
+      EmitHelperI32Const(1);
+      EmitHelper(OpI32Add);
+      EmitHelperLocalSet(3);
+      EmitHelper(OpBr); EmitHelperULEB128(0);
+    EmitHelper(OpEnd);
+    EmitHelper(OpEnd);
+    (* Nothing found. Store 3 so the open fails with a real errno rather than
+       walking again on every call. *)
+    EmitHelperI32Const(addrPreopenFd);
+    EmitHelperI32Load(2, 0);
+    EmitHelper(OpI32Eqz);
+    EmitHelper(OpIf); EmitHelper(WasmVoid);
+      EmitHelperI32Const(addrPreopenFd);
+      EmitHelperI32Const(3);
+      EmitHelperI32Store(2, 0);
+    EmitHelper(OpEnd);
+  EmitHelper(OpEnd);
+
+  (* path_open(dirfd, 0, name+1, namelen, oflags, rights, rights, 0, &t^.fd) *)
+  EmitHelperI32Const(addrPreopenFd);
+  EmitHelperI32Load(2, 0);
   EmitHelperI32Const(0);
   EmitHelperLocalGet(0);
   EmitHelperI32Const(TextOfsName + 1);
@@ -12449,7 +12524,7 @@ begin
     bodyLen := 1 + 1 + 1 + helperCode.len + 1;
     EmitULEB128(secCode, bodyLen);
     CodeBufEmit(secCode, 1);
-    CodeBufEmit(secCode, 1);       { 1 local: errno }
+    CodeBufEmit(secCode, 2);       { 2 locals: errno, preopen walk }
     CodeBufEmit(secCode, WasmI32);
     CopyBufToCode(helperCode);
     CodeBufEmit(secCode, OpEnd);
@@ -13143,6 +13218,8 @@ begin
   emittedAnyCode := false;
   idxPathOpen := -1;
   idxFdClose := -1;
+  idxFdPrestatGet := -1;
+  addrPreopenFd := -1;
   stmtUsedResultBuf := false;
   stmtArenaBytes := 0;
   numFields := 0;
@@ -13377,6 +13454,8 @@ begin
                              TypePathOpen);
     idxFdClose := AddImport('wasi_snapshot_preview1', 'fd_close',
                             TypeI32I32);
+    idxFdPrestatGet := AddImport('wasi_snapshot_preview1', 'fd_prestat_get',
+                                 TypeI32x2I32);
   end;
   emittedAnyCode := true;
 

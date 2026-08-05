@@ -54,6 +54,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 
 .PHONY: help all pdf html clean
 .PHONY: bootstrap test test-checks check-private check-fixpoint test-all deploy-playground bump-version
+.PHONY: check-rust release preflight check-determinism check-selfhost-gen2 check-runtimes check-doc-examples check-windows check-playground
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -70,6 +71,8 @@ help:
 	@echo "  check-fixpoint       Verify snapshot is current and self-hosting holds"
 	@echo "  test-checks          Run the test suite with checks on, then with checks off"
 	@echo "  test-all             Everything CI runs (check-private test test-checks check-fixpoint)"
+	@echo "  preflight            Every check runnable on this machine; run before pushing"
+	@echo "  release              Build and verify build/release/compact-pascal-VERSION.zip"
 	@echo "  bump-version VERSION=YY.MM.PATCH"
 	@echo "                       Update version in compiler and docs, commit"
 
@@ -181,6 +184,132 @@ check-fixpoint: $(CPAS_BIN)
 # Everything CI runs, reproducible locally.
 test-all: check-private test test-checks check-fixpoint
 	@echo "test-all: all checks passed"
+
+# ── Checks CI does not run ───────────────────────────────────────
+
+# The same source compiled twice must give the same bytes. Cheap, and the
+# only thing that catches a compiler that has become sensitive to something
+# outside its input — an uninitialised buffer, a stale global between runs.
+check-determinism: $(CPAS_BIN)
+	@$(CPAS_BIN) < $(CPAS_SRC) > $(BUILD_DIR)/det-a.wasm
+	@$(CPAS_BIN) < $(CPAS_SRC) > $(BUILD_DIR)/det-b.wasm
+	@cmp $(BUILD_DIR)/det-a.wasm $(BUILD_DIR)/det-b.wasm \
+	  && echo "check-determinism: two runs, identical output" \
+	  || { echo "::error::the compiler is not deterministic" >&2; exit 1; }
+
+# check-fixpoint compares the fpc-built compiler against the snapshot. This
+# goes one generation further: the snapshot compiles the source, and what it
+# produces compiles the source to the same bytes again. A compiler can agree
+# with its parent and still be wrong about itself.
+check-selfhost-gen2: $(SNAPSHOT)
+	@mkdir -p $(BUILD_DIR)
+	@$(WASMRUN) $(SNAPSHOT) < $(CPAS_SRC) > $(BUILD_DIR)/gen2.wasm
+	@$(WASMRUN) $(BUILD_DIR)/gen2.wasm < $(CPAS_SRC) > $(BUILD_DIR)/gen3.wasm
+	@cmp $(BUILD_DIR)/gen2.wasm $(BUILD_DIR)/gen3.wasm \
+	  && echo "check-selfhost-gen2: second generation is a fixpoint" \
+	  || { echo "::error::generation 2 and 3 differ" >&2; exit 1; }
+
+# The suite under a second runtime. Two interpreters disagreeing is how a
+# dependence on one runtime's tolerance shows up; wasmtime and wasmer differ
+# in trap reporting, which the runner already accounts for.
+# wasmer 7.1 will not create a new file inside a --dir preopen: path_open with
+# O_CREAT answers ENOTDIR. Opening a file that already exists works, and so
+# does everything else, so this is a limitation of that runtime rather than a
+# portability defect here — the same oflags and rights succeed under wasmtime,
+# and rewriting an existing file succeeds under wasmer.
+#
+# The two tests that create files are therefore expected to fail. Pinned as a
+# set rather than skipped, so this notices if wasmer starts working or if a
+# different test breaks.
+WASMER_EXPECTED_FAILURES := t117_text_write_read t120_read_past_eof
+
+check-runtimes: $(CPAS_BIN)
+	@if ! command -v wasmer >/dev/null 2>&1; then \
+	  echo "check-runtimes: wasmer not installed, skipped"; \
+	else \
+	  out=$$(bash compiler-tests/run-tests.sh wasmer 2>&1 || true); \
+	  got=$$(printf '%s\n' "$$out" | sed -n 's/^FAIL \([a-z0-9_]*\).*/\1/p' | sort | tr '\n' ' '); \
+	  want=$$(printf '%s\n' $(WASMER_EXPECTED_FAILURES) | sort | tr '\n' ' '); \
+	  if [ "$$got" = "$$want" ]; then \
+	    echo "check-runtimes: wasmer agrees with wasmtime except the known file-creation limit"; \
+	  else \
+	    echo "::error::wasmer failures changed" >&2; \
+	    echo "  expected: $$want" >&2; \
+	    echo "  got:      $$got" >&2; \
+	    exit 1; \
+	  fi; \
+	fi
+
+# Every self-contained example in the documentation, compiled and run.
+check-doc-examples: $(CPAS_BIN)
+	@bash compiler-tests/check-doc-examples.sh
+
+# The compiler cross-compiled for Windows must produce the same bytes. Needs
+# fp-units-win-rtl and wine; skipped with a note rather than failing when
+# either is missing, so this stays runnable on a bare machine.
+check-windows:
+	@if ! fpc -Twin64 -FE$(BUILD_DIR) -o$(BUILD_DIR)/cross-probe.exe \
+	     /dev/null >/dev/null 2>&1 && \
+	     ! printf 'begin end.\n' > $(BUILD_DIR)/probe.pas 2>/dev/null; then \
+	  echo "check-windows: cannot write probe, skipped"; \
+	elif ! command -v wine >/dev/null 2>&1; then \
+	  echo "check-windows: wine not installed, skipped"; \
+	else \
+	  mkdir -p $(BUILD_DIR)/win64; \
+	  printf 'begin end.\n' > $(BUILD_DIR)/probe.pas; \
+	  if fpc -Twin64 -FE$(BUILD_DIR) -o$(BUILD_DIR)/probe.exe \
+	       $(BUILD_DIR)/probe.pas >/dev/null 2>&1; then \
+	    fpc -Mtp -Twin64 -FE$(BUILD_DIR)/win64 $(CPAS_SRC) >/dev/null && \
+	    WINEDEBUG=-all wine $(BUILD_DIR)/win64/cpas.exe < $(CPAS_SRC) \
+	      > $(BUILD_DIR)/windows.wasm 2>/dev/null && \
+	    cmp $(BUILD_DIR)/windows.wasm $(SNAPSHOT) \
+	      && echo "check-windows: byte-identical to the snapshot" \
+	      || { echo "::error::the Windows build disagrees with the snapshot" >&2; exit 1; }; \
+	  else \
+	    echo "check-windows: no win64 RTL (fp-units-win-rtl-3.2.2), skipped"; \
+	  fi; \
+	fi
+
+# The docs workflow deploys the playground on every push that touches doc/,
+# pages/, compiler/, or the Makefile — which is most of them. The deployed
+# compiler.wasm is generated and gitignored, so what is worth checking is not
+# whether the local copy is current but whether the deploy step still works
+# and copies the right bytes. A broken one is only visible on the published
+# site otherwise.
+check-playground: $(SNAPSHOT)
+	@$(MAKE) --no-print-directory deploy-playground >/dev/null
+	@cmp -s $(SNAPSHOT) $(PAGES_DIR)/playground/compiler.wasm \
+	  && cmp -s $(CPAS_SRC) $(PAGES_DIR)/playground/samples/cpas.pas \
+	  && echo "check-playground: deploy reproduces the snapshot and sample" \
+	  || { echo "::error::deploy-playground did not copy what it should" >&2; exit 1; }
+
+# The Rust crate, exactly as CI checks it. Not in test-all because that target
+# is the Pascal side and runs where cargo may not exist.
+check-rust:
+	@if ! command -v cargo >/dev/null 2>&1; then \
+	  echo "check-rust: cargo not installed, skipped"; \
+	else \
+	  cargo build --quiet && \
+	  cargo test --quiet && \
+	  cargo clippy --all-targets --quiet -- -D warnings && \
+	  for e in hello calculator host-callback; do \
+	    cargo run --quiet --example $$e >/dev/null || exit 1; \
+	  done && \
+	  echo "check-rust: crate builds, tests pass, clippy clean, examples run"; \
+	fi
+
+# Build the release artifact and prove it works: validate the module, compile
+# a program with it, and run what it produced.
+release: $(SNAPSHOT)
+	@bash compiler-tests/build-release.sh
+
+# Everything that can be checked on this machine. Run before pushing: CI is
+# a second opinion, not the first one.
+preflight: test-all check-determinism check-selfhost-gen2 check-doc-examples \
+           check-windows check-playground check-runtimes check-rust release
+	@echo ""
+	@echo "preflight: every local check passed"
+	@echo "  not covered here: macOS. CI is the only place that runs it."
 
 # ── Deploy ───────────────────────────────────────────────────────
 

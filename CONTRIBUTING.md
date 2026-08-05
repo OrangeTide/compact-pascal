@@ -43,20 +43,40 @@ make pdf
 ```bash
 # Everything CI runs, reproducible locally
 make test-all
+
+# Everything this machine can check, including things CI does not
+make preflight
 ```
 
-That target is the one to run before opening a pull request. It covers four
-things, and each catches something the others do not:
+`make preflight` is the one to run before pushing. CI is a second opinion, not
+the first one: it takes minutes to answer, it cannot be stepped through, and a
+failure there is a worse place to learn something than a failure here.
 
-| Target | What it checks |
-|---|---|
-| `make check-private` | No tracked file leaks a local path or personal identifier |
-| `make test` | The compiler test suite at default settings |
-| `make test-checks` | The same suite with checks forced on, then forced off |
-| `make check-fixpoint` | The committed snapshot is current and self-hosting holds |
+| Target | What it checks | In CI |
+|---|---|---|
+| `check-private` | No tracked file leaks a local path or personal identifier | yes |
+| `test` | The compiler test suite at default settings | yes |
+| `test-checks` | The same suite with checks forced on, then forced off | yes |
+| `check-fixpoint` | The committed snapshot is current and self-hosting holds | yes |
+| `check-rust` | Crate builds, tests pass, clippy clean, examples run | yes |
+| `check-windows` | The Windows cross-build produces the same bytes | yes |
+| `check-determinism` | The same source compiled twice gives the same bytes | no |
+| `check-selfhost-gen2` | The snapshot's own output is itself a fixpoint | no |
+| `check-doc-examples` | Every self-contained example in the docs compiles and runs | no |
+| `check-runtimes` | The suite under wasmer as well as wasmtime | no |
+| `check-playground` | The playground deploy copies what it should | no |
+| `release` | The release artifact builds, and the compiler in it works | no |
 
-The Rust crate is tested separately with `cargo test`, and CI additionally runs
-`cargo clippy --all-targets -- -D warnings` and runs every example.
+**macOS is the one thing preflight cannot cover.** CI is the only place it
+runs, so a macOS-specific mistake is the one class of failure that will reach
+CI first. Keep shell scripts working under bash 3.2, which is what macOS
+ships: no `${arr[@]}` on an empty array under `set -u`, no associative arrays,
+no `declare -n`.
+
+`check-windows` and `check-runtimes` skip themselves with a note when the
+toolchain is missing, so preflight still runs on a bare machine. A skip is
+printed rather than silent, because a check that quietly does nothing is worse
+than one that is absent.
 
 ### The two invariants
 
