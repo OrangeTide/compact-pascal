@@ -21,10 +21,8 @@ begin
   n := 0;
   while not eof(f) do begin
     readln(f, s);
-    if length(s) > 0 then begin
-      n := n + 1;
-      writeln(n, ': ', s);
-    end;
+    n := n + 1;
+    writeln(n, ': ', s);
   end;
   close(f);
 end.

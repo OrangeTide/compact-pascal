@@ -117,7 +117,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 
 ### Differences from ISO 7185
 
-- **No file types.** The `file` type and associated operations are omitted.
+- **A `text` type only.** `file of T` and untyped `file` are omitted; text files are sequential lines. See [Text Files](#text-files).
 - **Built-in I/O is a compiler intrinsic.** `write`, `writeln`, `read`, `readln` are supported but compile to WASI preview 1 `fd_write`/`fd_read` calls rather than being part of the runtime. Any WASI-compatible host provides these automatically. See [Built-in I/O](#built-in-io).
 - **Dynamic allocation.** `New` and `Dispose` over a first-fit free list. No garbage collection, no compaction. See [The Heap](#the-heap).
 - **Short-circuit evaluation.** `and then` and `or else` operators from ISO 10206 are supported. See [Short-Circuit Evaluation](#short-circuit-evaluation).
@@ -448,6 +448,76 @@ type
 The tag field (`Kind`) is a normal field accessible at runtime. The tag field name is optional — `case TypeIdentifier of` is legal when you don't need to read the tag at runtime; omitting the name makes the variant anonymous and inaccessible as a field. All variant fields overlap in memory starting at the same offset. The record size is determined by the largest variant. With `{$R+}`, accessing a variant field checks the tag value.
 
 Variant records map directly to WASM linear memory — the variants simply share the same byte offsets. No special WASM support is required.
+
+## Text Files
+
+A `text` variable is a file of lines. Filesystem access is opt-in: a program must say `{$FILES ON}` before its `program` header, which adds `path_open` and `fd_close` to the module's imports so a host can see the request without reading the source.
+
+```pascal
+{$FILES ON}
+program Copy;
+var
+  f: text;
+  line: string;
+begin
+  assign(f, 'out.txt');
+  rewrite(f);
+  writeln(f, 'first');
+  writeln(f, 'count ', 42);
+  close(f);
+
+  assign(f, 'out.txt');
+  reset(f);
+  while not eof(f) do begin
+    readln(f, line);
+    writeln(line);
+  end;
+  close(f);
+end.
+```
+
+| Operation | Meaning |
+|---|---|
+| `Assign(f, name)` | Record the file name. Does not open anything. |
+| `Reset(f)` | Open for reading, from the start. |
+| `Rewrite(f)` | Create or truncate, open for writing. |
+| `Close(f)` | Flush and close. Closing an unopened file is harmless. |
+| `Write(f, ...)`, `WriteLn(f, ...)` | Append strings, characters, and integers. |
+| `ReadLn(f, s)` | Read the next line into a string. |
+| `Eof(f)` | True once a read has run off the end. |
+| `IOResult` | The last error, cleared by reading it. |
+
+`Assign` separates naming from opening so a program can reopen the same file without repeating the name, and so a failed `Reset` leaves something to report about.
+
+### Paths
+
+A name is resolved relative to a directory the host preopens, and nothing outside it is reachable. With `wasmtime` that is `--dir=.`; a program run without it fails at `Reset` rather than at compile time, because whether a directory was granted is not knowable when the module is built.
+
+The path is passed to the host as written. A host is expected to reject `..` and absolute paths; this language does not check them, because the sandbox boundary belongs to whoever granted the directory.
+
+### Errors
+
+`{$I+}`, the default, traps at the point an operation fails. That is the right behavior for a program that never checks, which is most of them: the alternative is carrying on with a file it does not have.
+
+`{$I-}` records the error instead and lets the program continue. `IOResult` returns it and **clears it**, so reading twice gives zero the second time. This is Turbo Pascal's contract. Check it immediately, or store it:
+
+```pascal
+{$I-}
+  reset(f);
+{$I+}
+  if IOResult <> 0 then
+    writeln('cannot open the file');
+```
+
+The value is the host's WASI errno, not a Pascal error code. Compare it against zero rather than against a number; the numbering is the host's and this document does not fix it.
+
+### What text files do not do yet
+
+- **`ReadLn` reads into a string only.** Reading a number from a file means reading the line and parsing it. The console `ReadLn` accepts integers because it scans standard input directly, and the two paths share no code.
+- **No `Read(f, ...)` without the line break**, no `Append`, no `SeekEof`, and no `file of T`. Text is sequential; there is no `Seek`.
+- **Concatenation in a file write is rejected.** `writeln(f, a + b)` is a compile error naming the limitation; assign it to a string variable first. The concatenation machinery targets the console path's buffers.
+- **A line longer than the destination string is truncated**, and the rest of that line is discarded rather than being seen as a second line.
+- **The number of open files is whatever the host allows.** There is no table and no limit here.
 
 ## Pointers
 
@@ -972,6 +1042,7 @@ Local directives may appear anywhere in the source. They take effect from the po
 | `{$RANGECHECKS ON/OFF}` | `{$R+/-}` | OFF | Emit runtime range checks for array indexing and subrange assignments. |
 | `{$OVERFLOWCHECKS ON/OFF}` | `{$Q+/-}` | OFF | Emit runtime overflow checks for integer arithmetic. |
 | `{$STACKCHECKS ON/OFF}` | `{$S+/-}` | ON | Emit a stack overflow guard in every procedure and function prologue, a frame balance check in every epilogue, and a nil check on every pointer dereference. |
+| `{$I+/-}` | — | ON | Trap on a file operation that fails. With it off the error is recorded for `IOResult` instead. Distinguished from `{$I 'file'}` by the character after the `I`. |
 | `{$ALIGN n}` | — | 4 | Record field alignment in bytes (1, 2, 4, or 8). Each field within a record is placed at the next multiple of `n`; the total record size is padded to a multiple of `n`. |
 | `{$INCLUDE 'filename'}` | `{$I 'filename'}` | — | Include the contents of `filename` at this point. Resolved by the host before compilation — see below. |
 | `{$EXPORT name}` | — | — | Export the next procedure, function, or variable as `name` in the WASM module's export table. |

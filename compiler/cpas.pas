@@ -4527,9 +4527,30 @@ begin
           if (textEofSym < 0) or (syms[textEofSym].kind <> skVar)
              or (syms[textEofSym].typ <> tyText) then
             Error('a text file variable is required here');
+          { Eof looks ahead rather than reporting whether a read has already
+            failed. Reading the next byte and putting it back costs one
+            buffered comparison and makes `while not eof(f)` stop where a
+            reader expects, instead of running one extra iteration that
+            yields an empty line. Turbo Pascal's Eof looks ahead for the same
+            reason. }
           EnsureTextHelpers;
+          curFuncNeedsCaseTemp := true;
           EmitTextVarAddr(textEofSym);
-          EmitI32Load(2, TextOfsEof);
+          EmitCall(EnsureTextHelpers + 2);   { __text_read_byte }
+          EmitLocalTee(curCaseTempIdx);
+          EmitI32Const(-1);
+          EmitOp(OpI32Eq);
+          EmitLocalGet(curCaseTempIdx);
+          EmitI32Const(-1);
+          EmitOp(OpI32Ne);
+          EmitOp(OpIf); EmitOp(WasmVoid);
+            EmitTextVarAddr(textEofSym);
+            EmitTextVarAddr(textEofSym);
+            EmitI32Load(2, TextOfsPos);
+            EmitI32Const(1);
+            EmitOp(OpI32Sub);
+            EmitI32Store(2, TextOfsPos);
+          EmitOp(OpEnd);
           NextToken;
           Expect(tkRParen);
         end else begin

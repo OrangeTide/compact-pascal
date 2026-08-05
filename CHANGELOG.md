@@ -46,8 +46,19 @@ behind a decision lives in the Findings section of `PLAN.md`.
 - **`{$FILES ON}` global directive**, requesting filesystem access. It adds
   `path_open` and `fd_close` to the module's imports, so a host can see from
   the import list whether a program wants files. It must appear before the
-  `program` header. No language surface uses it yet; the `text` type and
-  `Assign`/`Reset`/`ReadLn` are still to come.
+  `program` header.
+- **Text files.** `text` is a real type. `Assign`, `Reset`, `Rewrite`,
+  `Close`, `Write`/`WriteLn` to a file, `ReadLn(f, s)`, `Eof(f)`, and
+  `IOResult`. Names resolve inside a directory the host preopens, and nothing
+  outside it is reachable.
+
+  `{$I+}`, the default, traps where an operation fails. `{$I-}` records the
+  error instead; `IOResult` returns it and clears it, so reading twice gives
+  zero the second time, as in Turbo Pascal.
+
+  Not yet: `ReadLn` reads strings only, there is no `Read` without the line
+  break, no `Append`, no `Seek`, no `file of T`, and a concatenation in a file
+  write is rejected rather than compiled. See "Text Files" in the reference.
 - **Functions may return a `string`, `string[n]`, record, or array.**
   `function F: string` was previously rejected outright. The result is
   caller-allocated and released at the end of the statement; loops release each

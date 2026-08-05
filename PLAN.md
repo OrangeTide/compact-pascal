@@ -506,6 +506,45 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**`Eof(f)` looks ahead rather than reporting a read that already failed.** The
+first implementation set a flag when a refill returned nothing, which is the
+cheap thing to do and is wrong: `while not eof(f) do readln(f, s)` ran one
+extra iteration and produced a spurious empty line. Found by running the
+reference example rather than by reasoning about it, which is the third time a
+documentation example has caught a defect in this project.
+
+`Eof` now reads the next byte and puts it back by decrementing the buffer
+position. That costs one buffered comparison, never a syscall, because a
+refill has already happened if it was going to. Turbo Pascal's `Eof` looks
+ahead for the same reason.
+
+**A text variable is a control block, not a handle.** The plan said handle
+table. A table needs entries created and destroyed in step with variable
+lifetimes, and nothing in this language tracks those: a `text` local in a
+recursive procedure would need a table slot per invocation. Putting the whole
+state in the variable makes its lifetime the variable's lifetime, which the
+frame already manages. The cost is 536 bytes per variable, most of it the
+256-byte buffer and the 256-byte name.
+
+`Assign` stores the name in the block rather than passing it to the open,
+because Pascal separates naming from opening: a program assigns once and may
+`Reset` and `Rewrite` the same variable repeatedly, and a failed `Reset` has
+to leave something to report about.
+
+**Two things the WASI layer only teaches by being run.** `path_open` rejects
+all-ones rights: a host validates the field against the rights it knows and
+refuses an unknown bit, so `-1` fails outright rather than being narrowed.
+wasmtime reports that as an integer conversion error, which does not sound
+like what it means. The compiler asks for bits 0 through 28 instead, every
+right preview 1 defines.
+
+And the preopened directory is assumed to be file descriptor 3. WASI does not
+guarantee it; a guest is meant to walk `fd_prestat_get` upward from 3 and
+match the directory it wants. Every host this targets grants one directory and
+it lands on 3, so the walk would be three more imports and a loop to reach the
+same answer. Written down as an assumption so it is not rediscovered as
+folklore.
+
 **Filesystem access is opt-in because always-on imports broke the embedding.**
 The five core WASI imports are registered before parsing so that helper
 function slots, numbered from the import count, are stable in a single pass.
@@ -1761,11 +1800,14 @@ diagnostic for what is really a missing capability.
       present. Registering them unconditionally broke every Rust host, since
       the embedding bridge implements five WASI functions and a module
       importing seven cannot instantiate. See Findings.
-- [ ] The `text` type, promoted from the two predefined handles to a real type
-      with a handle table.
-- [ ] `Assign`, `Reset`, `Rewrite`, `Close`, `ReadLn`, `WriteLn`, `Eof`,
-      `IOResult`. TP semantics: `IOResult` returns the last error and clears
-      it, and `{$I-}` suppresses the trap so the program can check.
+- [x] The `text` type, promoted from the two predefined handles to a real
+      type. A 536-byte control block per variable rather than a handle table:
+      the block holds the descriptor, the buffer, and the name Assign
+      recorded, so no side table has to be kept in step with variable
+      lifetimes.
+- [x] `Assign`, `Reset`, `Rewrite`, `Close`, `ReadLn`, `WriteLn`, `Eof`,
+      `IOResult`, with the TP semantics including the clearing. `Eof` looks
+      ahead rather than reporting a read that already failed; see Findings.
 - [ ] Compiler-side `{$I}`: the compiler resolves and expands includes itself.
       The host-side path stays supported for embedders that want it, but the
       standalone CLI stops being single-file-only.
@@ -1775,29 +1817,27 @@ diagnostic for what is really a missing capability.
 help; a program opens, writes, reopens, and reads back a file; `IOResult`
 reports a missing file rather than trapping under `{$I-}`. **Not yet met.**
 
-**Status: the WASI layer is in, the language surface is not.** The remaining
-four items are the bulk of the phase and are sequenced:
+**Status: programs have file I/O; the compiler does not use it yet.** Two of
+the four exit conditions are met. A program opens, writes, reopens, and reads
+back a file (`t117`), and `IOResult` reports a missing file rather than
+trapping under `{$I-}` (`t118`), with the trap under `{$I+}` pinned by `t119`.
 
-1. `text` as a real type with a handle table. Everything else needs it, since
-   `Assign(f, name)` has to have somewhere to put the name before `Reset`
-   turns it into a descriptor.
-2. The eight procedures, then `IOResult` and `{$I-}` on top. `{$I-}` is a
-   local directive like `{$R+}`, so the machinery exists; what is new is that
-   a suppressed error has to be *recorded* rather than dropped.
-3. Compiler-side `{$I}`. This needs a source stack in the scanner, not just
-   file access: `ReadCh` reads one character at a time and would have to read
-   from the current source rather than from stdin. Both builds need it, so the
-   compiler source gains an `{$IFDEF FPC}` pair like the one `ReadCh` already
-   carries.
-4. Nesting depth and cycle checks, which are cheap once the source stack
-   exists and hold the depth and the open names.
+What remains is compiler-side `{$I}`, and it is not blocked on file access any
+more, which is the useful part: the primitives now exist and are exercised.
+The work left is the scanner, not the runtime.
 
-The risk worth naming before starting item 3: the self-hosted compiler must
-call the file primitives from Pascal, so they have to be reachable from the
-language, not only from the compiler's own code generator. That makes them
-part of the language surface whether or not the `text` type is ready, and it
-is the reason to do items 1 and 2 first rather than reaching for `{$I}` early
-because its exit test is the crisp one.
+`ReadCh` reads one character at a time from stdin. Includes need a source
+stack: pushing the current position, switching to a file, and popping at its
+end. Both builds need it, so the compiler source gains an `{$IFDEF FPC}` pair
+like the one `ReadCh` already carries — fpc side on real file handles,
+self-hosted side on the text helpers this phase added. The nesting depth and
+cycle checks are cheap once that stack exists, since it already holds the
+depth and the open names.
+
+One thing to settle first: the self-hosted compiler would have to declare a
+`text` variable per nesting level, at 536 bytes each. Eight levels is 4 KB of
+the compiler's own frame, which is affordable but is a decision rather than a
+detail, and a fixed array of blocks may be better than a stack of locals.
 
 ### Phase K: System units — 2 weeks
 
