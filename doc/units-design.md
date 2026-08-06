@@ -83,8 +83,10 @@ proposal, used for structured assignment. Every other post-MVP proposal is
 unused, and `make check-wasm-features` now asserts exactly that on every
 preflight so the claim cannot drift again.
 
-That is the budget: one proposal, universally supported since 2019. Option A
-would spend a second one to avoid writing a linker.
+That is the budget: one proposal, accepted by every runtime this project
+targets. Checked rather than dated — a module using `memory.copy` runs under
+wasmtime and wasmer and validates in Node. Option A would spend a second
+proposal to avoid writing a linker.
 
 ## The object format
 
@@ -211,6 +213,41 @@ If it is added, the rule should be: initialization runs in the order units were
 finished being compiled, dependencies first, and the linker emits calls to each
 unit's initializer at the top of `_start`.
 
+## How `uses` tells a system unit from a Pascal one
+
+Phase K gave `uses` a fixed table of system units. A Pascal unit has to share
+the clause, and the resolution rule has to be decidable in one pass with no
+search:
+
+```pascal
+uses Files, Geometry;
+```
+
+1. If the name is a **system unit**, it is one. `Files` and `System` are the
+   current set.
+2. Otherwise it must be satisfied by an **object handed to the compiler** on
+   the command line. The compiler matches on the unit name recorded in the
+   object, not on the file name.
+3. If neither, that is an error naming both possibilities, because "unknown
+   unit" is unhelpful when the real problem is a forgotten argument.
+
+**System unit names are reserved.** A Pascal unit may not be called `Files` or
+`System`. The alternative — letting a local unit shadow a system one — makes
+the meaning of `uses Files` depend on which objects happen to be on the command
+line, which is the kind of action at a distance a search path would also bring
+and which rule 2 exists to avoid.
+
+## What this does to the host FFI
+
+Nothing. `{$IMPORT}` and `{$EXPORT}` stay exactly as they are: they are the
+boundary between Pascal and the host, and units are the boundary between Pascal
+and Pascal. A unit may contain `{$IMPORT}` declarations, and its objects carry
+those imports for the linker to merge.
+
+The one interaction: two units importing the same host function should produce
+one import in the linked module, so the linker deduplicates imports by
+(module, name, type) the way it deduplicates types.
+
 ## Command line
 
 ```
@@ -224,16 +261,48 @@ search path, and that is deliberate: a search path is a configuration surface
 and a source of "which one did it find" questions, and a build script that
 already knows what it is building can pass the paths.
 
+**The linker is a mode of `cpas`, not a separate program.** It shares the
+section-writing code that already exists, it keeps the toolchain one binary,
+and a separate linker would need its own copy of the WASM encoding rules —
+which is exactly the kind of duplication that drifts.
+
+**Staleness is the build system's problem.** `cpas` does not compare
+timestamps or hashes and does not decide whether an object needs rebuilding.
+A `make` rule does that, as it does for C.
+
+### The limit of "recompiling one unit does not require recompiling the others"
+
+It holds for a change to a unit's **implementation**: rebuild that object,
+relink, done.
+
+It does not hold for a change to its **interface**. Every importer read that
+interface and put its symbols in its own symbol table, so every importer has to
+be recompiled. This is true of every separate-compilation scheme that is not
+also a whole-program one, and it is what a build system's dependency edges are
+for. Worth stating because the exit criterion could otherwise be read as
+promising more than any of these designs delivers.
+
 ## What this does not decide
 
-- **Circular dependencies between unit interfaces.** Standard Pascal forbids
-  them; so should this, at least at first. The check is a cycle detection over
-  the units named in `uses`, the same shape as the include cycle check.
+- **Circular dependencies between unit interfaces.** So should this forbid
+  them, at least at first. The check is cycle detection over the units named
+  in `uses`, the same shape as the include cycle check. Turbo Pascal and
+  Delphi permit a cycle between *implementation* sections and not between
+  interfaces; ISO 7185 has no units at all, so there is no standard to defer
+  to here.
 - **Generic or parameterized units.** Not planned, and the non-goals in the
   white paper already rule out the machinery they would need.
 - **Whether a unit can be a WASM module boundary for embedding purposes.** A
   host that wants to load a unit separately at run time is asking for Option A
   after all, and it should be evaluated on its own terms if anyone wants it.
+- **Whether the compiler itself should be split into units.** `cpas.pas` is
+  thirteen thousand lines in one file and is the obvious candidate, which is
+  exactly why it should not be the first user. Splitting it would mean the
+  fixpoint compares a linked module against a linked module, and the fpc
+  bootstrap would need the same split in fpc's own unit system — two moving
+  parts added to the one invariant the project leans on hardest. Prove units on
+  a three-unit test program first. Splitting the compiler is a separate
+  decision with its own risk, and it is not required by anything.
 
 ## Review questions
 
@@ -245,3 +314,14 @@ The four the roadmap asks, and where each landed:
 | Interface description | Compiler-generated, carried inside the object |
 | WASM mapping | Objects plus a linker, one module out. **This is the decision to argue with.** |
 | Initialization | None at first; variable initializers cover the common case |
+
+Decided while reviewing this document rather than while writing it, and listed
+separately because they were gaps rather than answers:
+
+| Question | Answer |
+|---|---|
+| `uses Files, Geometry` — which is which | System unit names are reserved and win; anything else must be an object on the command line |
+| `{$IMPORT}` / `{$EXPORT}` | Unchanged. Units are Pascal-to-Pascal; the directives are Pascal-to-host. The linker deduplicates identical host imports. |
+| Where the linker lives | A mode of `cpas`, not a second binary |
+| Rebuild scope | Implementation changes relink; **interface changes force importers to recompile**, which no separate-compilation scheme avoids |
+| Splitting the compiler into units | Not first. It would put two moving parts into the fixpoint, and nothing requires it. |

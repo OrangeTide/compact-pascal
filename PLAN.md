@@ -506,6 +506,34 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**Reviewing the units design found four gaps and two overreaching claims.** A
+design document is not code, so reviewing it means checking the arguments
+rather than running anything. What that turned up:
+
+The gaps were all interactions the draft never mentioned. How `uses Files,
+Geometry` decides which name is a system unit and which is a Pascal one, now
+resolved by reserving system unit names and requiring everything else to be an
+object on the command line — the alternative, letting a local unit shadow a
+system one, makes `uses Files` mean different things depending on the argument
+order. What happens to `{$IMPORT}` and `{$EXPORT}`, which is nothing, except
+that the linker has to deduplicate identical host imports. Whether the linker
+is a separate program, which it should not be, because a second binary needs
+its own copy of the WASM encoding rules and that is what drifts. And whether
+the compiler itself should be split into units, which it should not be first:
+it would put two moving parts into the fixpoint, and nothing requires it.
+
+The claims were "bulk memory, universally supported since 2019", a date
+recalled rather than checked and now replaced with three runtimes actually
+accepting a module that uses it, and "Standard Pascal forbids circular unit
+dependencies", which is wrong because ISO 7185 has no units at all.
+
+One more thing the review added rather than corrected: the exit criterion says
+recompiling one unit must not require recompiling the others, and that holds
+only for a change to a unit's *implementation*. An interface change forces
+every importer to recompile, in this design and in every other that is not
+whole-program. Stated in the document so the criterion is not read as promising
+more than any design can deliver.
+
 **The compiler has never emitted MVP-only WASM, and four documents said it
 did.** Establishing Phase L's constraints meant finding out what the compiler
 actually requires, which is WASM 1.0 plus `memory.copy` from the bulk-memory
