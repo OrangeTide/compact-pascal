@@ -6989,6 +6989,205 @@ begin
   end;
 end;
 
+procedure ParseCallStatement(sym, recvLocal: longint);
+{** Emit a call to sym as a statement, discarding a function's result.
+
+  recvLocal is -1 for an ordinary call. For a standalone method it is the
+  index of the local holding the receiver's address, which is pushed after
+  the visible arguments because the receiver is the last parameter. That
+  ordering is what lets a method reuse this argument loop unchanged. }
+var
+  argIdx: longint;
+  argSym: longint;
+  argTyp, argTypeIdx: longint;
+  fldIdx: longint;
+  i: longint;
+  savedConcatPieces, savedConcatBase: longint;
+  concatSPAllocs: longint;
+begin
+  concatSPAllocs := 0;
+  savedConcatPieces := concatPieces;
+  savedConcatBase := concatScratchBase;
+  concatScratchBase := concatScratchBase + concatPieces * 4;
+  concatPieces := 0;
+  if concatScratchBase + 68 > ConcatScratchBytes then
+    Error('string concatenation nested too deeply');
+  if tokKind = tkLParen then begin
+    NextToken;
+    argIdx := 0;
+    while tokKind <> tkRParen do begin
+      if funcs[syms[sym].size].varParams[argIdx] then begin
+        { var param: pass address of the variable }
+        if funcs[syms[sym].size].constParams[argIdx] then begin
+          { const param: parse full expression (may include concat) }
+          ParseExpression(PrecNone);
+          if concatPieces > 0 then begin
+            { Concat expression: finalize into SP-allocated temp
+              (avoids aliasing when callee also does concat) }
+            curFuncNeedsStringTemp := true;
+            EmitLocalSet(curStringTempIdx);
+            { Allocate 256 bytes on WASM stack }
+            EmitGlobalGet(0);
+            EmitI32Const(256);
+            EmitOp(OpI32Sub);
+            EmitGlobalSet(0);
+            concatSPAllocs := concatSPAllocs + 1;
+            { Zero concat temp at $sp }
+            EmitGlobalGet(0);
+            EmitI32Const(0);
+            EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+            { Append each saved piece }
+            for i := 0 to concatPieces - 1 do begin
+              EmitGlobalGet(0);
+              EmitI32Const(255);
+              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+              EmitI32Load(2, 0);
+              EmitCall(EnsureStrAppend);
+            end;
+            { Append last piece }
+            EmitGlobalGet(0);
+            EmitI32Const(255);
+            EmitLocalGet(curStringTempIdx);
+            EmitCall(EnsureStrAppend);
+            { Push SP (concat temp address) as the argument }
+            EmitGlobalGet(0);
+            concatPieces := 0;
+          end;
+          { else: simple string expression — address already on stack }
+        end else begin
+          if tokKind <> tkIdent then
+            Error('variable expected for var parameter');
+          argSym := LookupSym(tokStr);
+          if argSym < 0 then
+            Error('undeclared identifier: ' + tokStr);
+          if syms[argSym].kind <> skVar then
+            Error('variable expected for var parameter');
+          if syms[argSym].isVarParam then begin
+            { Already a pointer — pass it through }
+            EmitVarParamPtr(argSym);
+          end
+          else if (syms[argSym].offset < 0) and
+             ((syms[argSym].typ = tyRecord) or (syms[argSym].typ = tyArray)
+              or (syms[argSym].typ = tyString)) then begin
+            { Structured value param: local holds pointer, pass through }
+            EmitLocalGet(-(syms[argSym].offset + 1));
+          end
+          else if syms[argSym].offset < 0 then
+            Error('cannot pass value parameter by reference')
+          else begin
+            { Address = frame[level] + offset }
+            EmitFramePtr(syms[argSym].level);
+            EmitI32Const(syms[argSym].offset);
+            EmitOp(OpI32Add);
+          end;
+            NextToken;
+            { Postfix selectors on a var argument. Only [index] was
+              handled, which was enough while a designator could not
+              reach through a pointer. `Insert(t^.left, v)` is the
+              ordinary way to write a tree, so ^ and .field are handled
+              too. Only the address is computed here; the argument is a
+              reference, so no load follows. }
+            argTyp := syms[argSym].typ;
+            argTypeIdx := syms[argSym].typeIdx;
+            while (tokKind = tkLBrack) or (tokKind = tkDot)
+                  or (tokKind = tkCaret) do begin
+              if tokKind = tkCaret then begin
+                if argTyp <> tyPointer then
+                  Error('pointer type expected before ''^''');
+                if argTypeIdx < 0 then
+                  Error('cannot dereference nil');
+                EmitI32Load(2, 0);
+                EmitNilCheck;
+                argTyp := types[argTypeIdx].elemType;
+                argTypeIdx := types[argTypeIdx].elemTypeIdx;
+                NextToken;
+              end
+              else if tokKind = tkDot then begin
+                if argTyp <> tyRecord then
+                  Error('record type expected before ''.''');
+                NextToken;
+                if tokKind <> tkIdent then
+                  Expected('field name');
+                fldIdx := LookupField(argTypeIdx, tokStr);
+                if fldIdx < 0 then
+                  Error('unknown field: ' + tokStr);
+                if fields[fldIdx].offset <> 0 then begin
+                  EmitI32Const(fields[fldIdx].offset);
+                  EmitOp(OpI32Add);
+                end;
+                argTyp := fields[fldIdx].typ;
+                argTypeIdx := fields[fldIdx].typeIdx;
+                NextToken;
+              end
+              else begin
+                if argTyp <> tyArray then
+                  Error('array type expected before ''[''');
+                NextToken;
+                ParseExpression(PrecNone);
+                if types[argTypeIdx].arrLo <> 0 then begin
+                  EmitI32Const(types[argTypeIdx].arrLo);
+                  EmitOp(OpI32Sub);
+                end;
+                if types[argTypeIdx].elemSize <> 1 then begin
+                  EmitI32Const(types[argTypeIdx].elemSize);
+                  EmitOp(OpI32Mul);
+                end;
+                EmitOp(OpI32Add);
+                argTyp := types[argTypeIdx].elemType;
+                argTypeIdx := types[argTypeIdx].elemTypeIdx;
+                Expect(tkRBrack);
+              end;
+            end;
+            argSym := -1; { no longer tracking the original symbol }
+        end;
+      end else begin
+        ParseExpression(PrecNone);
+        if concatPieces > 0 then begin
+          { String concat in regular param: finalize into string temp }
+          curFuncNeedsStringTemp := true;
+          curFuncNeedsCaseTemp := true;
+          EmitLocalSet(curCaseTempIdx);
+          EmitLocalGet(curStringTempIdx);
+          EmitI32Const(0);
+          EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
+          for i := 0 to concatPieces - 1 do begin
+            EmitLocalGet(curStringTempIdx);
+            EmitI32Const(255);
+            EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+            EmitI32Load(2, 0);
+            EmitCall(EnsureStrAppend);
+          end;
+          EmitLocalGet(curStringTempIdx);
+          EmitI32Const(255);
+          EmitLocalGet(curCaseTempIdx);
+          EmitCall(EnsureStrAppend);
+          EmitLocalGet(curStringTempIdx);
+          concatPieces := 0;
+        end;
+      end;
+      argIdx := argIdx + 1;
+      if tokKind = tkComma then
+        NextToken;
+    end;
+    Expect(tkRParen);
+  end;
+  concatPieces := savedConcatPieces;
+  concatScratchBase := savedConcatBase;
+  if recvLocal >= 0 then
+    EmitLocalGet(recvLocal);
+  EmitCall(syms[sym].offset);
+  { Restore SP for any concat temp allocations }
+  if concatSPAllocs > 0 then begin
+    EmitGlobalGet(0);
+    EmitI32Const(concatSPAllocs * 256);
+    EmitOp(OpI32Add);
+    EmitGlobalSet(0);
+    concatSPAllocs := 0;
+  end;
+  if syms[sym].kind = skFunc then
+    EmitOp(OpDrop); { discard return value }
+end;
+
 procedure ParseStatement;
 {** Parse a single statement. }
 var
@@ -7776,185 +7975,7 @@ begin
           EmitOp(OpDrop);
       end
       else if (sym >= 0) and ((syms[sym].kind = skProc) or (syms[sym].kind = skFunc)) then begin
-        { Procedure/function call (discard result for functions) }
-        savedConcatPieces := concatPieces;
-        savedConcatBase := concatScratchBase;
-        concatScratchBase := concatScratchBase + concatPieces * 4;
-        concatPieces := 0;
-        if concatScratchBase + 68 > ConcatScratchBytes then
-          Error('string concatenation nested too deeply');
-        if tokKind = tkLParen then begin
-          NextToken;
-          argIdx := 0;
-          while tokKind <> tkRParen do begin
-            if funcs[syms[sym].size].varParams[argIdx] then begin
-              { var param: pass address of the variable }
-              if funcs[syms[sym].size].constParams[argIdx] then begin
-                { const param: parse full expression (may include concat) }
-                ParseExpression(PrecNone);
-                if concatPieces > 0 then begin
-                  { Concat expression: finalize into SP-allocated temp
-                    (avoids aliasing when callee also does concat) }
-                  curFuncNeedsStringTemp := true;
-                  EmitLocalSet(curStringTempIdx);
-                  { Allocate 256 bytes on WASM stack }
-                  EmitGlobalGet(0);
-                  EmitI32Const(256);
-                  EmitOp(OpI32Sub);
-                  EmitGlobalSet(0);
-                  concatSPAllocs := concatSPAllocs + 1;
-                  { Zero concat temp at $sp }
-                  EmitGlobalGet(0);
-                  EmitI32Const(0);
-                  EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
-                  { Append each saved piece }
-                  for i := 0 to concatPieces - 1 do begin
-                    EmitGlobalGet(0);
-                    EmitI32Const(255);
-                    EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
-                    EmitI32Load(2, 0);
-                    EmitCall(EnsureStrAppend);
-                  end;
-                  { Append last piece }
-                  EmitGlobalGet(0);
-                  EmitI32Const(255);
-                  EmitLocalGet(curStringTempIdx);
-                  EmitCall(EnsureStrAppend);
-                  { Push SP (concat temp address) as the argument }
-                  EmitGlobalGet(0);
-                  concatPieces := 0;
-                end;
-                { else: simple string expression — address already on stack }
-              end else begin
-                if tokKind <> tkIdent then
-                  Error('variable expected for var parameter');
-                argSym := LookupSym(tokStr);
-                if argSym < 0 then
-                  Error('undeclared identifier: ' + tokStr);
-                if syms[argSym].kind <> skVar then
-                  Error('variable expected for var parameter');
-                if syms[argSym].isVarParam then begin
-                  { Already a pointer — pass it through }
-                  EmitVarParamPtr(argSym);
-                end
-                else if (syms[argSym].offset < 0) and
-                   ((syms[argSym].typ = tyRecord) or (syms[argSym].typ = tyArray)
-                    or (syms[argSym].typ = tyString)) then begin
-                  { Structured value param: local holds pointer, pass through }
-                  EmitLocalGet(-(syms[argSym].offset + 1));
-                end
-                else if syms[argSym].offset < 0 then
-                  Error('cannot pass value parameter by reference')
-                else begin
-                  { Address = frame[level] + offset }
-                  EmitFramePtr(syms[argSym].level);
-                  EmitI32Const(syms[argSym].offset);
-                  EmitOp(OpI32Add);
-                end;
-                  NextToken;
-                  { Postfix selectors on a var argument. Only [index] was
-                    handled, which was enough while a designator could not
-                    reach through a pointer. `Insert(t^.left, v)` is the
-                    ordinary way to write a tree, so ^ and .field are handled
-                    too. Only the address is computed here; the argument is a
-                    reference, so no load follows. }
-                  argTyp := syms[argSym].typ;
-                  argTypeIdx := syms[argSym].typeIdx;
-                  while (tokKind = tkLBrack) or (tokKind = tkDot)
-                        or (tokKind = tkCaret) do begin
-                    if tokKind = tkCaret then begin
-                      if argTyp <> tyPointer then
-                        Error('pointer type expected before ''^''');
-                      if argTypeIdx < 0 then
-                        Error('cannot dereference nil');
-                      EmitI32Load(2, 0);
-                      EmitNilCheck;
-                      argTyp := types[argTypeIdx].elemType;
-                      argTypeIdx := types[argTypeIdx].elemTypeIdx;
-                      NextToken;
-                    end
-                    else if tokKind = tkDot then begin
-                      if argTyp <> tyRecord then
-                        Error('record type expected before ''.''');
-                      NextToken;
-                      if tokKind <> tkIdent then
-                        Expected('field name');
-                      fldIdx := LookupField(argTypeIdx, tokStr);
-                      if fldIdx < 0 then
-                        Error('unknown field: ' + tokStr);
-                      if fields[fldIdx].offset <> 0 then begin
-                        EmitI32Const(fields[fldIdx].offset);
-                        EmitOp(OpI32Add);
-                      end;
-                      argTyp := fields[fldIdx].typ;
-                      argTypeIdx := fields[fldIdx].typeIdx;
-                      NextToken;
-                    end
-                    else begin
-                      if argTyp <> tyArray then
-                        Error('array type expected before ''[''');
-                      NextToken;
-                      ParseExpression(PrecNone);
-                      if types[argTypeIdx].arrLo <> 0 then begin
-                        EmitI32Const(types[argTypeIdx].arrLo);
-                        EmitOp(OpI32Sub);
-                      end;
-                      if types[argTypeIdx].elemSize <> 1 then begin
-                        EmitI32Const(types[argTypeIdx].elemSize);
-                        EmitOp(OpI32Mul);
-                      end;
-                      EmitOp(OpI32Add);
-                      argTyp := types[argTypeIdx].elemType;
-                      argTypeIdx := types[argTypeIdx].elemTypeIdx;
-                      Expect(tkRBrack);
-                    end;
-                  end;
-                  argSym := -1; { no longer tracking the original symbol }
-              end;
-            end else begin
-              ParseExpression(PrecNone);
-              if concatPieces > 0 then begin
-                { String concat in regular param: finalize into string temp }
-                curFuncNeedsStringTemp := true;
-                curFuncNeedsCaseTemp := true;
-                EmitLocalSet(curCaseTempIdx);
-                EmitLocalGet(curStringTempIdx);
-                EmitI32Const(0);
-                EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
-                for i := 0 to concatPieces - 1 do begin
-                  EmitLocalGet(curStringTempIdx);
-                  EmitI32Const(255);
-                  EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
-                  EmitI32Load(2, 0);
-                  EmitCall(EnsureStrAppend);
-                end;
-                EmitLocalGet(curStringTempIdx);
-                EmitI32Const(255);
-                EmitLocalGet(curCaseTempIdx);
-                EmitCall(EnsureStrAppend);
-                EmitLocalGet(curStringTempIdx);
-                concatPieces := 0;
-              end;
-            end;
-            argIdx := argIdx + 1;
-            if tokKind = tkComma then
-              NextToken;
-          end;
-          Expect(tkRParen);
-        end;
-        concatPieces := savedConcatPieces;
-        concatScratchBase := savedConcatBase;
-        EmitCall(syms[sym].offset);
-        { Restore SP for any concat temp allocations }
-        if concatSPAllocs > 0 then begin
-          EmitGlobalGet(0);
-          EmitI32Const(concatSPAllocs * 256);
-          EmitOp(OpI32Add);
-          EmitGlobalSet(0);
-          concatSPAllocs := 0;
-        end;
-        if syms[sym].kind = skFunc then
-          EmitOp(OpDrop); { discard return value }
+        ParseCallStatement(sym, -1);
       end else
         Error('assignment or procedure call expected after ' + name);
     end; { else begin for non-builtin identifiers }
