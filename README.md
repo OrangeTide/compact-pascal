@@ -80,7 +80,7 @@ wasmtime run hello.wasm
 | 5 | Playground file I/O | Not started |
 | 6 | Dynamic allocation (`New`/`Dispose`) | Not started |
 | 6b | Richer string type | Not started |
-| 7 | Units and separate compilation | Not started |
+| 7 | Units and separate compilation | System units done; separate compilation not started |
 | 8 | Interfaces and methods | Not started |
 
 ## Documentation

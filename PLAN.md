@@ -506,6 +506,22 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**A misplaced `uses` said `"begin" expected`, which points at the right token
+and explains nothing.** Reviewing the phase found it. The first fix checked for
+`tkUses` before the declaration loop, which caught only a `uses` that came
+first — a clause after `var i: integer;` still fell out of the loop and hit the
+statement part. The check belongs where the block gives up, not where it starts.
+
+`uses` is a reserved word now, so a program that used it as an identifier no
+longer compiles. That is the only backward-incompatible change in this release
+and the changelog says so rather than leaving it to be discovered.
+
+**Two variables were left dead by the change.** `emittedAnyCode` existed to
+enforce that `{$FILES ON}` preceded the header; the directive is gone and
+nothing read the flag any more. `textTypeSym` was assigned and never read. Both
+removed. Dead state in a compiler is small but it misleads: a reader assumes
+something depends on it.
+
 **`uses Files` replaced `{$FILES ON}` rather than joining it.** The directive
 was a capability request and the unit is a namespace request, which sounds like
 two things until you notice that the names are useless without the imports and

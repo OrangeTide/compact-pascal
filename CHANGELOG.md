@@ -54,6 +54,10 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
   Because the file routines are no longer always on, a program that does not
   use them may declare its own `Assign`, `Reset`, `Rewrite`, or `Close`.
+
+  **`uses` is now a reserved word.** A program that used it as an identifier
+  no longer compiles. This is the only backward-incompatible change in this
+  release.
 - **Text files.** `text` is a real type. `Assign`, `Reset`, `Rewrite`,
   `Close`, `Write`/`WriteLn` to a file, `ReadLn(f, s)`, `Eof(f)`, and
   `IOResult`. Names resolve inside a directory the host preopens, and nothing

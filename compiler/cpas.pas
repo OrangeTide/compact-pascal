@@ -492,11 +492,9 @@ var
   optIncludes: boolean;    { -I: the compiler resolves includes itself }
   addrTextRef: longint;    { data word holding an indexed text file address }
   textRefIndexed: boolean; { current text reference came from an array }
-  emittedAnyCode: boolean; { true once any function body has been emitted }
   idxFdClose: longint;     { fd_close import index }
   idxFdPrestatGet: longint; { fd_prestat_get import index }
   addrPreopenFd: longint;  { data word caching the preopened directory fd }
-  textTypeSym: longint;    { the TEXT type symbol, added by uses Files }
   idxIntToStr: longint;    { int-to-string helper, -1 if not emitted }
 
   { Data segment addresses for I/O scratch areas }
@@ -2881,6 +2879,7 @@ procedure UseSystemUnit(const name: string);
   `System` is accepted and does nothing: the types, constants, and routines
   it would contain are visible without asking, which is what every Pascal
   does, and naming it explicitly should not be an error. }
+var unitSym: longint;
 begin
   if name = 'SYSTEM' then
     { Always in scope. Accepted so that writing it is not punished. }
@@ -2890,8 +2889,8 @@ begin
       { The text type becomes visible only now. Without this a program that
         does not use Files can name its own variable or procedure Assign,
         Reset, or Close, which it could not when these were always on. }
-      textTypeSym := AddSym('TEXT', skType, tyText);
-      syms[textTypeSym].size := TextRecSize;
+      unitSym := AddSym('TEXT', skType, tyText);
+      syms[unitSym].size := TextRecSize;
       idxPathOpen := AddImport('wasi_snapshot_preview1', 'path_open',
                                TypePathOpen);
       idxFdClose := AddImport('wasi_snapshot_preview1', 'fd_close',
@@ -9143,6 +9142,13 @@ var
 begin
   savedFrameSize := curFrameSize;
 
+  { A uses clause reaching here is in the wrong place. Saying so beats the
+    '"begin" expected' that would follow, which points at the uses and
+    describes nothing about why it is wrong. }
+  if tokKind = tkUses then
+    Error('a uses clause must come immediately after the program header, ' +
+          'before any declaration');
+
   { Declarations }
   while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
         or (tokKind = tkProcedure) or (tokKind = tkFunction) do begin
@@ -9337,7 +9343,10 @@ begin
   exitDepth := 0;
 
   { Statement part }
-  if tokKind = tkBegin then
+  if tokKind = tkUses then
+    Error('a uses clause must come immediately after the program header, ' +
+          'before any declaration')
+  else if tokKind = tkBegin then
     ParseStatement
   else
     Expected('"begin"');
@@ -13233,7 +13242,6 @@ begin
   optIncludes := false;
   addrTextRef := -1;
   textRefIndexed := false;
-  emittedAnyCode := false;
   idxPathOpen := -1;
   idxFdClose := -1;
   idxFdPrestatGet := -1;
@@ -13494,7 +13502,6 @@ begin
     until false;
     Expect(tkSemicolon);
   end;
-  emittedAnyCode := true;
 
   { Enter program scope }
   EnterScope;
