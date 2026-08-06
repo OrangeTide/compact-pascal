@@ -355,7 +355,11 @@ This appendix is an EBNF summary of the Compact Pascal grammar, covering the cor
 ### Programs
 
 ```ebnf
-Program          = 'program' Identifier ';' Block '.' .
+Program          = 'program' Identifier ';' [ UsesClause ] Block '.' .
+
+UsesClause       = 'uses' Identifier { ',' Identifier } ';' .
+                 (* Names system units. Not a file reference: nothing is read
+                    or compiled. See System Units in the language reference. *)
 ```
 
 ### Blocks and Declarations

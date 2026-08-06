@@ -449,13 +449,48 @@ The tag field (`Kind`) is a normal field accessible at runtime. The tag field na
 
 Variant records map directly to WASM linear memory — the variants simply share the same byte offsets. No special WASM support is required.
 
-## Text Files
+## System Units
 
-A `text` variable is a file of lines. Filesystem access is opt-in: a program must say `{$FILES ON}` before its `program` header, which adds `path_open` and `fd_close` to the module's imports so a host can see the request without reading the source.
+A `uses` clause follows the program header and names the capabilities a program wants:
 
 ```pascal
-{$FILES ON}
 program Copy;
+uses Files;
+```
+
+| Unit | What it brings |
+|---|---|
+| `System` | The types, constants, and routines available without asking. Naming it is allowed and does nothing. |
+| `Files` | The `text` type and `Assign`, `Reset`, `Rewrite`, `Close`, `Read`, `ReadLn`, `Write`, `WriteLn`, `Eof`, `IOResult` on files. See [Text Files](#text-files). |
+
+**A system unit is not compiled.** There is no unit file, nothing is read from disk, and nothing is linked. The name stands for a set of bindings the compiler already knows how to emit, and using it turns them on and registers whatever WASM imports they need. Separately compiled units, where a `uses` really does pull in another file, are a later phase.
+
+Using a unit is visible in the compiled module. `uses Files` adds `path_open`, `fd_close`, and `fd_prestat_get` to the imports, so a host can refuse a program that wants files without reading its source.
+
+**A name a unit did not bring is an ordinary name.** Without `uses Files`, `Assign`, `Reset`, `Close`, and `Rewrite` are not built in, so a program may declare its own:
+
+```pascal
+program NoFiles;
+var reset: string;
+procedure Close(n: integer);
+begin
+  writeln('closing ', n);
+end;
+begin
+  reset := 'an ordinary name';
+  Close(1);
+end.
+```
+
+Naming an unknown unit is an error. The clause must appear immediately after the program header and before any declaration, because a unit may add imports and the import count has to be settled before any code is emitted.
+
+## Text Files
+
+A `text` variable is a file of lines. Filesystem access is opt-in: a program must say `uses Files;` after its `program` header. That makes the `text` type and the file routines visible, and adds `path_open`, `fd_close`, and `fd_prestat_get` to the module's imports so a host can see the request without reading the source.
+
+```pascal
+program Copy;
+uses Files;
 var
   f: text;
   line: string;
@@ -779,7 +814,7 @@ Each iovec is an 8-byte struct in linear memory: `{ buf: i32, len: i32 }`. The g
 
 Every compiled module declares the five core WASI imports whether or not it uses them: they are registered before parsing so that helper function indices are stable in a single pass, and an import list is positional, so an unused entry cannot simply be dropped. A program that does no I/O still imports `fd_write`, `fd_read`, `proc_exit`, `args_sizes_get`, and `args_get`, and never calls them. Earlier versions of this document claimed such a program had no imports; that was never true.
 
-Filesystem access is the exception, because it is opt-in: `path_open` and `fd_close` appear only when a program asks for them with `{$FILES ON}`. A host can therefore tell from the import list alone whether a module wants to touch files.
+Filesystem access is the exception, because it is opt-in: `path_open`, `fd_close`, and `fd_prestat_get` appear only when a program asks for them with `uses Files`. A host can therefore tell from the import list alone whether a module wants to touch files.
 
 Any WASI-compatible runtime (wasmtime, wasmer, wasm3, browser polyfill) provides these imports automatically.
 
@@ -1051,11 +1086,7 @@ Global directives must appear before any declarations or statements. They affect
 | `{$MAXMEMORY n}` | 256 | Maximum WASM linear memory size in 64 KB pages (0 = no limit). |
 | `{$STACKSIZE n}` | 65536 | Stack size in bytes, allocated from linear memory. |
 | `{$DESCRIPTION 'text'}` | — | Embedded description string in the WASM custom section. |
-| `{$FILES ON}` | OFF | Request filesystem access. Adds `path_open` and `fd_close` to the module's imports. Must appear before the `program` header; cannot be switched off again. |
 
-`{$FILES ON}` is a capability request, not a convenience. Turning it on is visible in the compiled module's import list, so a host can refuse to instantiate a program that wants files without having to read its source. A host grants the actual access by preopening a directory; see [The Heap](#the-heap) for the memory side of the same idea, where the limit is likewise enforced by the host rather than by the language.
-
-The restriction to before the header is not arbitrary. Helper function indices are numbered from the import count, and those numbers become immediate operands in call instructions, so the count must be settled before any code is emitted. A single-pass compiler cannot revise it afterwards.
 
 ### Local Directives
 
@@ -1501,7 +1532,13 @@ The grammar is specified in Extended Backus-Naur Form (EBNF). The notation follo
 ### Program Structure
 
 ```ebnf
-Program          = 'program' Identifier ';' Block '.' .
+Program          = 'program' Identifier ';' [ UsesClause ] Block '.' .
+
+UsesClause       = 'uses' Identifier { ',' Identifier } ';' .
+                 (* Names system units. Not a file reference: nothing is read
+                    or compiled. Must precede all declarations, because a unit
+                    may add WASM imports and the import count is fixed before
+                    any code is emitted. See System Units. *)
 
 Block            = { DeclSection } StatementPart .
 
@@ -1840,12 +1877,12 @@ function  if        implement in        interface
 mod       nil       not       of        or
 procedure program   record    repeat    set
 string    then      to        type      until
-var       while     with
+uses      var       while     with
 ```
 
 The language is **case-insensitive** — reserved words and identifiers are matched without regard to case.
 
-`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `fillchar`, `new`, `dispose`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
+`self`, `true`, `false`, `input`, `output`, `stderr`, `maxint` are built-in identifiers, not reserved words. Compiler intrinsics (`write`, `writeln`, `read`, `readln`, `abs`, `ord`, `chr`, `odd`, `succ`, `pred`, `sqr`, `length`, `sizeof`, `lo`, `hi`, `inc`, `dec`, `exit`, `halt`, `copy`, `pos`, `concat`, `delete`, `insert`, `str`, `eof`, `fillchar`, `new`, `dispose`, and with `uses Files`, `assign`, `reset`, `rewrite`, `close`, `ioresult`) are also built-in identifiers. WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives are case-sensitive.
 
 ### Operator Precedence (Highest to Lowest) {#operator-precedence}
 

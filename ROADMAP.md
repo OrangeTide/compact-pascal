@@ -42,7 +42,7 @@ is roughly as much work again:
 | H | Structured and string return types — `function F: string` | Done |
 | I | Heap: `New` and `Dispose` | Done |
 | J | File system access and the `text` type; `{$I}` inside the compiler | Done |
-| K | System units — `uses` against runtime-provided bindings | |
+| K | System units — `uses` against runtime-provided bindings | Done |
 | L | Pascal units — write and compile your own, separately | |
 | M | Method pointers and interfaces | |
 

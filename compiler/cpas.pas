@@ -2,9 +2,11 @@
 {$IFNDEF FPC}
 {$MEMORY 192}
 {$MAXMEMORY 256}
-{$FILES ON}
 {$ENDIF}
 program cpas;
+{$IFNDEF FPC}
+uses Files;   { the text type and the file routines; fpc has them built in }
+{$ENDIF}
 {** Compact Pascal compiler — targets WASM 1.0 binary format.
   Reads Pascal source from stdin, writes WASM binary to stdout,
   writes error diagnostics to stderr.
@@ -210,6 +212,7 @@ const
   tkContinue  = 145;
   tkShl       = 146;
   tkShr       = 147;
+  tkUses      = 148;
 
   { Type kinds }
   tyNone      = 0;
@@ -493,6 +496,7 @@ var
   idxFdClose: longint;     { fd_close import index }
   idxFdPrestatGet: longint; { fd_prestat_get import index }
   addrPreopenFd: longint;  { data word caching the preopened directory fd }
+  textTypeSym: longint;    { the TEXT type symbol, added by uses Files }
   idxIntToStr: longint;    { int-to-string helper, -1 if not emitted }
 
   { Data segment addresses for I/O scratch areas }
@@ -1267,21 +1271,6 @@ begin
       optRangeChecks := ParseDirectiveSwitch;
     end else if (directive = 'Q') or (directive = 'OVERFLOWCHECKS') then begin
       optOverflowChecks := ParseDirectiveSwitch;
-    end else if directive = 'FILES' then begin
-      { Filesystem access is opt-in, and the opt-in is visible in the module:
-        asking for it adds path_open and fd_close to the import list, so a
-        host can see from the imports alone whether a program wants files.
-
-        It must be decided before any code is emitted, because helper
-        function slots are numbered from the import count and those numbers
-        are baked into call instructions as immediates. Requiring it before
-        the program header makes that checkable rather than hoped for. }
-      if ParseDirectiveSwitch then begin
-        if emittedAnyCode then
-          Error('FILES must be switched on before the program header');
-        optFileIO := true;
-      end else if optFileIO then
-        Error('FILES cannot be switched off once on');
     end else if directive = 'MEMORY' then begin
       intVal := ParseDirectiveInt;
       if (intVal < 1) or (intVal > 65536) then
@@ -1554,7 +1543,8 @@ begin
   else if s = 'BREAK' then LookupKeyword := tkBreak
   else if s = 'CONTINUE' then LookupKeyword := tkContinue
   else if s = 'SHL' then LookupKeyword := tkShl
-  else if s = 'SHR' then LookupKeyword := tkShr;
+  else if s = 'SHR' then LookupKeyword := tkShr
+  else if s = 'USES' then LookupKeyword := tkUses;
 end;
 
 var
@@ -2881,6 +2871,39 @@ end;
 {** Populate the outermost scope with built-in types and constants
   (INTEGER, BOOLEAN, CHAR, BYTE, WORD, SHORTINT, LONGINT, TRUE, FALSE,
   MAXINT). Must be called after InitSymTable before any user code. }
+procedure UseSystemUnit(const name: string);
+{** Make a system unit's bindings visible.
+
+  There is no unit file and nothing is compiled. Each name here corresponds
+  to bindings the compiler already knows how to emit; using the unit turns
+  them on and registers the imports they need.
+
+  `System` is accepted and does nothing: the types, constants, and routines
+  it would contain are visible without asking, which is what every Pascal
+  does, and naming it explicitly should not be an error. }
+begin
+  if name = 'SYSTEM' then
+    { Always in scope. Accepted so that writing it is not punished. }
+  else if name = 'FILES' then begin
+    if not optFileIO then begin
+      optFileIO := true;
+      { The text type becomes visible only now. Without this a program that
+        does not use Files can name its own variable or procedure Assign,
+        Reset, or Close, which it could not when these were always on. }
+      textTypeSym := AddSym('TEXT', skType, tyText);
+      syms[textTypeSym].size := TextRecSize;
+      idxPathOpen := AddImport('wasi_snapshot_preview1', 'path_open',
+                               TypePathOpen);
+      idxFdClose := AddImport('wasi_snapshot_preview1', 'fd_close',
+                              TypeI32I32);
+      idxFdPrestatGet := AddImport('wasi_snapshot_preview1', 'fd_prestat_get',
+                                   TypeI32x2I32);
+    end;
+  end
+  else
+    Error('unknown unit: ' + name + ' (system units are System and Files)');
+end;
+
 procedure AddBuiltins;
 var idx: longint;
 begin
@@ -2892,11 +2915,6 @@ begin
   idx := AddSym('WORD', skType, tyInteger);
   idx := AddSym('SHORTINT', skType, tyInteger);
   idx := AddSym('LONGINT', skType, tyInteger);
-  { A text file variable. Its size is the control block below, not 4: it
-    holds the descriptor, the buffer, and the assigned name, so that Assign
-    can record a name before Reset turns it into anything. }
-  idx := AddSym('TEXT', skType, tyText);
-  syms[idx].size := TextRecSize;
 
   { Built-in constants }
   idx := AddSym('TRUE', skConst, tyBoolean);
@@ -4257,7 +4275,7 @@ function EnsureTextHelpers: longint;
   call each other and a program that opens a file will close it. }
 begin
   if not optFileIO then
-    Error('file operations require FILES to be switched on before the program header');
+    Error('file operations require: uses Files;');
   EnsureIOBuffers;
   EnsureReadBuffers;
   EnsurePreopenSlot;
@@ -4693,7 +4711,7 @@ begin
         EmitOp(OpI32And);
         exprType := tyInteger;
       end
-      else if tokStr = 'IORESULT' then begin
+      else if optFileIO and (tokStr = 'IORESULT') then begin
         { Hands over the last I/O error and clears it, so a second read gives
           zero. Turbo Pascal's contract, and the clearing is the part that
           matters: it makes "did that work" a question with one answer. }
@@ -6799,8 +6817,8 @@ begin
     tkIdent: begin
       name := tokStr;
       { Built-in procedures handled before symbol lookup }
-      if (name = 'ASSIGN') or (name = 'RESET') or (name = 'REWRITE')
-         or (name = 'CLOSE') then begin
+      if optFileIO and ((name = 'ASSIGN') or (name = 'RESET')
+          or (name = 'REWRITE') or (name = 'CLOSE')) then begin
         { assign(f, name) / reset(f) / rewrite(f) / close(f) }
         textOp := name;
         NextToken;
@@ -13444,26 +13462,39 @@ begin
   NextToken;
 
   { Parse: program Ident ; Block . }
-  { Register the filesystem imports before the header is consumed, which is
-    after every global directive has been seen and before any code is
-    emitted. Helper slots are numbered from the import count and those
-    numbers become immediates in call instructions, so the count has to be
-    settled here or not at all. }
-  if optFileIO then begin
-    idxPathOpen := AddImport('wasi_snapshot_preview1', 'path_open',
-                             TypePathOpen);
-    idxFdClose := AddImport('wasi_snapshot_preview1', 'fd_close',
-                            TypeI32I32);
-    idxFdPrestatGet := AddImport('wasi_snapshot_preview1', 'fd_prestat_get',
-                                 TypeI32x2I32);
-  end;
-  emittedAnyCode := true;
-
   Expect(tkProgram);
   if tokKind <> tkIdent then
     Expected('program name');
   NextToken;
   Expect(tkSemicolon);
+
+  { uses clause.
+
+    A system unit is not compiled. It names a set of bindings the compiler
+    and the runtime already have, and using it makes those names visible and
+    registers whatever imports they need. Nothing is read from disk and
+    nothing is linked; the unit is a name for a capability.
+
+    Parsed here, before any code is emitted, because a unit may add imports
+    and import indices are baked into call instructions as immediates. That
+    is the same constraint the FILES directive had, and it is why this
+    clause replaced it: two ways to ask for the same thing, one of which had
+    to precede the header and one of which reads more naturally after it. }
+  if tokKind = tkUses then begin
+    NextToken;
+    repeat
+      if tokKind <> tkIdent then
+        Expected('unit name');
+      UseSystemUnit(tokStr);
+      NextToken;
+      if tokKind = tkComma then
+        NextToken
+      else
+        break;
+    until false;
+    Expect(tkSemicolon);
+  end;
+  emittedAnyCode := true;
 
   { Enter program scope }
   EnterScope;

@@ -89,10 +89,10 @@ run_wasm() {
     # Stdin is passed through from caller.
     #
     # The temporary directory is granted to every test, not only the ones that
-    # touch files. A program with no {$FILES ON} cannot reach it: without the
-    # directive the module does not import path_open, so the capability is
-    # unusable rather than merely unused. Granting it unconditionally keeps
-    # the runner from having to know which tests do I/O.
+    # touch files. A program that does not say `uses Files` cannot reach it:
+    # without the unit the module does not import path_open, so the
+    # capability is unusable rather than merely unused. Granting it
+    # unconditionally keeps the runner from knowing which tests do I/O.
     #
     # Run from inside that directory so a test's file names are relative to
     # somewhere writable and disappear with it.

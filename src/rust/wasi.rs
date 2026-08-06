@@ -261,7 +261,7 @@ pub fn add_wasi_imports(
     //
     // Both refuse by default. A host that wants a guest to reach the
     // filesystem opts in by setting WasiContext::preopen_dir, which is the
-    // same shape as the {$FILES ON} directive on the guest side: capability is
+    // same shape as `uses Files` on the guest side: capability is
     // granted, never assumed.
     linker.func_wrap("wasi_snapshot_preview1", "path_open",
         |mut caller: Caller<'_, WasiContext>,

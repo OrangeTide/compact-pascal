@@ -345,7 +345,7 @@ fn the_snapshot_declares_file_imports_but_cannot_use_them_by_default() {
     // Declaring is not being allowed: with no preopen_dir the host refuses
     // every open, so an embedder who never asks for filesystem access does
     // not get it by accident.
-    let src = "program T;\n{$I 'anything.inc'}\nbegin end.\n";
+    let src = "program T;\n{ 'anything.inc'}\nbegin end.\n";
     // Without -I the compiler skips the directive entirely, so this compiles.
     assert!(Compiler::new().compile(src).is_ok());
 }
@@ -389,7 +389,7 @@ fn a_program_can_be_granted_a_directory_to_write_in() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let src = "{$FILES ON}\nprogram T;\nvar f: text;\nbegin\n\
+    let src = "program T;\nuses Files;\nvar f: text;\nbegin\n\
                assign(f, 'out.txt'); rewrite(f);\n\
                writeln(f, 'written by the guest');\n\
                close(f);\nend.\n";

@@ -7,8 +7,8 @@
   The first loop shows what is being protected: a file containing a NUL
   reads back exactly, because a correct loop tests Eof and never reaches
   the end-of-file case at all. }
-{$FILES ON}
 program t120;
+uses Files;
 var f: text;
     c: char;
     n: integer;

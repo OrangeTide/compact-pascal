@@ -1,8 +1,8 @@
 { The other half of t120: with I/O checks on, reading past the end traps
   rather than being recorded. }
-{$FILES ON}
 {$S+}
 program t121;
+uses Files;
 var f: text;
     c: char;
 begin

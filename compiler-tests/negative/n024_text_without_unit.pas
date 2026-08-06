@@ -1,4 +1,4 @@
 program n024;
-{$FILES ON}
+var f: text;
 begin
 end.

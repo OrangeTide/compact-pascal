@@ -319,7 +319,7 @@ left, so nothing happens; source that still has them would be opened twice.
 
 ## Granting a program its own files
 
-A compiled program that declares `{$FILES ON}` can open files, but only in a
+A compiled program that says `uses Files;` can open files, but only in a
 directory you hand it. Nothing is granted by default:
 
 ```rust
@@ -339,7 +339,7 @@ confined to the granted directory exactly as include paths are.
 **The compiler snapshot itself declares `path_open` and `fd_close`,** because
 it can resolve includes. Declaring an import is not the same as being allowed
 to use it: a host that never sets `include_dir` or `preopen_dir` refuses every
-open, and a program that never says `{$FILES ON}` cannot even ask.
+open, and a program that never says `uses Files` cannot even ask.
 
 ## What the sandbox does and does not protect
 

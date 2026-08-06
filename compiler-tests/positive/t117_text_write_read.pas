@@ -1,10 +1,10 @@
 { A text file written, closed, reopened, and read back.
 
-  Filesystem access is opt-in: without the directive the module does not
-  import path_open, so a host can tell from the import list alone that a
-  program wants files. See the FILES directive in the reference. }
-{$FILES ON}
+  Filesystem access is opt-in: without `uses Files` the text type does not
+  exist and the module does not import path_open, so a host can tell from
+  the import list alone that a program wants files. }
 program t117;
+uses Files;
 var f: text;
     s: string;
     n: integer;

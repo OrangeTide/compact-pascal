@@ -506,6 +506,31 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**`uses Files` replaced `{$FILES ON}` rather than joining it.** The directive
+was a capability request and the unit is a namespace request, which sounds like
+two things until you notice that the names are useless without the imports and
+the imports are useless without the names. Two ways to say one thing, one of
+which had to precede the program header for a reason a reader has no way to
+guess, is worse than one that reads like Pascal. The directive was days old and
+unpublished, so removing it cost nothing.
+
+The import-count constraint did not go away, it moved: the `uses` clause sits
+immediately after the header and before any declaration, which is early enough
+for the same reason and is where a Pascal programmer expects it.
+
+**Gating the file names fixed half of the built-in shadowing wart.** Phase I
+recorded that `Insert`, `Delete`, `New`, and `Dispose` are matched before
+symbol lookup, so a user procedure with one of those names is unreachable. The
+file routines had the same problem and no longer do: without `uses Files` they
+are not built in at all, so `t122` declares its own `Close` and `Rewrite` and
+uses `assign` and `reset` as variables.
+
+That is the argument for units beyond namespacing. A built-in that is only
+present when asked for cannot shadow anything by accident. The remaining
+always-on names are the ones this phase deliberately left alone for
+compatibility, and moving them is a decision about breaking programs rather
+than about machinery.
+
 **Local validation before pushing, not CI as the first opinion.** `make
 preflight` runs everything this machine can check. CI takes minutes to answer,
 cannot be stepped through, and is a worse place to learn something than a
@@ -1958,21 +1983,26 @@ The include stack is a fixed array of eight text blocks, chosen over a stack of
 locals so the depth is a specified limit in the reference rather than a
 consequence of how much stack happened to be available.
 
-### Phase K: System units — 2 weeks
+### Phase K: System units — DONE
 
 A system unit looks like a unit at the use site but is not compiled: it names a
 set of bindings already built into the runtime. This gets the `uses` syntax and
 the name resolution working against a fixed, known set of symbols, before any
 of the separate-compilation machinery exists.
 
-- [ ] `uses` clause parsing and scope injection.
-- [ ] A binding table per system unit, resolved at compile time to existing
-      intrinsics and WASI imports.
-- [ ] Split the current always-on builtins into named units, keeping the
-      current set available without `uses` for compatibility.
+- [x] `uses` clause parsing and scope injection.
+- [x] A binding table per system unit, resolved at compile time to existing
+      intrinsics and WASI imports. `Files` adds the `text` type symbol and
+      three WASI imports; `System` is accepted and does nothing.
+- [x] Split the current always-on builtins into named units, keeping the
+      current set available without `uses` for compatibility. Only the file
+      routines moved: everything that worked before still works with no uses
+      clause, and `System` names that set for a program that wants to say so.
 
 **Exit:** a program that says `uses Files;` gets the Phase J file routines and
-a program that does not, does not.
+a program that does not, does not. Met: `t117` uses them, `n024` fails on the
+`text` type without the clause, and `t122` declares its own `Close` and
+`Rewrite` because those names are free again.
 
 ### Phase L: Pascal units — 6 weeks, split
 

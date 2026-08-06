@@ -81,7 +81,7 @@ pub struct Limits {
     /// the host's, and the lower of the two wins.
     pub memory_bytes: Option<usize>,
     /// Directory the program may open files in. `None`, the default, refuses
-    /// every open, so a program compiled with `{$FILES ON}` runs but finds it
+    /// every open, so a program that says `uses Files` runs but finds it
     /// has nothing to open. Paths are confined to this directory: `..`, an
     /// absolute path, and a drive prefix are all refused.
     pub preopen_dir: Option<std::path::PathBuf>,

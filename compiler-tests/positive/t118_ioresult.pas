@@ -5,8 +5,8 @@
   error is recorded and IOResult hands it over once, then reads zero. The
   clearing is Turbo Pascal's contract and is the part worth pinning: it makes
   "did that work" a question with exactly one answer. }
-{$FILES ON}
 program t118;
+uses Files;
 var f: text;
     e: integer;
 begin

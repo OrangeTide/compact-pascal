@@ -43,10 +43,17 @@ behind a decision lives in the Findings section of `PLAN.md`.
   traps rather than returning `nil`. See "The Heap" in the reference.
 - **A `var` argument may now be a field or a dereference**, not only an array
   element: `Insert(t^.left, v)` works. Previously only `[index]` was accepted.
-- **`{$FILES ON}` global directive**, requesting filesystem access. It adds
-  `path_open` and `fd_close` to the module's imports, so a host can see from
-  the import list whether a program wants files. It must appear before the
-  `program` header.
+- **System units and the `uses` clause.** `uses Files;` after the program
+  header makes the `text` type and the file routines visible and adds
+  `path_open`, `fd_close`, and `fd_prestat_get` to the module's imports, so a
+  host can see from the import list whether a program wants files. `uses
+  System;` is accepted and does nothing. An unknown unit is an error.
+
+  A system unit is not compiled: nothing is read from disk and nothing is
+  linked. Separately compiled units are a later phase.
+
+  Because the file routines are no longer always on, a program that does not
+  use them may declare its own `Assign`, `Reset`, `Rewrite`, or `Close`.
 - **Text files.** `text` is a real type. `Assign`, `Reset`, `Rewrite`,
   `Close`, `Write`/`WriteLn` to a file, `ReadLn(f, s)`, `Eof(f)`, and
   `IOResult`. Names resolve inside a directory the host preopens, and nothing
@@ -121,7 +128,9 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 **Known limitations:** a user procedure cannot be named `Insert`, `Delete`,
 `New`, or `Dispose`; those names are matched as built-ins before symbol lookup,
-and the resulting error talks about the built-in's arguments. `with p^ do` is
+and the resulting error talks about the built-in's arguments. The file
+routines used to have the same problem and no longer do, because `uses Files`
+gates them. `with p^ do` is
 rejected; use `p^.field`. Assignment
 between pointer types with different targets is not yet checked. Concatenating
 two or more `char` values in one expression, `a + '.' + b + '.'`, aliases a
