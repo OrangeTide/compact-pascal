@@ -75,7 +75,7 @@ Compact Pascal is **case-insensitive** — identifiers, keywords, and type names
 - Pointers — `^T` typed pointers, with `@x` for address-of, `p^` for dereference, and `nil`. No heap yet: a pointer must target storage that already exists. See [Pointers](#pointers).
 - Enumerated types — mapped to WASM `i32`. Values are assigned sequentially from 0.
 - Subranges — a restricted range of an ordinal type. The base type can be inferred from the constants (`1..12` is `integer`, `'A'..'Z'` is `char`, `Mon..Fri` is the enumerated type containing `Mon`) or specified explicitly using the GPC typed subrange syntax: `Day(Mon..Fri)`. Mapped to WASM `i32`. Range bounds are checked at assignment only when `{$R+}` is enabled.
-- Procedural types — `procedure (params)` and `function (params): T`.
+- Procedural types — `procedure (params)` and `function (params): T`. `@Name` produces a value; calling the variable calls the routine it holds. See [Procedural Types](#procedural-types).
 
 ### Expressions
 
@@ -636,6 +636,53 @@ A pointer does not keep its target alive. Taking the address of a local variable
 
 Under `{$S+}` a dereference of `nil` traps at the point of the dereference. A dereference of a stale-but-nonzero pointer does not, because nothing distinguishes it from a live one.
 
+## Procedural Types
+
+A procedural type names a routine signature. A variable of that type holds a routine, and calling the variable calls whatever it holds.
+
+```pascal
+type
+  TBinOp = function(a, b: integer): integer;
+  TAction = procedure(n: integer);
+
+var
+  op: TBinOp;
+
+function Add(a, b: integer): integer;
+begin
+  Add := a + b
+end;
+
+begin
+  op := @Add;
+  writeln(op(3, 4))
+end.
+```
+
+The type is written like a routine header with the name left out. Parameters may be `var` or `const` as in any header, and a `function` form ends with a result type.
+
+`@Name` produces the value. There is no other way to get one: the name of a routine on its own, without `@` and without an argument list, is an error rather than an implicit address. Turbo Pascal in `{$T-}` mode allows the bare name; Compact Pascal requires the `@` so that a forgotten argument list is caught instead of silently becoming a procedural value.
+
+A procedural value may be assigned, passed as a parameter, stored in a record field or an array element, called, and compared with `=` and `<>`. Two values are equal when they hold the same routine. Ordering comparisons are an error, as they are for pointers.
+
+There is no `nil` for a procedural type; assigning `nil` is an error. A procedural variable that was never assigned holds zero, and calling it traps rather than reaching an unrelated routine.
+
+Only a routine declared at the top level may have its address taken. A nested routine reaches its enclosing frame through the display, and an indirect call would arrive with the display describing whatever the caller was rather than the routine's own parent. Taking the address of a nested routine is a compile error.
+
+### What is checked, and what is not
+
+An assignment compares the parameter count and whether there is a result. It does not compare the Pascal types of the parameters, because every scalar is stored as a 32-bit value and the signatures are identical by the time the check runs. A `function(a, b: char): boolean` therefore satisfies a `TBinOp`, and calling it gets the arguments it was written for, reinterpreted.
+
+Passing the wrong number of arguments through a procedural value is caught, because the call site is checked against the declared type.
+
+### Runtime Model
+
+A routine whose address is taken is placed in the module's function table, and the procedural value is its index there. Index zero is left empty, which is what makes an unassigned variable trap. A routine that has its address taken more than once still occupies one slot, which is what makes equality exact. A call through the value is a WASM `call_indirect`, which checks the signature and traps on a mismatch.
+
+The table holds only routines whose addresses were taken, so a program that uses no procedural types emits no table at all. Tables and `call_indirect` are WASM 1.0; procedural types cost no additional proposal.
+
+A program may take the address of at most 64 distinct routines.
+
 ## With Statement
 
 The `with` statement opens a record variable's fields for unqualified access:
@@ -1048,6 +1095,7 @@ An implementation may impose limits, but not below these. A program staying with
 | Operands in one string concatenation | 16 | 17 |
 | String length | 255 | 255 |
 | Set base type values | 256 | 256 |
+| Routines whose address is taken | 64 | 64 |
 
 Exceeding a limit is an error and must be reported as one. It is never undefined behavior.
 

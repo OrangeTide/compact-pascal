@@ -1072,6 +1072,16 @@ The value is not primarily the assert. Restoring from a recorded base makes an u
 
 The epilogue ordering changed as a consequence. `display[N]` is now restored *after* the frame is released rather than before, because the release reads it.
 
+**Procedural types reserve table slot zero.** A procedural value is an index into the module's function table, so the natural encoding assigns index 0 to the first routine whose address is taken. That makes a procedural variable that was never assigned, which holds zero like every other uninitialized global, call that routine with whatever arguments the call site pushed. Starting the element segment at index 1 leaves slot 0 uninitialized, and `call_indirect` traps on an uninitialized entry. The cost is one wasted table slot per module.
+
+The same choice makes equality exact. `ProcRefIndex` interns on the function index, so a routine occupies one slot however often its address is taken, and `f = g` compares indices rather than addresses.
+
+**The signature check compares WASM signatures, not Pascal ones.** By the time an assignment is checked, both sides are a WASM type index, and every Pascal scalar is an `i32`. So the check sees the parameter count and whether there is a result, and a `function(a, b: char): boolean` satisfies a type declared as `function(a, b: integer): integer`. Checking the Pascal types would mean keeping a parameter type list on the procedural descriptor, which the fixed-size `types` array has no room for. Documented as a limitation rather than left implicit, because the failure is a wrong answer rather than a trap.
+
+**Nested routines cannot have their address taken.** A nested routine reads its enclosing frame through `display[level-1]`, which the caller's prologue set. An indirect call carries no such context, so the callee would read whatever frame the *calling* chain left in that display slot. Rejecting `@Inner` at compile time is the whole fix; the alternative, a closure carrying a display snapshot, is a different feature.
+
+**Three checks were written into the reference before they existed in the compiler**, and reading the draft back against the code is what surfaced them: signature mismatch, argument count, and the nested-routine address were all described as checked when none were. Same pattern as the nine documentation-versus-reality defects found in Phases C through L, arriving from the other direction. Writing the reference section first is worth keeping for that reason, provided every claim in it is then run.
+
 ### Compiler architecture
 
 **Single-pass recursive descent with precedence climbing for expressions.** The compiler parses and emits WASM binary in a single pass — no AST, no IR. Each `ParseStatement` / `ParseExpression` call emits directly to WASM section buffers (code, data, type, etc.). This keeps the compiler small enough to self-host in Phase 1.
@@ -2135,6 +2145,15 @@ separately, and recompiling one unit does not require recompiling the others.
 Procedural types, then the standalone methods and `implement` blocks whose
 design Phase A settled. Last because it is the only remaining item that nothing
 else depends on.
+
+- [x] **M1: procedural types.** `@Name` yields a table index, calling a
+      procedural value is `call_indirect`. Table slot zero is reserved so an
+      unassigned variable traps. Signature, argument count, and nested-routine
+      address are all rejected at compile time. Tables and `call_indirect` are
+      WASM 1.0, so this cost no proposal; `check-wasm-features` still reports
+      MVP plus bulk memory. Tests t123–t125, n027–n029.
+- [ ] **M2: standalone methods** — `procedure Foo for (r: TRect)`.
+- [ ] **M3: interfaces** and `implement` blocks, which build on M1.
 
 ## Open decisions
 

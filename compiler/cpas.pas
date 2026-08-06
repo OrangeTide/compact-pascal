@@ -98,6 +98,7 @@ const
   OpI32Store    = $36;
   OpI32Store8   = $3A;
   OpI32Store16  = $3B;
+  OpCallIndirect = $11;
   OpI64Const    = $42;
   OpI32Const    = $41;
   OpI32Eqz      = $45;
@@ -226,6 +227,7 @@ const
   tySet       = 8;
   tyPointer   = 9;
   tyText      = 10;
+  tyProc      = 11;
 
   { Type descriptor table limits }
   MaxTypes    = 256;
@@ -235,6 +237,9 @@ const
     the language reference and a program can rely on it. Each level costs a
     text control block. }
   MaxIncludeDepth = 8;
+  { Functions whose address is taken, and so must appear in the WASM table
+    that call_indirect selects from. }
+  MaxProcRefs = 64;
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
   IOErrPastEof = 200;
@@ -394,6 +399,13 @@ var
   secMemory: TSmallBuf;
   secGlobal: TSmallBuf;
   secExport: TSmallBuf;
+  secTable: TSmallBuf;
+  secElem: TSmallBuf;
+  { Functions whose address has been taken, in the order taken. The table
+    index of a function is its position here; call_indirect selects by that
+    index, so it must be stable once assigned. }
+  procRefFunc: array[0..MaxProcRefs-1] of longint;
+  numProcRefs: longint;
   secCode:   TCodeBuf;
   secData:   TDataBuf;
   secName:   TSmallBuf;
@@ -591,6 +603,7 @@ var
   { Expression type tracking }
   exprType: longint;  { type of last parsed expression (tyInteger, tyString, etc.) }
   exprSetSize: longint;  { for tySet: 4 = small (i32), >4 = large (memory-based) }
+  exprProcSig: longint;  { for tyProc: the WASM signature index, -1 otherwise }
 
   (* Compiler directive options *)
   optMemPages: longint;       (* MEMORY n, default 1 *)
@@ -2952,6 +2965,49 @@ begin
   IsStructuredRet := (t = tyString) or (t = tyRecord) or (t = tyArray);
 end;
 
+function ProcTypeDescFor(fi: longint): longint;
+{** A type descriptor for the signature of funcs[fi], so that @Proc has a type
+  comparable against a declared procedural type. Interned on the WASM
+  signature index, which the type section already deduplicates, so two
+  functions with the same signature share one descriptor. }
+var i, idx, sigIdx: longint;
+begin
+  sigIdx := funcs[fi].typeidx;
+  for i := 0 to numTypes - 1 do
+    if (types[i].kind = tyProc) and (types[i].elemType = sigIdx) then begin
+      ProcTypeDescFor := i;
+      exit;
+    end;
+  idx := AddTypeDesc;
+  types[idx].kind := tyProc;
+  types[idx].size := 4;
+  types[idx].elemType := sigIdx;
+  types[idx].elemSize := funcs[fi].nparams;
+  ProcTypeDescFor := idx;
+end;
+
+function ProcRefIndex(funcIdx: longint): longint;
+{** Table index for a function whose address is being taken, adding it to the
+  table on first use. Only referenced functions reach the table, so a program
+  that never takes an address emits no table at all.
+
+  Indices are one-based. Slot zero stays empty so that calling a procedural
+  variable that was never assigned, and so holds zero, traps on an
+  uninitialized entry rather than calling an unrelated routine. }
+var i: longint;
+begin
+  for i := 0 to numProcRefs - 1 do
+    if procRefFunc[i] = funcIdx then begin
+      ProcRefIndex := i + 1;
+      exit;
+    end;
+  if numProcRefs >= MaxProcRefs then
+    Error('too many procedures have had their address taken');
+  procRefFunc[numProcRefs] := funcIdx;
+  numProcRefs := numProcRefs + 1;
+  ProcRefIndex := numProcRefs;
+end;
+
 function FindOrAddPointerType(targetTyp, targetTypeIdx, targetSize, targetStrMax: longint): longint;
 {** Return a descriptor for ^Target, reusing an existing one when the target
   matches. The target is held in the elem* fields, the same slots an array
@@ -3083,6 +3139,12 @@ var
   dimHi: array[0..7] of longint;
   loBound, hiBound, scratchTypeIdx: longint;
   ptrTargetSize, ptrTargetStrMax: longint;
+  procIsFunc: boolean;
+  i: longint;
+  procNumParams, procTypeIdx: longint;
+  scratchTyp, scratchSize, scratchStrMax: longint;
+  wasmParamsTmp: TWasmParamArr;
+  wasmResultsTmp: TWasmResultArr;
   { Variant record fields }
   tagFieldName: string;
   tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax: longint;
@@ -3120,6 +3182,85 @@ begin
       if outTyp = tyText then
         outSize := TextRecSize;
     end;
+  end else if (tokKind = tkProcedure) or (tokKind = tkFunction) then begin
+    { Procedural type: procedure(params) or function(params): T.
+
+      The value is an index into the WASM table, not a code address: WASM has
+      no way to name a function by address, and call_indirect selects by table
+      index. That makes a procedural value four bytes like everything else and
+      keeps it inside the existing i32 machinery.
+
+      The signature is stored as a WASM type index. Calling through the value
+      needs exactly that index as call_indirect's immediate, and comparing two
+      procedural types is then comparing two indices, because the type section
+      already deduplicates identical signatures. }
+    procIsFunc := (tokKind = tkFunction);
+    NextToken;
+    procNumParams := 0;
+    if tokKind = tkLParen then begin
+      NextToken;
+      while tokKind <> tkRParen do begin
+        { Parameter names are optional in a type, but a name followed by a
+          colon is the ordinary spelling, so accept and discard it. }
+        if tokKind = tkVar then
+          NextToken;
+        if tokKind = tkConst then
+          NextToken;
+        if tokKind = tkIdent then begin
+          typeName := tokStr;
+          NextToken;
+          if tokKind = tkComma then begin
+            { A list of names sharing one type: keep reading names. }
+            while tokKind = tkComma do begin
+              NextToken;
+              if tokKind <> tkIdent then
+                Expected('parameter name');
+              procNumParams := procNumParams + 1;
+              NextToken;
+            end;
+          end;
+          if tokKind = tkColon then begin
+            NextToken;
+            ParseTypeSpec(scratchTyp, scratchTypeIdx, scratchSize, scratchStrMax);
+          end else begin
+            { It was a bare type name, not a parameter name. }
+            typId := LookupSym(typeName);
+            if (typId < 0) or (syms[typId].kind <> skType) then
+              Error('unknown type in procedural type: ' + typeName);
+          end;
+          procNumParams := procNumParams + 1;
+        end else
+          ParseTypeSpec(scratchTyp, scratchTypeIdx, scratchSize, scratchStrMax);
+        if tokKind = tkSemicolon then
+          NextToken;
+      end;
+      Expect(tkRParen);
+    end;
+    if procIsFunc then begin
+      Expect(tkColon);
+      ParseTypeSpec(scratchTyp, scratchTypeIdx, scratchSize, scratchStrMax);
+      if IsStructuredRet(scratchTyp) then
+        Error('a procedural type cannot return a structured type');
+    end;
+    if procNumParams > 16 then
+      Error('too many parameters in a procedural type');
+    for i := 0 to procNumParams - 1 do
+      wasmParamsTmp[i] := WasmI32;
+    if procIsFunc then begin
+      wasmResultsTmp[0] := WasmI32;
+      procTypeIdx := AddWasmType(procNumParams, wasmParamsTmp, 1, wasmResultsTmp);
+    end else
+      procTypeIdx := AddWasmType(procNumParams, wasmParamsTmp, 0, wasmResultsTmp);
+    outTyp := tyProc;
+    outSize := 4;
+    outTypeIdx := AddTypeDesc;
+    types[outTypeIdx].kind := tyProc;
+    types[outTypeIdx].size := 4;
+    { elemType carries the WASM signature index, reusing the slot an array
+      uses for its element type, as pointers do for their target. }
+    types[outTypeIdx].elemType := procTypeIdx;
+    types[outTypeIdx].elemSize := procNumParams;
+    types[outTypeIdx].arrLo := ord(procIsFunc);
   end else if tokKind = tkCaret then begin
     { Pointer type: ^TypeIdentifier. The grammar allows only a name here, not
       an anonymous record or array, which is what makes the forward reference
@@ -4395,9 +4536,12 @@ var
   sym: longint;
   argIdx: longint;
   argSym: longint;
+  procNArgs: longint;
   leftType: longint;
   hasAddr: boolean;
   exprTypeIdx: longint;
+  procSigIdx: longint;
+  procIsFn: boolean;
   exprStrMax: longint;
   savedConcatPieces, savedConcatBase: longint;
   heapIsNew: boolean;
@@ -5035,8 +5179,66 @@ begin
             exprSetSize := types[exprTypeIdx].size
           else if exprType = tySet then
             exprSetSize := 4;
+          if (exprType = tyProc) and (exprTypeIdx >= 0) then
+            exprProcSig := types[exprTypeIdx].elemType;
+
+          { Calling through a procedural variable. The value is already on the
+            stack; the arguments have to go under it, so it is stashed and
+            re-pushed after them. call_indirect takes the table index last,
+            which is the opposite of what a left-to-right parse produces. }
+          if (exprType = tyProc) and (tokKind = tkLParen) then begin
+            if exprTypeIdx < 0 then
+              Error('cannot call through an untyped procedural value');
+            procSigIdx := types[exprTypeIdx].elemType;
+            procIsFn := types[exprTypeIdx].arrLo <> 0;
+            procNArgs := types[exprTypeIdx].elemSize;
+            curFuncNeedsCaseTemp := true;
+            EmitLocalSet(curCaseTempIdx);
+            NextToken;
+            argIdx := 0;
+            while tokKind <> tkRParen do begin
+              ParseExpression(PrecNone);
+              argIdx := argIdx + 1;
+              if tokKind = tkComma then
+                NextToken;
+            end;
+            Expect(tkRParen);
+            if argIdx <> procNArgs then
+              Error('the procedural type takes a different number of arguments');
+            EmitLocalGet(curCaseTempIdx);
+            EmitOp(OpCallIndirect);
+            EmitULEB128(startCode, procSigIdx);
+            EmitULEB128(startCode, 0);   { table 0 }
+            if procIsFn then
+              exprType := tyInteger
+            else
+              Error('a procedure value has no result to use in an expression');
+            exprTypeIdx := -1;
+          end;
         end;
-        skFunc: begin
+        skProc, skFunc: if wantAddr then begin
+          { @ProcName is a procedural value: the function's index in the WASM
+            table, added to the table on first use. Not a code address —
+            WASM has no such thing — so the value only means anything to
+            call_indirect, which is the only thing that consumes it.
+
+            Nested routines are refused: one reaches its enclosing frame
+            through the display, and an indirect call arrives with the
+            display describing whatever the caller was, not the routine's
+            own parent. }
+          if syms[sym].level > 0 then
+            Error('cannot take the address of the nested routine ' + tokStr);
+          EmitI32Const(ProcRefIndex(syms[sym].offset));
+          exprType := tyProc;
+          exprTypeIdx := ProcTypeDescFor(syms[sym].size);
+          exprProcSig := types[exprTypeIdx].elemType;
+          exprStrMax := 0;
+          wantAddr := false;
+          NextToken;
+        end
+        else if syms[sym].kind = skProc then
+          Error('cannot use procedure ' + tokStr + ' in an expression')
+        else begin
           { Function call in expression }
           NextToken;
           { Two stack areas are taken here, and the order is load-bearing
@@ -5883,6 +6085,22 @@ begin
           exprType := tyBoolean;
       end;
     end
+    else if (leftType = tyProc) or (exprType = tyProc) then begin
+      { Two procedural values are equal when they hold the same routine. The
+        comparison is on the table index, and each routine gets one index no
+        matter how often its address is taken, so this is exact. Ordering is
+        left out: the indices are assigned in the order addresses were taken,
+        which is not something a program should be able to see. }
+      if (leftType <> tyProc) or (exprType <> tyProc) then
+        Error('procedural value compared with a value of another type');
+      if op = tkEqual then
+        EmitOp(OpI32Eq)
+      else if op = tkNotEqual then
+        EmitOp(OpI32Ne)
+      else
+        Error('only = and <> are defined for procedural values');
+      exprType := tyBoolean;
+    end
     else if (leftType = tyPointer) or (exprType = tyPointer) then begin
       { Pointers compare by address and nothing else. Ordering is left out
         deliberately: two pointers into different objects have no meaningful
@@ -6658,21 +6876,39 @@ begin
       types[pendingPtrType[i]].elemSize := 4;
   end;
   numPendingPtr := 0;
+  numProcRefs := 0;
 end;
 
-procedure CheckPointerAssign(dTyp: longint);
-{** Reject mixing pointers and non-pointers across an assignment.
+procedure CheckPointerAssign(dTyp, dTypeIdx: longint);
+{** Reject mixing pointers and non-pointers across an assignment, and reject a
+  procedural value whose signature does not match the variable it is going
+  into.
 
-  Only the type tag is checked, not the target type, because the expression
-  parser reports its result type in a global but keeps the descriptor index
-  in a local. That catches p := 5 and i := p, the mistakes that produce a
-  wild address; assigning between two pointer types with different targets
-  is not yet caught. }
+  For pointers only the type tag is checked, not the target type, because the
+  expression parser reports its result type in a global but keeps the
+  descriptor index in a local. That catches p := 5 and i := p, the mistakes
+  that produce a wild address; assigning between two pointer types with
+  different targets is not yet caught.
+
+  Procedural types are checked, because getting one wrong is a trap at the
+  call rather than a wrong answer, and the check is cheap: the signature index
+  travels in exprProcSig. What it compares is the WASM signature, so it sees
+  the parameter count and whether there is a result, and not the Pascal types
+  those parameters had. Every scalar is an i32, so a function taking two
+  chars satisfies a type declared to take two integers. }
 begin
   if (dTyp = tyPointer) and (exprType <> tyPointer) then
     Error('pointer value expected on the right of '':=''');
   if (dTyp <> tyPointer) and (exprType = tyPointer) then
     Error('cannot assign a pointer to a non-pointer variable');
+  if (dTyp = tyProc) and (exprType <> tyProc) then
+    Error('procedural value expected on the right of '':=''');
+  if (dTyp <> tyProc) and (exprType = tyProc) then
+    Error('cannot assign a procedural value to a variable of another type');
+  if (dTyp = tyProc) and (exprType = tyProc)
+     and (dTypeIdx >= 0) and (exprProcSig >= 0)
+     and (types[dTypeIdx].elemType <> exprProcSig) then
+    Error('the routine''s signature does not match the procedural type');
 end;
 
 procedure ParseVarDecl;
@@ -6756,6 +6992,8 @@ end;
 procedure ParseStatement;
 {** Parse a single statement. }
 var
+  procTypeIdx, procSigIdx, procNArgs: longint;
+  procIsFn: boolean;
   sym: longint;
   name: string;
   argIdx: longint;
@@ -7203,7 +7441,7 @@ begin
           EmitMemoryCopy;
         end else begin
           ParseExpression(PrecNone);
-          CheckPointerAssign(desTyp);
+          CheckPointerAssign(desTyp, desTypeIdx);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -7398,7 +7636,7 @@ begin
         else if desHasAddr then begin
           { Scalar with address on stack from selector chain }
           ParseExpression(PrecNone);
-          CheckPointerAssign(desTyp);
+          CheckPointerAssign(desTyp, desTypeIdx);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -7408,7 +7646,7 @@ begin
         else if syms[sym].isVarParam then begin
           EmitVarParamPtr(sym);
           ParseExpression(PrecNone);
-          CheckPointerAssign(desTyp);
+          CheckPointerAssign(desTyp, desTypeIdx);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -7418,7 +7656,7 @@ begin
         else if syms[sym].offset < 0 then begin
           { WASM local (value parameter or function return value) }
           ParseExpression(PrecNone);
-          CheckPointerAssign(desTyp);
+          CheckPointerAssign(desTyp, desTypeIdx);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -7430,7 +7668,7 @@ begin
           EmitI32Const(syms[sym].offset);
           EmitOp(OpI32Add);
           ParseExpression(PrecNone);
-          CheckPointerAssign(desTyp);
+          CheckPointerAssign(desTyp, desTypeIdx);
           if (desTyp = tyChar) and (exprType = tyString) then begin
             EmitI32Const(1); EmitOp(OpI32Add);
             EmitOp(OpI32Load8u); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
@@ -7505,6 +7743,37 @@ begin
           { Store in the hidden WASM local at index nparams }
           EmitLocalSet(funcs[fi].nparams);
         end;
+      end
+      else if (sym >= 0) and (syms[sym].kind = skVar)
+              and (syms[sym].typ = tyProc) and (tokKind = tkLParen) then begin
+        { Call through a procedural variable, as a statement. The table index
+          is loaded first but call_indirect wants it last, so it waits in the
+          scratch local while the arguments are pushed. }
+        procTypeIdx := syms[sym].typeIdx;
+        procSigIdx := types[procTypeIdx].elemType;
+        procIsFn := types[procTypeIdx].arrLo <> 0;
+        procNArgs := types[procTypeIdx].elemSize;
+        EmitPointerVarAddr(sym);
+        EmitI32Load(2, 0);
+        curFuncNeedsCaseTemp := true;
+        EmitLocalSet(curCaseTempIdx);
+        NextToken;
+        argIdx := 0;
+        while tokKind <> tkRParen do begin
+          ParseExpression(PrecNone);
+          argIdx := argIdx + 1;
+          if tokKind = tkComma then
+            NextToken;
+        end;
+        Expect(tkRParen);
+        if argIdx <> procNArgs then
+          Error('the procedural type takes a different number of arguments');
+        EmitLocalGet(curCaseTempIdx);
+        EmitOp(OpCallIndirect);
+        EmitULEB128(startCode, procSigIdx);
+        EmitULEB128(startCode, 0);   { table 0 }
+        if procIsFn then
+          EmitOp(OpDrop);
       end
       else if (sym >= 0) and ((syms[sym].kind = skProc) or (syms[sym].kind = skFunc)) then begin
         { Procedure/function call (discard result for functions) }
@@ -9650,6 +9919,37 @@ end;
 
 {** Build the export section. Always exports _start (entry point),
   memory, and __version global; then any user EXPORT directives. }
+{** Build the table section: one funcref table holding every function whose
+  address was taken. Omitted entirely when none were. }
+procedure AssembleTableSection;
+begin
+  SmallBufInit(secTable);
+  if numProcRefs = 0 then exit;
+  SmallEmitULEB128(secTable, 1);      { one table }
+  SmallBufEmit(secTable, $70);        { funcref }
+  SmallBufEmit(secTable, 0);          { limits: min only }
+  SmallEmitULEB128(secTable, numProcRefs + 1);
+end;
+
+{** Build the element section, filling the table from index 1. Slot zero is
+  left empty so that calling a procedural variable that was never assigned
+  traps on an uninitialized table entry, instead of calling whichever routine
+  happened to have its address taken first. }
+procedure AssembleElemSection;
+var i: longint;
+begin
+  SmallBufInit(secElem);
+  if numProcRefs = 0 then exit;
+  SmallEmitULEB128(secElem, 1);       { one segment }
+  SmallEmitULEB128(secElem, 0);       { table 0 }
+  SmallBufEmit(secElem, OpI32Const);  { offset expression }
+  SmallEmitSLEB128(secElem, 1);
+  SmallBufEmit(secElem, OpEnd);
+  SmallEmitULEB128(secElem, numProcRefs);
+  for i := 0 to numProcRefs - 1 do
+    SmallEmitULEB128(secElem, procRefFunc[i]);
+end;
+
 procedure AssembleExportSection;
 var
   i, j: longint;
@@ -13142,6 +13442,8 @@ begin
   ProgressStage(5, 'Memory');
   AssembleGlobalSection;
   ProgressStage(6, 'Globals');
+  AssembleTableSection;
+  AssembleElemSection;
   AssembleExportSection;
   ProgressStage(7, 'Exports');
   AssembleCodeSectionFixed;
@@ -13161,9 +13463,11 @@ begin
   WriteSmallSection(SecIdType, secType);
   WriteSmallSection(SecIdImport, secImport);
   WriteSmallSection(SecIdFunc, secFunc);
+  WriteSmallSection(SecIdTable, secTable);
   WriteSmallSection(SecIdMemory, secMemory);
   WriteSmallSection(SecIdGlobal, secGlobal);
   WriteSmallSection(SecIdExport, secExport);
+  WriteSmallSection(SecIdElem, secElem);
   WriteCodeSection(SecIdCode, secCode);
   AssembleDataSection; { writes directly to outBuf }
   ProgressStage(9, 'Data');
@@ -13237,6 +13541,7 @@ begin
   numWasmTypes := 0;
   numTypes := 0;
   numPendingPtr := 0;
+  numProcRefs := 0;
   incDepth := 0;
   optFileIO := false;
   optIncludes := false;

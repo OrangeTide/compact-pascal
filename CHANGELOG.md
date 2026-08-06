@@ -78,6 +78,26 @@ behind a decision lives in the Findings section of `PLAN.md`.
   no `Append`, no `Seek`, no `file of T`, no reading a number straight from a
   file, and a concatenation in a file write is rejected rather than compiled.
   See "Text Files" in the reference.
+- **Procedural types.** `type TBinOp = function(a, b: integer): integer;` names
+  a signature, `@Add` produces a value, and calling the variable calls what it
+  holds. Values assign, pass as parameters, sit in records and arrays, and
+  compare with `=` and `<>`.
+
+  A routine whose address is taken goes into the module's function table, and
+  the call is a WASM `call_indirect`. Both are WASM 1.0, so this costs no
+  additional proposal. Table slot zero is left empty, so calling a procedural
+  variable that was never assigned traps instead of reaching an unrelated
+  routine.
+
+  Three things are rejected rather than left to trap: a routine whose
+  signature does not match the type it is assigned to, a call with the wrong
+  number of arguments, and taking the address of a *nested* routine, which
+  would arrive with the display describing the wrong frame. The signature
+  check compares the parameter count and whether there is a result, not the
+  Pascal types of the parameters, because every scalar is an `i32` by then.
+
+  There is no `nil` for a procedural type, and at most 64 distinct routines
+  may have their addresses taken. See "Procedural Types" in the reference.
 - **The compiler resolves `{$I}` itself under `-I`.** A multi-file program
   builds from the command line with no host help, eight levels deep, with
   cycles and missing files diagnosed instead of silently skipped. Without the
