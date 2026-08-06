@@ -43,7 +43,7 @@ is roughly as much work again:
 | I | Heap: `New` and `Dispose` | Done |
 | J | File system access and the `text` type; `{$I}` inside the compiler | Done |
 | K | System units — `uses` against runtime-provided bindings | Done |
-| L | Pascal units — write and compile your own, separately | |
+| L | Pascal units — write and compile your own, separately | Design done, awaiting review |
 | M | Method pointers and interfaces | |
 
 Phases are capped at about three weeks each so that a wrong estimate stays

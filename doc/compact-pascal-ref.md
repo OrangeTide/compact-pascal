@@ -1007,7 +1007,7 @@ This section states what an implementation must do to call itself Compact Pascal
 A conforming implementation:
 
 - **Accepts every program this document defines** and rejects every program this document says is an error. Where the document says an error is reported at a particular point, such as a `forward` header mismatch at the definition, it is reported there.
-- **Emits WASM 1.0 (MVP)** with no post-MVP proposals. A module it produces runs on any compliant WASM 1.0 runtime.
+- **Emits WASM 1.0 and the bulk-memory proposal**, and nothing else. `memory.copy` is the only post-MVP instruction; a module produced by a conforming implementation runs on any runtime that supports bulk memory, which every major one has since 2019. An implementation may not reach for any other proposal without this document changing first.
 - **Uses WASI preview 1** for I/O and termination, emitting only the imports listed under [Implicit WASI Imports](#implicit-wasi-imports). An implementation may declare an import it does not call, as the reference compiler does for the five core ones, but it may not declare `path_open` or `fd_close` unless the program asked for filesystem access. What a module *calls* must follow from what the program does; what it *declares* need not.
 - **Writes the compiled module to standard output and every diagnostic to standard error**, in the formats given under [Compiler Diagnostics](#compiler-diagnostics). Nothing else may reach standard output.
 - **Halts on the first error** with a nonzero exit status. Error recovery and multi-error reporting are not permitted, because a program's meaning after the first error is not defined.

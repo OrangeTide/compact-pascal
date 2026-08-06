@@ -27,7 +27,7 @@ At the same time, WebAssembly has emerged as a universal compilation target — 
 
 Compact Pascal exploits this opportunity. It is a minimal Pascal variant designed from the ground up to:
 
-1. **Compile to WASM 1.0 (MVP)** for maximum portability.
+1. **Compile to WASM 1.0 plus the bulk-memory proposal** for maximum portability.
 2. **Run as WASM** so the compiler itself is embeddable.
 3. **Require no I/O runtime library** — I/O intrinsics (`write`/`read`) compile to WASI host imports, so the runtime footprint is minimal and programs without I/O have no implicit imports.
 4. **Support single-pass compilation**, keeping the compiler fast and simple — especially important when the compiler runs inside a WASM interpreter.
@@ -53,7 +53,7 @@ Compact Pascal is not a conforming implementation of any existing Pascal standar
 - **Minimalism.** Include only what is needed. Features earn their place by being essential to the language's purpose, not by precedent.
 - **Embeddability.** The compiler and runtime must function as a library, not a standalone tool. No implicit I/O, no filesystem access, no assumptions about the host environment.
 - **Single-pass friendliness.** The language design should not require multi-pass compilation. Declare-before-use, explicit interface conformance blocks, and forward declarations keep the compiler simple and fast.
-- **Portability.** Target WASM 1.0 MVP only. No WASM extensions, no platform-specific features, no assumptions beyond what the MVP specification guarantees.
+- **Portability.** Target WASM 1.0 and the bulk-memory proposal, nothing else. No platform-specific features and no assumptions beyond what those specifications guarantee. `memory.copy` is the single post-MVP instruction used; it implements structured assignment, and every major runtime has supported it since 2019.
 - **Interoperability.** Host applications (Rust, C, browser JavaScript) must be able to call into Pascal code and provide functions that Pascal code can call, through WASM's import/export mechanism.
 
 ### Non-Goals

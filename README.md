@@ -18,7 +18,7 @@ Compact Pascal is a new language in the Pascal family. It inherits Pascal's synt
 - **No I/O runtime library** — `write`/`writeln`/`read`/`readln` are compiler intrinsics that lower to WASI host imports. Every module declares the five core WASI imports; filesystem access is opt-in and visible in the import list.
 - **Minimal runtime** — the compiled WASM output has no standard library overhead. Host applications provide exactly the functionality they want.
 - **Single-pass compiler** — fast compilation, especially important when the compiler itself runs inside a WASM interpreter.
-- **WASM 1.0 MVP only** — no WASM extensions, maximum portability across runtimes.
+- **WASM 1.0 plus bulk memory** — one post-MVP proposal, universally supported since 2019. Nothing else.
 - **Modern extensions** — structural interfaces with `implement` blocks (Go-style), short-circuit `and then`/`or else` (ISO 10206).
 
 ### How It Works
@@ -94,6 +94,7 @@ wasmtime run hello.wasm
 | [doc/pode-server.md](doc/pode-server.md) | Pode Server design (Pascal Node clone) |
 | [doc/lightout-example.md](doc/lightout-example.md) | Light's Out browser game example design |
 | [doc/playground.md](doc/playground.md) | Browser playground design |
+| [doc/units-design.md](doc/units-design.md) | Separately compiled units — design proposal |
 
 ## Prerequisites
 

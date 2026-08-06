@@ -54,7 +54,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 
 .PHONY: help all pdf html clean
 .PHONY: bootstrap test test-checks check-private check-fixpoint test-all deploy-playground bump-version
-.PHONY: check-rust release preflight check-determinism check-selfhost-gen2 check-runtimes check-doc-examples check-windows check-playground
+.PHONY: check-wasm-features check-rust release preflight check-determinism check-selfhost-gen2 check-runtimes check-doc-examples check-windows check-playground
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -283,6 +283,25 @@ check-playground: $(SNAPSHOT)
 	  && echo "check-playground: deploy reproduces the snapshot and sample" \
 	  || { echo "::error::deploy-playground did not copy what it should" >&2; exit 1; }
 
+# The documented WASM feature set is MVP plus bulk memory, and nothing else.
+# That claim sat in the reference as a conformance requirement while being
+# false — the compiler has needed memory.copy since structured assignment
+# landed, and nobody checked. Each feature is disabled in turn: bulk memory
+# must be required and every other must not be.
+check-wasm-features: $(SNAPSHOT)
+	@fail=0; \
+	for f in mutable-globals saturating-float-to-int sign-extension simd \
+	         multi-value reference-types; do \
+	  if ! wasm-validate --disable-$$f $(SNAPSHOT) >/dev/null 2>&1; then \
+	    echo "::error::the compiler now needs the $$f proposal, which the documentation says it does not" >&2; \
+	    fail=1; \
+	  fi; \
+	done; \
+	if wasm-validate --disable-bulk-memory $(SNAPSHOT) >/dev/null 2>&1; then \
+	  echo "check-wasm-features: bulk memory is no longer needed; the docs can be tightened"; \
+	fi; \
+	[ $$fail -eq 0 ] && echo "check-wasm-features: MVP plus bulk memory, as documented"
+
 # The Rust crate, exactly as CI checks it. Not in test-all because that target
 # is the Pascal side and runs where cargo may not exist.
 check-rust:
@@ -306,7 +325,8 @@ release: $(SNAPSHOT)
 # Everything that can be checked on this machine. Run before pushing: CI is
 # a second opinion, not the first one.
 preflight: test-all check-determinism check-selfhost-gen2 check-doc-examples \
-           check-windows check-playground check-runtimes check-rust release
+           check-windows check-playground check-runtimes check-wasm-features \
+           check-rust release
 	@echo ""
 	@echo "preflight: every local check passed"
 	@echo "  not covered here: macOS. CI is the only place that runs it."

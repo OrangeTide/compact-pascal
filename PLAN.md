@@ -506,6 +506,52 @@ That is 3 extra WASM instructions per nested procedure call. In practice, the va
 
 *Recursion is handled correctly* because each entry saves and restores `display[N]`. Recursive calls at the same level see the correct frame.
 
+**The compiler has never emitted MVP-only WASM, and four documents said it
+did.** Establishing Phase L's constraints meant finding out what the compiler
+actually requires, which is WASM 1.0 plus `memory.copy` from the bulk-memory
+proposal, used for structured assignment. The README, the white paper twice,
+and the language reference all claimed MVP with no post-MVP proposals — and in
+the reference it was a *conformance requirement*, the third false one found in
+that section.
+
+`make check-wasm-features` now disables each proposal in turn and asserts that
+bulk memory is required and nothing else is. The claim cannot drift again
+without a preflight failure, which is the only kind of documentation that stays
+true.
+
+**Units map to objects and a linker, not to one WASM module each.** The
+attractive option is one module per unit, because WASM already has imports and
+exports and there is no linker to write. It fails on a specific, checkable
+fact: units must share the stack pointer, the display registers, and the heap
+boundary, those are mutable globals, and importing a mutable global is not in
+WASM 1.0.
+
+```
+$ wasm-validate --disable-mutable-globals mg.wasm
+mg.wasm:000001c: error: mutable globals cannot be imported
+```
+
+The ways around it are worse than the linker. Taking the proposal spends a
+second post-MVP dependency to avoid work rather than to gain anything, and the
+budget is now known to be exactly one. Moving `$sp` and the display into linear
+memory puts a permanent cost on every function entry and exit to buy a one-time
+saving on the toolchain. And even with the globals solved, two independently
+compiled units would place their data at the same addresses, so a base-relative
+data model would be needed — which is a relocation scheme, that is, a linker,
+reached by a longer road.
+
+**A claim in the design document was wrong and reading the code found it.**
+`EmitSLEB128Fix` looks like a fixed-width encoder, which is exactly what a
+relocation needs, and the draft said so. The "Fix" records a sign-extension fix
+for TP's logical `shr`; the encoder is ordinary variable width. So `-c` mode
+needs padded encoders that do not exist yet. Padding only in `-c` keeps
+single-file output byte-identical, which matters because the fixpoint compares
+those bytes.
+
+That padded LEB128 is accepted at all was then checked rather than assumed: a
+hand-assembled module encoding `i32.const 1` as `41 81 80 80 80 00` validates
+and returns 1.
+
 **A misplaced `uses` said `"begin" expected`, which points at the right token
 and explains nothing.** Reviewing the phase found it. The first fix checked for
 `tkUses` before the declaration loop, which caught only a `uses` that came
@@ -2027,20 +2073,31 @@ another program. Substantial, and the largest single item on this roadmap. It
 exceeds the three-week phase cap deliberately and is split so the design can be
 reviewed before the implementation starts.
 
-**L1, design and specification, 2 weeks.** Supersedes the old "module system
-design" item.
+**L1, design and specification — DONE, awaiting review.** The proposal is
+`doc/units-design.md`. Supersedes the old "module system design" item.
 
-- [ ] `unit` / `interface` / `implementation` syntax, and how it stays
-      single-pass.
-- [ ] A compiler-generated interface description consumed by importers, rather
+- [x] `unit` / `interface` / `implementation` syntax, and how it stays
+      single-pass. Headers repeated in the implementation, following IP Pascal
+      rather than Turbo Pascal, so the implementation parses like the
+      declarations the compiler already handles.
+- [x] A compiler-generated interface description consumed by importers, rather
       than a hand-written header. The spec review in `notes/` and Excelsior
       independently reached the same conclusion, which is decent evidence.
-- [ ] How a unit maps onto a WASM module: one module per unit, or link-time
-      merge. This is the decision that constrains everything after it.
-- [ ] Initialization order, and whether a unit may have an initialization
-      section at all.
+      Carried inside the object rather than as a separate file, so the two
+      cannot disagree.
+- [x] How a unit maps onto a WASM module. **Objects plus a linker, one module
+      out.** One module per unit needs importable mutable globals to share the
+      stack pointer, the display, and the heap boundary, and that is a second
+      post-MVP proposal taken to avoid writing a linker. See Findings.
+- [x] Initialization order. **No initialization section at first.** Variable
+      initializers already cover the common case and cost nothing; ordering is
+      a real design question that the exit criterion does not need, and adding
+      it later is additive.
 
-**L2, implementation, 4 weeks.** Only after L1 is settled.
+**L2, implementation, 4 weeks.** Only after L1 is reviewed. The one
+implementation fact L1 turned up: every patch site needs a fixed-width
+immediate and the compiler has none, so `-c` mode needs padded LEB128
+encoders. `EmitSLEB128Fix` is not one, despite the name.
 
 **Exit:** a three-unit program compiles from the CLI, each unit compiled
 separately, and recompiling one unit does not require recompiling the others.
