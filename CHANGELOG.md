@@ -98,6 +98,26 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
   There is no `nil` for a procedural type, and at most 64 distinct routines
   may have their addresses taken. See "Procedural Types" in the reference.
+- **Standalone methods.** `function Area for (r: TRect): integer;` attaches a
+  method to a record without touching the record's declaration, and
+  `MyRect.Area` calls it. A pointer receiver, `procedure Grow for (r: ^TRect)
+  (k: integer);`, can mutate; a value receiver gets a copy and cannot. A
+  pointer designator is dereferenced automatically, so `p.Area` and `p^.Area`
+  are the same, and a value receiver called on a pointer works the same way.
+
+  The receiver must be a record. A method's name is not a name in ordinary
+  scope: it is reachable only through a receiver, so it cannot collide with a
+  procedure, and `Area(r)` is not a way to call it.
+
+  Two things are rejected. A method may not share a name with a field of its
+  receiver type, reported at the declaration rather than at the call, because
+  the declaration is where the mistake is. A method called on a function
+  result is refused, because a result is a temporary with no address to hand
+  a receiver.
+
+  The receiver is passed as the last parameter and a call is an ordinary WASM
+  `call`; nothing is dispatched at run time. See "Standalone Methods" in the
+  reference.
 - **The compiler resolves `{$I}` itself under `-I`.** A multi-file program
   builds from the command line with no host help, eight levels deep, with
   cycles and missing files diagnosed instead of silently skipped. Without the

@@ -586,6 +586,8 @@ var
   curFuncNeedsStringTemp: boolean; { whether current func needs the string temp local }
   curCaseTempIdx: longint;       { WASM local index for case selector temp }
   curFuncNeedsCaseTemp: boolean;  { whether current func needs the case temp local }
+  curRecvTempIdx: longint;        { local holding a method receiver address }
+  curFuncNeedsRecvTemp: boolean;  { whether current func needs the receiver temp }
   curFuncIsFunction: boolean;    { whether current func is a function (has return value) }
   curFuncReturnIdx: longint;     { WASM local index for return value in current func }
   curFuncRetStructured: boolean; { current function returns via a caller buffer }
@@ -3067,6 +3069,23 @@ begin
   numFields := numFields + 1;
 end;
 
+function MethodSymName(recvTypeIdx: longint; const mname: string): string;
+{** The name a standalone method is registered under.
+
+  Methods live in the ordinary symbol table under a name no source can spell,
+  because it starts with '#' and contains a '.'. That buys the whole existing
+  apparatus, including forward declarations, duplicate detection, and nesting
+  scope, without a second table to keep in step with the first.
+
+  The key is the receiver's type descriptor index rather than its name. A call
+  site knows the descriptor of the designator it just parsed and does not know
+  which of possibly several names that type was reached by. }
+var s: string[11];
+begin
+  str(recvTypeIdx, s);
+  MethodSymName := '#' + s + '.' + mname;
+end;
+
 function LookupField(tIdx: longint; const fname: string): longint;
 {** Look up a field by name in a record type descriptor. Returns field index or -1. }
 var i: longint;
@@ -4541,6 +4560,9 @@ var
   hasAddr: boolean;
   exprTypeIdx: longint;
   procSigIdx: longint;
+  exprCallSym: longint;
+  exprRecvTemp: longint;
+  methSym: longint;
   procIsFn: boolean;
   exprStrMax: longint;
   savedConcatPieces, savedConcatBase: longint;
@@ -4572,6 +4594,8 @@ begin
   withFound := false;
   leftSetSize := 4;
   concatSPAllocs := 0;
+  exprCallSym := -1;
+  exprRecvTemp := -1;
   { Address-of. The designator that follows is parsed by the ordinary
     variable path below; wantAddr only tells that path to stop one step
     short, leaving the address it computed instead of loading through it. }
@@ -5087,14 +5111,41 @@ begin
             else if not hasAddr then
               Error('cannot apply selector to value parameter')
             else if tokKind = tkDot then begin
+              { A pointer before '.' is dereferenced here, so p.Area and
+                p^.Area mean the same. }
+              if (exprType = tyPointer) and (exprTypeIdx >= 0)
+                 and (types[exprTypeIdx].elemType = tyRecord) then begin
+                EmitI32Load(2, 0);
+                EmitNilCheck;
+                exprType := types[exprTypeIdx].elemType;
+                exprStrMax := types[exprTypeIdx].elemStrMax;
+                exprTypeIdx := types[exprTypeIdx].elemTypeIdx;
+              end;
               if exprType <> tyRecord then
                 Error('record type expected before ''.''');
               NextToken;
               if tokKind <> tkIdent then
                 Expected('field name');
               fldIdx := LookupField(exprTypeIdx, tokStr);
-              if fldIdx < 0 then
-                Error('unknown field: ' + tokStr);
+              if fldIdx < 0 then begin
+                { Not a field, so try a method. The receiver's address is on
+                  the stack; it goes into a local and is pushed after the
+                  arguments, the receiver being the last parameter. }
+                methSym := LookupSym(MethodSymName(exprTypeIdx, tokStr));
+                if (methSym >= 0) and (syms[methSym].kind = skFunc) then begin
+                  curFuncNeedsStringTemp := true;
+                  curFuncNeedsCaseTemp := true;
+                  curFuncNeedsRecvTemp := true;
+                  EmitLocalSet(curRecvTempIdx);
+                  exprRecvTemp := curRecvTempIdx;
+                  exprCallSym := methSym;
+                  NextToken;
+                  break;
+                end;
+                if (methSym >= 0) and (syms[methSym].kind = skProc) then
+                  Error('procedure method ' + tokStr + ' has no result to use in an expression');
+                Error(tokStr + ' is not a field or method of this type');
+              end;
               if fields[fldIdx].offset <> 0 then begin
                 EmitI32Const(fields[fldIdx].offset);
                 EmitOp(OpI32Add);
@@ -5144,7 +5195,12 @@ begin
             end;
           end;
 
-          if wantAddr then begin
+          if exprCallSym >= 0 then begin
+            { A method call ended the designator. Its result comes from the
+              hoisted call section below, not from loading through an
+              address, and the selectors are finished. }
+          end
+          else if wantAddr then begin
             { @designator: keep the address the selectors computed and call it
               a pointer to whatever they arrived at. Structured types already
               leave an address, so the only thing to skip is the final load. }
@@ -5239,8 +5295,46 @@ begin
         else if syms[sym].kind = skProc then
           Error('cannot use procedure ' + tokStr + ' in an expression')
         else begin
-          { Function call in expression }
+          exprCallSym := sym;
           NextToken;
+        end;
+        skType: begin
+          { Type cast: TypeName(expr) }
+          castTyp := syms[sym].typ;
+          castName := syms[sym].name;
+          NextToken;
+          Expect(tkLParen);
+          ParseExpression(PrecNone);
+          Expect(tkRParen);
+          { String to ordinal: load first character }
+          if exprType = tyString then begin
+            EmitI32Load8u(0, 1); { load byte at addr+1 (skip length byte) }
+          end;
+          { Emit masking for narrow types }
+          if (castName = 'CHAR') or (castName = 'BYTE') then begin
+            EmitI32Const(255);
+            EmitOp(OpI32And);
+          end else if castName = 'SHORTINT' then begin
+            { Sign-extend from 8 bits: shift left 24, arith shift right 24 }
+            EmitI32Const(24);
+            EmitOp(OpI32Shl);
+            EmitI32Const(24);
+            EmitOp(OpI32ShrS);
+          end else if castName = 'WORD' then begin
+            EmitI32Const(65535);
+            EmitOp(OpI32And);
+          end;
+          { INTEGER, LONGINT, BOOLEAN: no-op (already i32) }
+          exprType := castTyp;
+        end;
+      else
+        Error('cannot use ' + tokStr + ' in expression');
+      end;
+      { A function call in an expression, hoisted out of the case above so
+        that a method call can reach it. The skVar arm finds a method deep
+        inside its selector chain, where the case arm for skFunc is not
+        reachable, and sets exprCallSym and exprRecvTemp instead. }
+      if exprCallSym >= 0 then begin
           { Two stack areas are taken here, and the order is load-bearing
             because every address below is derived from $sp by adding back
             what was taken after it. Highest first:
@@ -5294,8 +5388,8 @@ begin
             of the statement so the caller can use the value it holds. }
           retBufSize := 0;
           retMark := 0;
-          if IsStructuredRet(funcs[syms[sym].size].retTyp) then begin
-            retBufSize := (funcs[syms[sym].size].retSize + 3) and (not 3);
+          if IsStructuredRet(funcs[syms[exprCallSym].size].retTyp) then begin
+            retBufSize := (funcs[syms[exprCallSym].size].retSize + 3) and (not 3);
             EmitGlobalGet(0);
             EmitI32Const(retBufSize);
             EmitOp(OpI32Sub);
@@ -5308,9 +5402,9 @@ begin
             NextToken;
             argIdx := 0;
             while tokKind <> tkRParen do begin
-              if funcs[syms[sym].size].varParams[argIdx] then begin
+              if funcs[syms[exprCallSym].size].varParams[argIdx] then begin
                 { var param: pass address of the variable }
-                if funcs[syms[sym].size].constParams[argIdx] then begin
+                if funcs[syms[exprCallSym].size].constParams[argIdx] then begin
                   { const param: parse full expression (may include concat) }
                   ParseExpression(PrecNone);
                   if concatPieces > 0 then begin
@@ -5448,6 +5542,12 @@ begin
             $sp plus whatever the arguments pushed below it, which is exactly
             the concat scratch that is about to be released. Deriving it that
             way avoids spending a local to hold it. }
+          { The receiver goes on before the result buffer. A method's
+            parameters run: visible arguments, receiver, then the hidden
+            buffer, because ParseProcDecl appends the receiver to the list
+            and the buffer is appended after that. }
+          if exprRecvTemp >= 0 then
+            EmitLocalGet(exprRecvTemp);
           if retBufSize > 0 then begin
             EmitGlobalGet(0);
             if (stmtArenaBytes - retMark) + concatSPAllocs * 256 > 0 then begin
@@ -5455,7 +5555,7 @@ begin
               EmitOp(OpI32Add);
             end;
           end;
-          EmitCall(syms[sym].offset);
+          EmitCall(syms[exprCallSym].offset);
           { Restore SP for any concat temp allocations }
           if concatSPAllocs > 0 then begin
             EmitGlobalGet(0);
@@ -5480,7 +5580,7 @@ begin
             end;
             pieceSaveBytes := 0;
           end;
-          exprType := syms[sym].typ;
+          exprType := syms[exprCallSym].typ;
           if retBufSize > 0 then begin
             { The call returned nothing; the value of the expression is the
               buffer. It stays allocated until the statement ends, so its
@@ -5490,43 +5590,11 @@ begin
               EmitI32Const(stmtArenaBytes - retMark);
               EmitOp(OpI32Add);
             end;
-            exprTypeIdx := funcs[syms[sym].size].retTypeIdx;
-            exprStrMax := funcs[syms[sym].size].retStrMax;
+            exprTypeIdx := funcs[syms[exprCallSym].size].retTypeIdx;
+            exprStrMax := funcs[syms[exprCallSym].size].retStrMax;
             retBufSize := 0;
           end;
           { Return value is left on WASM stack }
-        end;
-        skType: begin
-          { Type cast: TypeName(expr) }
-          castTyp := syms[sym].typ;
-          castName := syms[sym].name;
-          NextToken;
-          Expect(tkLParen);
-          ParseExpression(PrecNone);
-          Expect(tkRParen);
-          { String to ordinal: load first character }
-          if exprType = tyString then begin
-            EmitI32Load8u(0, 1); { load byte at addr+1 (skip length byte) }
-          end;
-          { Emit masking for narrow types }
-          if (castName = 'CHAR') or (castName = 'BYTE') then begin
-            EmitI32Const(255);
-            EmitOp(OpI32And);
-          end else if castName = 'SHORTINT' then begin
-            { Sign-extend from 8 bits: shift left 24, arith shift right 24 }
-            EmitI32Const(24);
-            EmitOp(OpI32Shl);
-            EmitI32Const(24);
-            EmitOp(OpI32ShrS);
-          end else if castName = 'WORD' then begin
-            EmitI32Const(65535);
-            EmitOp(OpI32And);
-          end;
-          { INTEGER, LONGINT, BOOLEAN: no-op (already i32) }
-          exprType := castTyp;
-        end;
-      else
-        Error('cannot use ' + tokStr + ' in expression');
       end;
       if withFound then begin
         { with-resolved field: process selectors and final load }
@@ -7192,6 +7260,8 @@ procedure ParseStatement;
 {** Parse a single statement. }
 var
   procTypeIdx, procSigIdx, procNArgs: longint;
+  methSym: longint;
+  isMethodStmt: boolean;
   procIsFn: boolean;
   sym: longint;
   name: string;
@@ -7660,6 +7730,7 @@ begin
         desTypeIdx := syms[sym].typeIdx;
         desStrMax := syms[sym].strMax;
         desHasAddr := false;
+        isMethodStmt := false;
 
         if (tokKind = tkDot) or (tokKind = tkLBrack) or (tokKind = tkCaret) then begin
           { Need to compute base address for selector chain }
@@ -7697,14 +7768,45 @@ begin
               NextToken;
             end
             else if tokKind = tkDot then begin
+              { A pointer before '.' is dereferenced on the spot, so p.Method
+                and p^.Method mean the same. Standard Pascal has no such rule
+                because it has no methods; this is the auto-dereference the
+                Standalone Methods section promises. }
+              if (desTyp = tyPointer) and (desTypeIdx >= 0)
+                 and (types[desTypeIdx].elemType = tyRecord) then begin
+                if not desBaseIsValue then
+                  EmitI32Load(2, 0);
+                desBaseIsValue := false;
+                EmitNilCheck;
+                desTyp := types[desTypeIdx].elemType;
+                desStrMax := types[desTypeIdx].elemStrMax;
+                desTypeIdx := types[desTypeIdx].elemTypeIdx;
+              end;
               if desTyp <> tyRecord then
                 Error('record type expected before ''.''');
               NextToken;
               if tokKind <> tkIdent then
                 Expected('field name');
               fldIdx := LookupField(desTypeIdx, tokStr);
-              if fldIdx < 0 then
-                Error('unknown field: ' + tokStr);
+              if fldIdx < 0 then begin
+                { Not a field, so try a method. The receiver's address is
+                  already on the stack, which is what both receiver kinds
+                  want: a pointer receiver is handed the address, and a value
+                  receiver is passed one and copies in its prologue. }
+                methSym := LookupSym(MethodSymName(desTypeIdx, tokStr));
+                if (methSym >= 0) and ((syms[methSym].kind = skProc)
+                                       or (syms[methSym].kind = skFunc)) then begin
+                  curFuncNeedsStringTemp := true;
+                  curFuncNeedsCaseTemp := true;
+                  curFuncNeedsRecvTemp := true;
+                  EmitLocalSet(curRecvTempIdx);
+                  NextToken;
+                  ParseCallStatement(methSym, curRecvTempIdx);
+                  isMethodStmt := true;
+                  break;
+                end;
+                Error(tokStr + ' is not a field or method of this type');
+              end;
               if fields[fldIdx].offset <> 0 then begin
                 EmitI32Const(fields[fldIdx].offset);
                 EmitOp(OpI32Add);
@@ -7742,6 +7844,11 @@ begin
             end;
           end;
         end;
+
+        if isMethodStmt then begin
+          { The call is emitted and the designator ended with it. There is
+            nothing left to assign to. }
+        end else begin
 
         if tokKind <> tkAssign then
           Expected(':=');
@@ -7874,17 +7981,29 @@ begin
           end;
           EmitStoreByType(desTyp);
         end;
+        end; { not a method statement }
       end
       else if (sym >= 0) and (syms[sym].kind = skFunc)
               and ((tokKind = tkDot) or (tokKind = tkLBrack))
-              and IsStructuredRet(funcs[syms[sym].size].retTyp) then
-        { Assigning to a field or element of the result is ordinary Pascal and
-          is not implemented: the result buffer is reachable only as a whole,
-          through the hidden parameter. Say so, rather than falling through to
-          the call path and failing on the selector with a complaint about a
-          missing "end". }
+              and IsStructuredRet(funcs[syms[sym].size].retTyp) then begin
+        { Two different mistakes reach here. Calling a method on a function
+          result is one: the result is a temporary, so there is no address to
+          hand a receiver. The other is assigning to a field of the result,
+          which the buffer arrangement cannot express because the buffer is
+          reachable only as a whole. Both are caught here rather than left to
+          fall through to the call path, where they fail on the selector with
+          a complaint about a missing "end". }
+        if tokKind = tkDot then begin
+          NextToken;
+          if (tokKind = tkIdent)
+             and (LookupSym(MethodSymName(funcs[syms[sym].size].retTypeIdx,
+                                          tokStr)) >= 0) then
+            Error(tokStr + ' needs an addressable receiver, and a function ' +
+                  'result is a temporary');
+        end;
         Error('cannot assign to a field or element of a function result; ' +
               'build the value in a local variable and assign that')
+      end
       else if (sym >= 0) and (syms[sym].kind = skFunc) and (tokKind = tkAssign) then begin
         { Function return value assignment: FuncName := expr }
         NextToken;
@@ -8444,6 +8563,8 @@ var
   savedStringTempIdx: longint;
   savedFuncNeedsStringTemp: boolean;
   savedCaseTempIdx: longint;
+  savedRecvTempIdx: longint;
+  savedFuncNeedsRecvTemp: boolean;
   savedFuncNeedsCaseTemp: boolean;
   savedFuncIsFunction: boolean;
   savedFuncReturnIdx: longint;
@@ -8469,6 +8590,10 @@ var
   localImportName: string[63];
   localExportPending: boolean;
   localExportName: string[63];
+  hasRecv, recvIsPtr: boolean;
+  plainName: string;
+  recvName, recvTypeName: string;
+  recvTypSym, recvTypeIdx: longint;
 begin
   isFunc := tokKind = tkFunction;
   NextToken; { consume 'procedure' or 'function' }
@@ -8477,6 +8602,55 @@ begin
     Expected('identifier');
   procName := tokStr;
   NextToken;
+
+  { A standalone method names its receiver after 'for'.
+
+    The receiver becomes the routine's *last* parameter, appended once the
+    visible list is parsed. Trailing rather than leading so every argument
+    path stays as it was: the call site pushes the arguments exactly as for
+    an ordinary call and then pushes the receiver it saved. }
+  hasRecv := false;
+  recvIsPtr := false;
+  if tokKind = tkFor then begin
+    NextToken;
+    Expect(tkLParen);
+    if tokKind <> tkIdent then
+      Expected('receiver name');
+    recvName := tokStr;
+    NextToken;
+    Expect(tkColon);
+    if tokKind = tkCaret then begin
+      recvIsPtr := true;
+      NextToken;
+    end;
+    if tokKind <> tkIdent then
+      Expected('receiver type');
+    recvTypeName := tokStr;
+    NextToken;
+    recvTypSym := LookupSym(recvTypeName);
+    if recvTypSym < 0 then
+      Error('unknown type: ' + recvTypeName);
+    if syms[recvTypSym].kind <> skType then
+      Error(recvTypeName + ' is not a type');
+    { The receiver's type is identified by its descriptor, so a type without
+      one cannot be told apart from any other: an alias for integer shares
+      every other integer's absence of a descriptor. Records are the only
+      kind accepted for now, because a record is also the only thing the
+      call site's '.' reaches. }
+    if syms[recvTypSym].typ <> tyRecord then
+      Error('a method receiver must be a record type, and ' +
+            recvTypeName + ' is not one');
+    recvTypeIdx := syms[recvTypSym].typeIdx;
+    { A method that shares a name with a field would make MyCat.Name
+      ambiguous. Reported here rather than at the call, because the call is
+      not where the mistake is. }
+    if LookupField(recvTypeIdx, procName) >= 0 then
+      Error(recvTypeName + ' already has a field named ' + procName);
+    Expect(tkRParen);
+    hasRecv := true;
+    plainName := procName;
+    procName := MethodSymName(recvTypeIdx, procName);
+  end;
 
   { Parse parameters }
   np := 0;
@@ -8562,6 +8736,30 @@ begin
         NextToken;
     end;
     Expect(tkRParen);
+  end;
+
+  { Append the receiver. Both forms are passed as an address: a pointer
+    receiver holds one already, and a record value receiver is passed the
+    same way any record value parameter is, with the callee copying it in
+    the prologue so the method cannot reach the caller's copy. }
+  if hasRecv then begin
+    if np > 15 then
+      Error('too many parameters');
+    paramNames[np] := recvName;
+    paramIsVar[np] := false;
+    paramIsConst[np] := false;
+    if recvIsPtr then begin
+      paramTypes[np] := tyPointer;
+      paramTypeIdx[np] := FindOrAddPointerType(syms[recvTypSym].typ,
+                                               recvTypeIdx,
+                                               syms[recvTypSym].size, 0);
+      paramSize[np] := 4;
+    end else begin
+      paramTypes[np] := syms[recvTypSym].typ;
+      paramTypeIdx[np] := recvTypeIdx;
+      paramSize[np] := syms[recvTypSym].size;
+    end;
+    np := np + 1;
   end;
 
   { Parse return type for functions.
@@ -8837,6 +9035,9 @@ begin
   savedCaseTempIdx := curCaseTempIdx;
   savedFuncNeedsCaseTemp := curFuncNeedsCaseTemp;
   curFuncNeedsCaseTemp := false;
+  savedRecvTempIdx := curRecvTempIdx;
+  savedFuncNeedsRecvTemp := curFuncNeedsRecvTemp;
+  curFuncNeedsRecvTemp := false;
   savedFuncIsFunction := curFuncIsFunction;
   savedFuncReturnIdx := curFuncReturnIdx;
   curFuncIsFunction := isFunc;
@@ -8877,9 +9078,26 @@ begin
     curStringTempIdx := np + 1;
     curCaseTempIdx := np + 2;
   end;
+  { The receiver temp sits after the case temp. A method call cannot borrow
+    the case temp: an argument to that same call may hold a concatenation
+    there, and the receiver has to survive the whole argument list. }
+  curRecvTempIdx := curCaseTempIdx + 1;
 
   { Enter scope for procedure body }
   EnterScope;
+
+  { A function method assigns its result through its plain name, which the
+    symbol table does not hold: the routine is registered under a mangled
+    name so that nothing can call it without a receiver. An alias inside the
+    body's own scope gives the body the name it needs and takes it away
+    again at the closing end. }
+  if hasRecv and isFunc then begin
+    sym := AddSym(plainName, skFunc, retTyp);
+    syms[sym].offset := syms[procSym].offset;
+    syms[sym].size := syms[procSym].size;
+    syms[sym].typeIdx := syms[procSym].typeIdx;
+    syms[sym].strMax := syms[procSym].strMax;
+  end;
 
   { Save prologue state that ParseBlock will consume (nested procs would clobber it) }
   savedNumVarParamSpills := numVarParamSpills;
@@ -8996,7 +9214,9 @@ begin
     nlocals := 2; { return value + saved display }
   { A structured result lives in the hidden trailing parameter, not in a
     declared local, so index np is already accounted for by nparams. }
-  if curFuncNeedsCaseTemp then
+  if curFuncNeedsRecvTemp then
+    nlocals := nlocals + 3  { string temp + case temp + receiver temp }
+  else if curFuncNeedsCaseTemp then
     nlocals := nlocals + 2  { string temp + case temp }
   else if curFuncNeedsStringTemp then
     nlocals := nlocals + 1;
@@ -9005,6 +9225,8 @@ begin
   curStringTempIdx := savedStringTempIdx;
   curFuncNeedsStringTemp := savedFuncNeedsStringTemp;
   curCaseTempIdx := savedCaseTempIdx;
+  curRecvTempIdx := savedRecvTempIdx;
+  curFuncNeedsRecvTemp := savedFuncNeedsRecvTemp;
   curFuncNeedsCaseTemp := savedFuncNeedsCaseTemp;
   curFuncIsFunction := savedFuncIsFunction;
   curFuncReturnIdx := savedFuncReturnIdx;
@@ -13657,6 +13879,8 @@ begin
   curStringTempIdx := 0;    { for _start, local 0 is the string temp }
   curFuncNeedsStringTemp := false;
   curCaseTempIdx := 1;      { for _start, case temp is local 1 (after string temp) }
+  curRecvTempIdx := 2;      { receiver temp follows the case temp }
+  curFuncNeedsRecvTemp := false;
   curFuncNeedsCaseTemp := false;
   exprType := tyInteger;
 
@@ -13845,7 +14069,9 @@ begin
     ProgressReport(srcLine, optProgressTotal, 'Parsed');
 
   { Set _start locals based on whether string/case temps were needed }
-  if curFuncNeedsCaseTemp then
+  if curFuncNeedsRecvTemp then
+    startNlocals := startNlocals + 3  { string temp + case temp + receiver temp }
+  else if curFuncNeedsCaseTemp then
     startNlocals := startNlocals + 2  { string temp + case temp }
   else if curFuncNeedsStringTemp then
     startNlocals := startNlocals + 1;

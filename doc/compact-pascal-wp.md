@@ -492,8 +492,9 @@ FuncDecl         = 'function'  Identifier
 FormalParams     = '(' FormalParam { ';' FormalParam } ')' .
 FormalParam      = [ 'var' | 'const' ] IdentList ':' Type .
 
-Receiver         = '(' Identifier ':' Type ')' .
-                 (* Type may be a value type or '^TypeIdentifier' for pointer receiver *)
+Receiver         = '(' Identifier ':' [ '^' ] TypeIdentifier ')' .
+                 (* '^' marks a pointer receiver. The named type must be a
+                    record — see Standalone Methods in the reference. *)
 ```
 
 ### Implement Blocks (Extension)

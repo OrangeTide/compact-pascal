@@ -1080,6 +1080,14 @@ The same choice makes equality exact. `ProcRefIndex` interns on the function ind
 
 **Nested routines cannot have their address taken.** A nested routine reads its enclosing frame through `display[level-1]`, which the caller's prologue set. An indirect call carries no such context, so the callee would read whatever frame the *calling* chain left in that display slot. Rejecting `@Inner` at compile time is the whole fix; the alternative, a closure carrying a display snapshot, is a different feature.
 
+**A method's receiver is its last parameter.** The obvious layout puts the receiver first, matching how every language with methods describes it. That would have meant threading a starting argument index through every case of the argument-passing loop, which handles var parameters, const strings, structured copies, and pending concatenations. Appending the receiver instead means the call site pushes the arguments exactly as for an ordinary call and then pushes the receiver it saved, and not one line of the argument loop changed. The full order is: visible arguments, receiver, hidden structured-result buffer.
+
+**Methods live in the ordinary symbol table under a name no source can spell**, `#<typeIdx>.<NAME>`. That buys forward declarations, duplicate detection, and scope handling with no second table to keep in step. The key is the receiver's type descriptor index rather than its name, because a call site knows the descriptor of the designator it just parsed and does not know which of possibly several names that type was reached by. The consequence is that a receiver must be a type with a descriptor, and since the call site reaches methods through `.`, records are the only kind accepted.
+
+**Two call sites had to be restructured to reach the argument loop.** A method is found deep inside a selector chain, where the `if`-chain and the `case` arm holding the call code are not reachable. The statement version was extracted into `ParseCallStatement`; the expression version was hoisted out of its `case` arm into an `if` after the case, reached by setting `exprCallSym`. Both are behavior-preserving, which the fixpoint is what proves.
+
+The first attempt at the statement path left `isMethodStmt` uninitialized when a designator had no selectors, so an ordinary assignment sometimes took the method branch and skipped the store. The test suite passed; the self-compile did not. Recorded because it is the second time this project has had a bug that 161 tests missed and compiling thirteen thousand lines of Pascal caught in one run.
+
 **Three checks were written into the reference before they existed in the compiler**, and reading the draft back against the code is what surfaced them: signature mismatch, argument count, and the nested-routine address were all described as checked when none were. Same pattern as the nine documentation-versus-reality defects found in Phases C through L, arriving from the other direction. Writing the reference section first is worth keeping for that reason, provided every claim in it is then run.
 
 ### Compiler architecture
@@ -2152,7 +2160,10 @@ else depends on.
       address are all rejected at compile time. Tables and `call_indirect` are
       WASM 1.0, so this cost no proposal; `check-wasm-features` still reports
       MVP plus bulk memory. Tests t123–t125, n027–n029.
-- [ ] **M2: standalone methods** — `procedure Foo for (r: TRect)`.
+- [x] **M2: standalone methods.** Value and pointer receivers, automatic
+      dereference, a method call in a statement and in an expression, and a
+      structured result from a method. Receiver restricted to records. Tests
+      t126, n030, n031.
 - [ ] **M3: interfaces** and `implement` blocks, which build on M1.
 
 ## Open decisions

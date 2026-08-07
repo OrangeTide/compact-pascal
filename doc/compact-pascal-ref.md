@@ -1341,7 +1341,7 @@ These extensions go beyond ISO 7185 and ISO 10206 and are unique to Compact Pasc
 
 ### Standalone Methods
 
-Any data type can have methods associated with it without modifying the type's original declaration. Methods are declared using the `for` keyword to specify the receiver:
+A record type can have methods associated with it without modifying the type's original declaration. Methods are declared using the `for` keyword to specify the receiver:
 
 ```pascal
 type TCat = record
@@ -1354,7 +1354,11 @@ begin
 end;
 ```
 
-The receiver appears after the `for` keyword in parentheses, as `(name: Type)`. It becomes the first implicit (hidden) argument of the method. The parentheses keep the receiver visually distinct from the return type: without them a function method reads `function Area for r: TRect: integer`, with two colons of different meaning in sequence.
+The receiver appears after the `for` keyword in parentheses, as `(name: Type)`. It becomes a hidden argument of the method. The parentheses keep the receiver visually distinct from the return type: without them a function method reads `function Area for r: TRect: integer`, with two colons of different meaning in sequence.
+
+The receiver type must be a record. A type that is an alias for a simple type, `type TCelsius = integer`, cannot have methods: the compiler identifies a receiver type by its structure, and every alias for `integer` looks the same.
+
+A method's name is not a name in ordinary scope. It is reachable only through a receiver, so `Area(r)` is not a way to call `Area`, and a method cannot collide with a procedure of the same name. Inside a function method's own body the plain name still means the result variable, as it does for any function.
 
 #### Receiver Types
 
@@ -1401,7 +1405,15 @@ function Origin: TPoint; { returns a temporary }
 Origin.Rename('X');   { ERROR: Rename needs an addressable receiver }
 ```
 
-Without this rule the mutation would land in a temporary and be discarded with no diagnostic. Value-receiver methods have no such restriction: they copy, so a temporary receiver is harmless.
+Without this rule the mutation would land in a temporary and be discarded with no diagnostic. Value-receiver methods have no such restriction in principle: they copy, so a temporary receiver is harmless. The compiler rejects both cases today, because the two are told apart only after the receiver's address would already have been needed.
+
+#### How it works
+
+The receiver is passed as the method's **last** parameter, after the visible ones and before the hidden buffer of a structured result. Trailing rather than leading so that a method call reuses the ordinary argument-passing path unchanged: the call site pushes the arguments exactly as for any call, then pushes the receiver address it saved before the arguments were evaluated.
+
+Both receiver kinds are passed an address. A pointer receiver holds one already. A value receiver is passed the address of the caller's record and copies it in its prologue, the same arrangement any record value parameter uses, which is what makes the caller's copy unreachable.
+
+A method call is an ordinary WASM `call`. Nothing is dispatched at run time, and no table is involved: which method runs is settled by the receiver's static type at compile time.
 
 **A method may not share a name with a field of its receiver type.** The collision is reported at the method declaration, not at the call:
 
