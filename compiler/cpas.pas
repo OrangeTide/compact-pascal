@@ -214,6 +214,8 @@ const
   tkShl       = 146;
   tkShr       = 147;
   tkUses      = 148;
+  tkInterface = 149;
+  tkImplement = 150;
 
   { Type kinds }
   tyNone      = 0;
@@ -228,6 +230,7 @@ const
   tyPointer   = 9;
   tyText      = 10;
   tyProc      = 11;
+  tyInterface = 12;
 
   { Type descriptor table limits }
   MaxTypes    = 256;
@@ -240,6 +243,9 @@ const
   { Functions whose address is taken, and so must appear in the WASM table
     that call_indirect selects from. }
   MaxProcRefs = 64;
+  MaxConform  = 32;   { (interface, concrete type) pairs in one program }
+  MaxIfaceMethods = 8;
+  MaxRecvDepth = 4;   { method calls nested inside one another's arguments }
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
   IOErrPastEof = 200;
@@ -406,6 +412,18 @@ var
     index, so it must be stable once assigned. }
   procRefFunc: array[0..MaxProcRefs-1] of longint;
   numProcRefs: longint;
+
+  { Conformance: which concrete types satisfy which interfaces, and with
+    which routines. Filled when an implement block closes and read when a
+    concrete value is converted to an interface. Table indices are stored
+    rather than function indices, because a table index is what goes into
+    the vtable a conversion builds. }
+  conformIface: array[0..MaxConform-1] of longint;
+  conformConc: array[0..MaxConform-1] of longint;
+  conformSlot: array[0..MaxConform-1, 0..MaxIfaceMethods-1] of longint;
+  numConform: longint;
+  { Set while an implement block's methods are being parsed. }
+  implIfaceIdx, implConcIdx, implConcSym: longint;
   secCode:   TCodeBuf;
   secData:   TDataBuf;
   secName:   TSmallBuf;
@@ -586,7 +604,8 @@ var
   curFuncNeedsStringTemp: boolean; { whether current func needs the string temp local }
   curCaseTempIdx: longint;       { WASM local index for case selector temp }
   curFuncNeedsCaseTemp: boolean;  { whether current func needs the case temp local }
-  curRecvTempIdx: longint;        { local holding a method receiver address }
+  curRecvTempIdx: longint;        { first of MaxRecvDepth receiver locals }
+  recvDepth: longint;             { how many method calls are being parsed }
   curFuncNeedsRecvTemp: boolean;  { whether current func needs the receiver temp }
   curFuncIsFunction: boolean;    { whether current func is a function (has return value) }
   curFuncReturnIdx: longint;     { WASM local index for return value in current func }
@@ -671,6 +690,7 @@ procedure ParseBlock; forward;
 procedure ParseStatement; forward;
 procedure ParseExpression(minPrec: longint); forward;
 procedure ParseProcDecl; forward;
+procedure ParseImplementBlock; forward;
 procedure EvalConstExpr(var outVal: longint; var outTyp: longint); forward;
 
 { ---- Error handling ---- }
@@ -1531,6 +1551,8 @@ begin
   else if s = 'WHILE' then LookupKeyword := tkWhile
   else if s = 'DO' then LookupKeyword := tkDo
   else if s = 'FOR' then LookupKeyword := tkFor
+  else if s = 'INTERFACE' then LookupKeyword := tkInterface
+  else if s = 'IMPLEMENT' then LookupKeyword := tkImplement
   else if s = 'TO' then LookupKeyword := tkTo
   else if s = 'DOWNTO' then LookupKeyword := tkDownto
   else if s = 'REPEAT' then LookupKeyword := tkRepeat
@@ -3086,6 +3108,33 @@ begin
   MethodSymName := '#' + s + '.' + mname;
 end;
 
+function ImplMethodName(ifaceIdx, concIdx: longint; const mname: string): string;
+{** The name a method defined inside an implement block is registered under.
+
+  Distinct from MethodSymName so that a block method is not dot-callable on
+  the concrete type. The two forms have different jobs: a standalone method
+  is part of the type's own surface, a block method only satisfies an
+  interface. }
+var a, b: string[11];
+begin
+  str(ifaceIdx, a);
+  str(concIdx, b);
+  ImplMethodName := '@' + a + '#' + b + '.' + mname;
+end;
+
+function ConformIndex(ifaceIdx, concIdx: longint): longint;
+{** Which conformance record covers this pair, or -1 if the type has not been
+  declared to satisfy the interface. }
+var i: longint;
+begin
+  ConformIndex := -1;
+  for i := 0 to numConform - 1 do
+    if (conformIface[i] = ifaceIdx) and (conformConc[i] = concIdx) then begin
+      ConformIndex := i;
+      exit;
+    end;
+end;
+
 function LookupField(tIdx: longint; const fname: string): longint;
 {** Look up a field by name in a record type descriptor. Returns field index or -1. }
 var i: longint;
@@ -3164,6 +3213,7 @@ var
   scratchTyp, scratchSize, scratchStrMax: longint;
   wasmParamsTmp: TWasmParamArr;
   wasmResultsTmp: TWasmResultArr;
+  nWasmRes: longint;
   { Variant record fields }
   tagFieldName: string;
   tagFieldTyp, tagFieldTypeIdx, tagFieldSize, tagFieldStrMax: longint;
@@ -3193,7 +3243,8 @@ begin
       outStrMax := syms[typId].strMax;
       if outStrMax = 0 then outStrMax := 255;
       outSize := outStrMax + 1;
-    end else if (outTyp = tyRecord) or (outTyp = tyArray) or (outTyp = tySet) then begin
+    end else if (outTyp = tyRecord) or (outTyp = tyArray) or (outTyp = tySet)
+                or (outTyp = tyInterface) then begin
       outSize := types[outTypeIdx].size;
       outStrMax := 0;
     end else begin
@@ -3337,6 +3388,61 @@ begin
     end else
       outStrMax := 255;
     outSize := outStrMax + 1;
+  end else if tokKind = tkInterface then begin
+    { An interface value is an inline vtable: a Self pointer at offset 0
+      followed by one table index per method. Laying it out as a record with
+      procedural fields means every mechanism that already moves records
+      around, assignment, parameters, fields, applies to it unchanged.
+
+      Each method's WASM signature carries one extra trailing i32 for Self,
+      matching how a standalone method receives its receiver. That is what
+      lets an interface call and a method call reach the same function. }
+    NextToken;
+    tIdx := AddTypeDesc;
+    types[tIdx].kind := tyInterface;
+    types[tIdx].fieldStart := numFields;
+    types[tIdx].fieldCount := 0;
+    types[tIdx].variantOfs := -1;
+    AddField('SELF', tyPointer, -1, 0, 4, 0);
+    types[tIdx].fieldCount := 1;
+    fieldOfs := 4;
+    while (tokKind <> tkEnd) and (tokKind <> tkEOF) do begin
+      if tokKind <> tkIdent then
+        Expected('method name');
+      fieldNames[0] := tokStr;
+      NextToken;
+      Expect(tkColon);
+      if (tokKind <> tkProcedure) and (tokKind <> tkFunction) then
+        Expected('procedure or function');
+      ParseTypeSpec(fieldTyp, fieldTypeIdx, fieldSize, fieldStrMax);
+      if fieldTyp <> tyProc then
+        Error('an interface may only declare procedures and functions');
+      { Rebuild the signature with Self appended, and keep the visible
+        parameter count so a call site can check its own argument list. }
+      for fi := 0 to types[fieldTypeIdx].elemSize do
+        wasmParamsTmp[fi] := WasmI32;
+      nWasmRes := 0;
+      if types[fieldTypeIdx].arrLo <> 0 then begin
+        wasmResultsTmp[0] := WasmI32;
+        nWasmRes := 1;
+      end;
+      types[fieldTypeIdx].elemType :=
+        AddWasmType(types[fieldTypeIdx].elemSize + 1, wasmParamsTmp,
+                    nWasmRes, wasmResultsTmp);
+      if types[tIdx].fieldCount > MaxIfaceMethods then
+        Error('too many methods in one interface');
+      AddField(fieldNames[0], tyProc, fieldTypeIdx, fieldOfs, 4, 0);
+      types[tIdx].fieldCount := types[tIdx].fieldCount + 1;
+      fieldOfs := fieldOfs + 4;
+      if tokKind = tkSemicolon then
+        NextToken;
+    end;
+    Expect(tkEnd);
+    types[tIdx].size := fieldOfs;
+    outTyp := tyInterface;
+    outTypeIdx := tIdx;
+    outSize := fieldOfs;
+    outStrMax := 0;
   end else if tokKind = tkRecord then begin
     { Record type (possibly with variant part) }
     NextToken;
@@ -5136,8 +5242,11 @@ begin
                   curFuncNeedsStringTemp := true;
                   curFuncNeedsCaseTemp := true;
                   curFuncNeedsRecvTemp := true;
-                  EmitLocalSet(curRecvTempIdx);
-                  exprRecvTemp := curRecvTempIdx;
+                  if recvDepth >= MaxRecvDepth then
+                    Error('method calls nested too deeply');
+                  exprRecvTemp := curRecvTempIdx + recvDepth;
+                  recvDepth := recvDepth + 1;
+                  EmitLocalSet(exprRecvTemp);
                   exprCallSym := methSym;
                   NextToken;
                   break;
@@ -5546,8 +5655,10 @@ begin
             parameters run: visible arguments, receiver, then the hidden
             buffer, because ParseProcDecl appends the receiver to the list
             and the buffer is appended after that. }
-          if exprRecvTemp >= 0 then
+          if exprRecvTemp >= 0 then begin
+            recvDepth := recvDepth - 1;
             EmitLocalGet(exprRecvTemp);
+          end;
           if retBufSize > 0 then begin
             EmitGlobalGet(0);
             if (stmtArenaBytes - retMark) + concatSPAllocs * 256 > 0 then begin
@@ -6944,7 +7055,6 @@ begin
       types[pendingPtrType[i]].elemSize := 4;
   end;
   numPendingPtr := 0;
-  numProcRefs := 0;
 end;
 
 procedure CheckPointerAssign(dTyp, dTypeIdx: longint);
@@ -7241,8 +7351,10 @@ begin
   end;
   concatPieces := savedConcatPieces;
   concatScratchBase := savedConcatBase;
-  if recvLocal >= 0 then
+  if recvLocal >= 0 then begin
+    recvDepth := recvDepth - 1;
     EmitLocalGet(recvLocal);
+  end;
   EmitCall(syms[sym].offset);
   { Restore SP for any concat temp allocations }
   if concatSPAllocs > 0 then begin
@@ -7260,6 +7372,7 @@ procedure ParseStatement;
 {** Parse a single statement. }
 var
   procTypeIdx, procSigIdx, procNArgs: longint;
+  recvSlot: longint;
   methSym: longint;
   isMethodStmt: boolean;
   procIsFn: boolean;
@@ -7799,9 +7912,13 @@ begin
                   curFuncNeedsStringTemp := true;
                   curFuncNeedsCaseTemp := true;
                   curFuncNeedsRecvTemp := true;
-                  EmitLocalSet(curRecvTempIdx);
+                  if recvDepth >= MaxRecvDepth then
+                    Error('method calls nested too deeply');
+                  recvSlot := curRecvTempIdx + recvDepth;
+                  recvDepth := recvDepth + 1;
+                  EmitLocalSet(recvSlot);
                   NextToken;
-                  ParseCallStatement(methSym, curRecvTempIdx);
+                  ParseCallStatement(methSym, recvSlot);
                   isMethodStmt := true;
                   break;
                 end;
@@ -8611,7 +8728,19 @@ begin
     an ordinary call and then pushes the receiver it saved. }
   hasRecv := false;
   recvIsPtr := false;
-  if tokKind = tkFor then begin
+  if implIfaceIdx >= 0 then begin
+    { Inside an implement block the receiver is implicit and always a
+      pointer, named Self. Registering under a name of its own keeps a block
+      method off the concrete type's dot-callable surface. }
+    hasRecv := true;
+    recvIsPtr := true;
+    recvName := 'SELF';
+    recvTypSym := implConcSym;
+    recvTypeIdx := implConcIdx;
+    plainName := procName;
+    procName := ImplMethodName(implIfaceIdx, implConcIdx, procName);
+  end
+  else if tokKind = tkFor then begin
     NextToken;
     Expect(tkLParen);
     if tokKind <> tkIdent then
@@ -9078,9 +9207,14 @@ begin
     curStringTempIdx := np + 1;
     curCaseTempIdx := np + 2;
   end;
-  { The receiver temp sits after the case temp. A method call cannot borrow
+  { The receiver temps sit after the case temp. A method call cannot borrow
     the case temp: an argument to that same call may hold a concatenation
-    there, and the receiver has to survive the whole argument list. }
+    there, and the receiver has to survive the whole argument list.
+
+    There is a bank of them rather than one, because an argument may itself
+    be a method call, and with a single local the inner call would overwrite
+    the receiver the outer call is still holding. The depth is a compile-time
+    count, so the bank costs nothing at run time. }
   curRecvTempIdx := curCaseTempIdx + 1;
 
   { Enter scope for procedure body }
@@ -9215,7 +9349,7 @@ begin
   { A structured result lives in the hidden trailing parameter, not in a
     declared local, so index np is already accounted for by nparams. }
   if curFuncNeedsRecvTemp then
-    nlocals := nlocals + 3  { string temp + case temp + receiver temp }
+    nlocals := nlocals + 2 + MaxRecvDepth  { string, case, receiver bank }
   else if curFuncNeedsCaseTemp then
     nlocals := nlocals + 2  { string temp + case temp }
   else if curFuncNeedsStringTemp then
@@ -9641,6 +9775,89 @@ begin
     DataBufEmit(secData, bm[i]);
 end;
 
+procedure ParseImplementBlock;
+{** Parse `implement IFace for TType;` and the method bodies inside it.
+
+  The block is a conformance declaration rather than a second place to define
+  methods. When it closes, every interface signature is resolved against, in
+  order, a method defined inside the block and a standalone method already
+  declared for the concrete type. Declare-before-use means every candidate
+  has been seen by then, so this stays single-pass with no lookahead. }
+var
+  ifaceName, concName, mName: string;
+  ifaceSym, concSym: longint;
+  ifaceIdx, concIdx: longint;
+  ci, fi, first, count, msym: longint;
+begin
+  NextToken;
+  if tokKind <> tkIdent then
+    Expected('interface name');
+  ifaceName := tokStr;
+  ifaceSym := LookupSym(ifaceName);
+  if ifaceSym < 0 then
+    Error('unknown type: ' + ifaceName);
+  if (syms[ifaceSym].kind <> skType) or (syms[ifaceSym].typ <> tyInterface) then
+    Error(ifaceName + ' is not an interface');
+  ifaceIdx := syms[ifaceSym].typeIdx;
+  NextToken;
+  if tokKind <> tkFor then
+    Expected('for');
+  NextToken;
+  if tokKind <> tkIdent then
+    Expected('type name');
+  concName := tokStr;
+  concSym := LookupSym(concName);
+  if concSym < 0 then
+    Error('unknown type: ' + concName);
+  if (syms[concSym].kind <> skType) or (syms[concSym].typ <> tyRecord) then
+    Error(concName + ' is not a record type');
+  concIdx := syms[concSym].typeIdx;
+  NextToken;
+  Expect(tkSemicolon);
+
+  if ConformIndex(ifaceIdx, concIdx) >= 0 then
+    Error(concName + ' already implements ' + ifaceName);
+  if numConform >= MaxConform then
+    Error('too many implement blocks');
+
+  { Methods inside the block are parsed by the ordinary declaration path,
+    which reads the implicit receiver off these two globals. }
+  implIfaceIdx := ifaceIdx;
+  implConcIdx := concIdx;
+  implConcSym := concSym;
+  while (tokKind = tkProcedure) or (tokKind = tkFunction) do
+    ParseProcDecl;
+  implIfaceIdx := -1;
+  implConcIdx := -1;
+  Expect(tkEnd);
+  Expect(tkSemicolon);
+
+  { Resolve. Field 0 is the hidden Self pointer and has no implementation. }
+  ci := numConform;
+  conformIface[ci] := ifaceIdx;
+  conformConc[ci] := concIdx;
+  first := types[ifaceIdx].fieldStart;
+  count := types[ifaceIdx].fieldCount;
+  for fi := 1 to count - 1 do begin
+    mName := fields[first + fi].name;
+    msym := LookupSym(ImplMethodName(ifaceIdx, concIdx, mName));
+    if msym < 0 then
+      msym := LookupSym(MethodSymName(concIdx, mName));
+    if msym < 0 then
+      Error(concName + ' does not implement ' + mName + ' of ' + ifaceName);
+    { The interface's signature already carries the trailing Self, and so
+      does every method's, so one comparison of WASM type indices covers the
+      parameter count and the presence of a result. It does not cover the
+      Pascal types of the parameters, for the same reason a procedural
+      assignment does not: they are all i32 by now. }
+    if funcs[syms[msym].size].typeidx <> types[fields[first + fi].typeIdx].elemType then
+      Error(mName + ' of ' + concName + ' does not match the signature ' +
+            ifaceName + ' declares');
+    conformSlot[ci, fi] := ProcRefIndex(syms[msym].offset);
+  end;
+  numConform := numConform + 1;
+end;
+
 procedure ParseBlock;
 var
   savedFrameSize: longint;
@@ -9663,7 +9880,8 @@ begin
 
   { Declarations }
   while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
-        or (tokKind = tkProcedure) or (tokKind = tkFunction) do begin
+        or (tokKind = tkProcedure) or (tokKind = tkFunction)
+        or (tokKind = tkImplement) do begin
     case tokKind of
       tkConst: begin
         NextToken;
@@ -9744,6 +9962,9 @@ begin
       end;
       tkProcedure, tkFunction: begin
         ParseProcDecl;
+      end;
+      tkImplement: begin
+        ParseImplementBlock;
       end;
     end;
   end;
@@ -13785,6 +14006,10 @@ begin
   numTypes := 0;
   numPendingPtr := 0;
   numProcRefs := 0;
+  numConform := 0;
+  recvDepth := 0;
+  implIfaceIdx := -1;
+  implConcIdx := -1;
   incDepth := 0;
   optFileIO := false;
   optIncludes := false;
@@ -14070,7 +14295,7 @@ begin
 
   { Set _start locals based on whether string/case temps were needed }
   if curFuncNeedsRecvTemp then
-    startNlocals := startNlocals + 3  { string temp + case temp + receiver temp }
+    startNlocals := startNlocals + 2 + MaxRecvDepth  { string, case, receiver bank }
   else if curFuncNeedsCaseTemp then
     startNlocals := startNlocals + 2  { string temp + case temp }
   else if curFuncNeedsStringTemp then
