@@ -1483,11 +1483,15 @@ An interface is declared with the `interface` keyword. Only procedural field def
 ```pascal
 type IPet = interface
   Greet: procedure (const HumanName: string);
-  Name: function: string;
+  Legs: function: integer;
 end;
 ```
 
-The compiler adds a hidden `Self` field to store a pointer to the concrete data for each interface value.
+An interface method may not return a `string`, a record, or an array. A structured result travels through a hidden buffer parameter that a procedural type has no way to describe, so the declaration is rejected rather than left to mismatch later. Return such a value through a `var` parameter instead.
+
+The compiler adds a hidden `Self` field to store a pointer to the concrete data for each interface value. It occupies the first four bytes, so an interface with *n* methods is `4 * (n + 1)` bytes. An interface may declare at most 8 methods.
+
+The concrete type an interface is implemented for must be a record, the same restriction standalone methods have and for the same reason.
 
 #### Implementing Interfaces
 
@@ -1498,12 +1502,12 @@ implement IPet for TCat;
 
   procedure Greet(const HumanName: string);
   begin
-    WriteLn('Meow, ' + HumanName + '! I am ' + Self.Name);
+    WriteLn('Meow, ', HumanName, '! I am ', Self^.Name);
   end;
 
-  function Name: string;
+  function Legs: integer;
   begin
-    Name := Self.Name;
+    Legs := 4;
   end;
 
 end;
@@ -1511,9 +1515,10 @@ end;
 
 Rules for `implement` blocks:
 - The receiver is implicit — individual methods do not use the `for` keyword.
-- `Self` refers to the receiver inside the block.
+- `Self` is a **pointer** to the receiver inside the block, so a field is reached as `Self^.Name`. It is a pointer rather than a value because a block method has to be able to mutate; a standalone method chooses, and a block method does not.
 - When the compiler reaches the closing `end;`, it verifies that every method declared in the interface is satisfied with a compatible signature.
-- A type may implement multiple interfaces via separate `implement` blocks.
+- A type may implement multiple interfaces via separate `implement` blocks. It may not implement the same one twice.
+- A program may declare at most 32 conformances in total.
 
 #### The Block Declares Conformance
 
@@ -1540,9 +1545,14 @@ This resolution is still single-pass. Declare-before-use guarantees every candid
 
 Methods defined inside an `implement` block are **not** dot-callable on the concrete type. The two forms have distinct jobs: a standalone method declares part of the type's own surface, while the block declares that the type conforms to an interface. A method that should be callable both ways is written once as a standalone method and then simply satisfies the interface.
 
-#### Implicit Conversion
+#### Conversion
 
-After an `implement` block has been parsed, the concrete type can be used wherever the interface type is expected. The compiler silently inserts the conversion:
+After an `implement` block has been parsed, a value of the concrete type can be **assigned** to a variable of the interface type. The compiler emits code to:
+
+1. Set the `Self` pointer to the address of the concrete value.
+2. Fill the procedural fields with the implementations resolved when the block closed.
+
+No explicit cast is required.
 
 ```pascal
 procedure SayHello(Pet: IPet);
@@ -1552,17 +1562,17 @@ end;
 
 var
   MyCat: TCat;
+  Pet: IPet;
 begin
   MyCat.Name := 'Felix';
-  SayHello(MyCat);  { implicit conversion: TCat -> IPet }
+  Pet := MyCat;      { conversion: TCat -> IPet }
+  SayHello(Pet);
 end;
 ```
 
-The compiler emits code to:
-1. Set the `Self` pointer to the address of the concrete value.
-2. Fill the procedural fields with pointers to the actual method implementations.
+**The conversion happens on assignment only, not at a call site.** `SayHello(MyCat)` is a compile error telling you to assign first. The reason is that the conversion builds a value, and an interface variable is the only place with storage for it; an argument would need a temporary whose lifetime is the statement. Assigning to an interface variable is one extra line, and the alternative considered was worse: without the check the record's own bytes are read as a table index and the program traps somewhere else.
 
-No explicit cast is required.
+Assigning one interface value to another of the same type is a copy, not a conversion. Assigning between different interface types is an error.
 
 #### Single-Pass Compilation
 
@@ -1572,9 +1582,11 @@ The `implement` block is a self-contained declaration unit. Interface satisfacti
 
 An interface value is stored as an inline record containing:
 - A `Self` pointer to the concrete data.
-- One procedural field per interface method, filled with pointers to the concrete implementations.
+- One procedural field per interface method, filled with the implementations' indices in the module's function table.
 
-This is an inline vtable. A future optimization could use shared interface tables (itables) per (concrete type, interface type) pair to reduce memory when many interface values share the same concrete type.
+This is an inline vtable. A call through it is a WASM `call_indirect` with `Self` passed as the trailing argument, which is exactly how a standalone method receives its receiver. That is what lets one routine serve both as `MyCat.Greet` and as the implementation behind `Pet.Greet`, with no wrapper in between.
+
+The signature check when a block closes compares WASM signatures, so it sees the parameter count and whether there is a result, and not the Pascal types of the parameters. This is the same limitation procedural types have, for the same reason: every scalar is an `i32` by then. A future optimization could use shared interface tables (itables) per (concrete type, interface type) pair to reduce memory when many interface values share the same concrete type.
 
 **The `Self` pointer does not keep the concrete value alive.** An interface value is only valid while the data it points at is. Storing one in a global, returning one from the function whose local it refers to, or keeping one past the end of the block that declared the concrete variable all leave `Self` dangling, and the language does not detect it. This is the same rule Pascal already applies to `@x` and to `var` parameters: the programmer owns the lifetime. It is stated here because an interface value hides the pointer, so the hazard is less visible than it is with an explicit `^T`.
 

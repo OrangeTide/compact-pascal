@@ -464,6 +464,9 @@ PointerType      = '^' TypeIdentifier .
 InterfaceType    = 'interface' InterfaceFieldList 'end' .
 InterfaceFieldList = [ InterfaceField { ';' InterfaceField } ] .
 InterfaceField   = Identifier ':' ProceduralType .
+                 (* A function field's result type is a simple type or a
+                    pointer, never a string, record, or array — see
+                    Declaring Interfaces in the reference. *)
 
 ProceduralType   = 'procedure' [ FormalParams ]
                  | 'function' [ FormalParams ] ':' Type .

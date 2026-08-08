@@ -1088,6 +1088,14 @@ The same choice makes equality exact. `ProcRefIndex` interns on the function ind
 
 The first attempt at the statement path left `isMethodStmt` uninitialized when a designator had no selectors, so an ordinary assignment sometimes took the method branch and skipped the store. The test suite passed; the self-compile did not. Recorded because it is the second time this project has had a bug that 161 tests missed and compiling thirteen thousand lines of Pascal caught in one run.
 
+**An interface value is a record with procedural fields.** Laying it out that way, `Self` at offset 0 and one function table index per method, means every mechanism that already moves records around applies to it: assignment, parameters, being a field of something else. The only new code is building the vtable and dispatching through it.
+
+**The trailing receiver pays off twice.** An interface method's WASM signature is the declared one plus a trailing `i32` for `Self`, which is exactly the signature a standalone method already has. So one routine serves both as `MyCat.Greet` and as the implementation behind `Pet.Greet`, with no thunk in between and no second calling convention. Had the receiver been the first parameter, an interface call would have needed a wrapper per method to shuffle it into place.
+
+**Conversion happens on assignment and nowhere else.** The reference promised `SayHello(MyCat)` with an implicit conversion at the call. Implementing that means allocating a temporary vtable per argument with statement lifetime, which is the structured-result arena again. Assignment already has storage: the destination interface variable. The call-site form is now a compile error naming the fix, because without a check the record's own bytes are read as a table index and the program traps somewhere unrelated. This is a narrowing of what the spec promised, recorded as such rather than left as a gap.
+
+**`$sp` was initialized to `optMemPages * 65536` rather than to the top of the memory the module asked for.** Any program whose data segment spilled past `{$MEMORY}` began with its stack inside the data segment and trapped on the first call. It surfaced when the compiler's own arrays crossed its 192-page setting, so the bug had been reachable for a long time and nothing had reached it. Fixing it also made `{$STACKSIZE}` mean something: it had been parsed, validated, printed, and ignored, with the stack getting whatever was left in the last page.
+
 **Three checks were written into the reference before they existed in the compiler**, and reading the draft back against the code is what surfaced them: signature mismatch, argument count, and the nested-routine address were all described as checked when none were. Same pattern as the nine documentation-versus-reality defects found in Phases C through L, arriving from the other direction. Writing the reference section first is worth keeping for that reason, provided every claim in it is then run.
 
 ### Compiler architecture
@@ -2164,7 +2172,10 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
-- [ ] **M3: interfaces** and `implement` blocks, which build on M1.
+- [x] **M3: interfaces** and `implement` blocks. Inline vtable, conformance
+      verified when the block closes, satisfaction by a standalone method or
+      by a block method, conversion on assignment, dispatch by
+      `call_indirect`. Tests t129, n032–n034.
 
 ## Open decisions
 

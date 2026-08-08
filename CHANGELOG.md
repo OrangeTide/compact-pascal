@@ -118,6 +118,25 @@ behind a decision lives in the Findings section of `PLAN.md`.
   The receiver is passed as the last parameter and a call is an ordinary WASM
   `call`; nothing is dispatched at run time. See "Standalone Methods" in the
   reference.
+- **Interfaces and `implement` blocks.** An interface names a set of method
+  signatures; an `implement IPet for TCat;` block declares that a record
+  satisfies it, and the compiler verifies that when the block closes. Each
+  signature is satisfied either by a method written in the block, where `Self`
+  is a pointer to the receiver, or by a standalone method the type already
+  had. A type that already has the method it needs writes nothing.
+
+  Assigning a conforming record to an interface variable builds the value:
+  `Self` plus one function table index per method, an inline vtable. A call
+  through it is a WASM `call_indirect` with `Self` as the trailing argument,
+  which is exactly how a standalone method receives its receiver, so one
+  routine serves both `MyCat.Greet` and `Pet.Greet` with no wrapper.
+
+  The conversion happens on assignment only. `SayHello(MyCat)` is a compile
+  error asking you to assign to an interface variable first, because the
+  conversion builds a value and an argument has nowhere to put it.
+
+  An interface method cannot return a `string`, record, or array, and an
+  interface may declare at most 8 methods. See "Interfaces" in the reference.
 - **The compiler resolves `{$I}` itself under `-I`.** A multi-file program
   builds from the command line with no host help, eight levels deep, with
   cycles and missing files diagnosed instead of silently skipped. Without the
@@ -147,6 +166,19 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **`$sp` started at the wrong address when a module needed more than one
+  page.** It was initialized to `{$MEMORY}` pages worth of bytes rather than
+  to the top of the memory the module actually asked for, so a program whose
+  data segment spilled past `{$MEMORY}` began with its stack inside the data
+  segment and trapped on the first call. Found when the compiler's own data
+  grew past its setting.
+- **`{$STACKSIZE}` now means something.** It was parsed, validated, printed
+  under `-v`, and then ignored: the initial memory was sized for the data
+  segment alone and the stack got whatever was left in the last page. Initial
+  memory now covers the data segment plus the requested stack.
+- The compiler's code section buffer grows from 192 KB to 256 KB, and its own
+  `{$MEMORY}` from 192 to 256 pages. The snapshot's initial linear memory
+  therefore grows from 12.5 MB to 16.7 MB.
 - **Stack overflow is detected.** Every prologue compares the stack pointer
   against the end of the data segment before reserving its frame and traps if
   the frame would cross it. Deep recursion previously walked down through the

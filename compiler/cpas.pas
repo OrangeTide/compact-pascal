@@ -1,7 +1,7 @@
 {$MODE TP}
 {$IFNDEF FPC}
-{$MEMORY 192}
-{$MAXMEMORY 256}
+{$MEMORY 256}
+{$MAXMEMORY 384}
 {$ENDIF}
 program cpas;
 {$IFNDEF FPC}
@@ -23,9 +23,8 @@ const
   VersionMonth = 08;
   VersionPatch = 0;
 
-  { Section buffer sizes }
   SmallBufMax = 4095;    { 4 KB for small sections }
-  CodeBufMax  = 196607;  { 192 KB for code section }
+  CodeBufMax  = 262143;  { 256 KB for code section }
   DataBufMax  = 131071;  { 128 KB for data section }
 
   { Symbol table limits }
@@ -625,9 +624,11 @@ var
   exprType: longint;  { type of last parsed expression (tyInteger, tyString, etc.) }
   exprSetSize: longint;  { for tySet: 4 = small (i32), >4 = large (memory-based) }
   exprProcSig: longint;  { for tyProc: the WASM signature index, -1 otherwise }
+  exprStructIdx: longint;{ for tyRecord and tyInterface: the type descriptor }
 
   (* Compiler directive options *)
   optMemPages: longint;       (* MEMORY n, default 1 *)
+  initialPages: longint;      (* pages the memory section asked for *)
   optMaxMemPages: longint;    (* MAXMEMORY n, default 256 *)
   optStackSize: longint;      (* STACKSIZE n, default 65536 *)
   optDescription: string;     (* DESCRIPTION 'text' *)
@@ -4654,6 +4655,21 @@ end;
 
   @param minPrec minimum operator precedence to accept
 }
+procedure CheckIfaceArg(paramTyp, argTyp: longint);
+{** Refuse a concrete record where an interface parameter is expected.
+
+  The conversion is a real one: an interface value is a vtable that has to be
+  built, and there is nowhere to build it for an argument without allocating
+  a temporary whose lifetime is the statement. Assignment to an interface
+  variable does the conversion, so the workaround is one line, and a silent
+  miscompile is what this exists to prevent: without the check the record's
+  own bytes are read as a table index. }
+begin
+  if (paramTyp = tyInterface) and (argTyp <> tyInterface) then
+    Error('a concrete value cannot be passed where an interface is ' +
+          'expected; assign it to an interface variable first');
+end;
+
 procedure ParseExpression(minPrec: longint);
 var
   prec: longint;
@@ -4667,6 +4683,7 @@ var
   exprTypeIdx: longint;
   procSigIdx: longint;
   exprCallSym: longint;
+  ifaceOfs: longint;
   exprRecvTemp: longint;
   methSym: longint;
   procIsFn: boolean;
@@ -5145,7 +5162,7 @@ begin
 
           { Load scalar value when selectors reduced a structured const to a scalar.
             Large sets (>4 bytes) keep the address since set ops work on memory. }
-          if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
+          if hasAddr and (exprType <> tyString) and (exprType <> tyRecord) and (exprType <> tyInterface)
              and (exprType <> tyArray)
              and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then begin
             if (exprType = tyChar) or (exprType = tyBoolean) then
@@ -5226,6 +5243,58 @@ begin
                 exprType := types[exprTypeIdx].elemType;
                 exprStrMax := types[exprTypeIdx].elemStrMax;
                 exprTypeIdx := types[exprTypeIdx].elemTypeIdx;
+              end;
+              { An interface value dispatches through its inline vtable. See
+                the matching code in the statement path for why the base
+                address, and not Self, is what stays in the receiver slot. }
+              if exprType = tyInterface then begin
+                NextToken;
+                if tokKind <> tkIdent then
+                  Expected('method name');
+                fldIdx := LookupField(exprTypeIdx, tokStr);
+                if (fldIdx < 0) or (fields[fldIdx].typ <> tyProc) then
+                  Error(tokStr + ' is not a method of this interface');
+                if types[fields[fldIdx].typeIdx].arrLo = 0 then
+                  Error(tokStr + ' is a procedure and has no result to use in an expression');
+                procSigIdx := types[fields[fldIdx].typeIdx].elemType;
+                procNArgs := types[fields[fldIdx].typeIdx].elemSize;
+                ifaceOfs := fields[fldIdx].offset;
+                curFuncNeedsStringTemp := true;
+                curFuncNeedsCaseTemp := true;
+                curFuncNeedsRecvTemp := true;
+                if recvDepth >= MaxRecvDepth then
+                  Error('method calls nested too deeply');
+                exprRecvTemp := curRecvTempIdx + recvDepth;
+                recvDepth := recvDepth + 1;
+                EmitLocalSet(exprRecvTemp);
+                NextToken;
+                argIdx := 0;
+                if tokKind = tkLParen then begin
+                  NextToken;
+                  while tokKind <> tkRParen do begin
+                    ParseExpression(PrecNone);
+                    argIdx := argIdx + 1;
+                    if tokKind = tkComma then
+                      NextToken;
+                  end;
+                  Expect(tkRParen);
+                end;
+                if argIdx <> procNArgs then
+                  Error('this interface method takes a different number of arguments');
+                recvDepth := recvDepth - 1;
+                EmitLocalGet(exprRecvTemp);
+                EmitI32Load(2, 0);              { Self }
+                EmitLocalGet(exprRecvTemp);
+                EmitI32Load(2, ifaceOfs);       { table index }
+                EmitOp(OpCallIndirect);
+                EmitULEB128(startCode, procSigIdx);
+                EmitULEB128(startCode, 0);
+                exprRecvTemp := -1;
+                exprType := tyInteger;
+                exprTypeIdx := -1;
+                exprStrMax := 0;
+                hasAddr := false;
+                break;
               end;
               if exprType <> tyRecord then
                 Error('record type expected before ''.''');
@@ -5332,7 +5401,7 @@ begin
             wantAddr := false;
           end
           { Final load: scalars need i32.load, structured types leave address }
-          else if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
+          else if hasAddr and (exprType <> tyString) and (exprType <> tyRecord) and (exprType <> tyInterface)
              and (exprType <> tyArray)
              and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then begin
             if (exprType = tyChar) or (exprType = tyBoolean) then
@@ -5346,6 +5415,8 @@ begin
             exprSetSize := 4;
           if (exprType = tyProc) and (exprTypeIdx >= 0) then
             exprProcSig := types[exprTypeIdx].elemType;
+          if (exprType = tyRecord) or (exprType = tyInterface) then
+            exprStructIdx := exprTypeIdx;
 
           { Calling through a procedural variable. The value is already on the
             stack; the arguments have to go under it, so it is stashed and
@@ -5557,6 +5628,7 @@ begin
                     Error('undeclared identifier: ' + tokStr);
                   if syms[argSym].kind <> skVar then
                     Error('variable expected for var parameter');
+                  CheckIfaceArg(funcs[syms[exprCallSym].size].paramTyp[argIdx], syms[argSym].typ);
                   if syms[argSym].isVarParam then begin
                     { Already a pointer — pass it through }
                     EmitVarParamPtr(argSym);
@@ -5637,6 +5709,7 @@ begin
                 end;
               end else begin
                 ParseExpression(PrecNone);
+              CheckIfaceArg(funcs[syms[exprCallSym].size].paramTyp[argIdx], exprType);
               end;
               argIdx := argIdx + 1;
               if tokKind = tkComma then
@@ -5764,7 +5837,7 @@ begin
               Expect(tkRBrack);
           end;
         end;
-        if hasAddr and (exprType <> tyString) and (exprType <> tyRecord)
+        if hasAddr and (exprType <> tyString) and (exprType <> tyRecord) and (exprType <> tyInterface)
            and (exprType <> tyArray)
            and not ((exprType = tySet) and (exprTypeIdx >= 0) and (types[exprTypeIdx].size > 4)) then
           EmitI32Load(2, 0);
@@ -7240,6 +7313,7 @@ begin
             Error('undeclared identifier: ' + tokStr);
           if syms[argSym].kind <> skVar then
             Error('variable expected for var parameter');
+          CheckIfaceArg(funcs[syms[sym].size].paramTyp[argIdx], syms[argSym].typ);
           if syms[argSym].isVarParam then begin
             { Already a pointer — pass it through }
             EmitVarParamPtr(argSym);
@@ -7320,6 +7394,7 @@ begin
         end;
       end else begin
         ParseExpression(PrecNone);
+        CheckIfaceArg(funcs[syms[sym].size].paramTyp[argIdx], exprType);
         if concatPieces > 0 then begin
           { String concat in regular param: finalize into string temp }
           curFuncNeedsStringTemp := true;
@@ -7373,6 +7448,7 @@ procedure ParseStatement;
 var
   procTypeIdx, procSigIdx, procNArgs: longint;
   recvSlot: longint;
+  ifaceDst, ifaceSrc, conIdx: longint;
   methSym: longint;
   isMethodStmt: boolean;
   procIsFn: boolean;
@@ -7834,8 +7910,12 @@ begin
       else if (sym >= 0) and (syms[sym].kind = skVar) and
          ((tokKind = tkAssign) or (tokKind = tkDot) or (tokKind = tkLBrack)
           or (tokKind = tkCaret)) then begin
-        { Assignment: var [:= | .field | [index] | ^ ...] := expr }
-        if syms[sym].isConstParam then
+        { Assignment: var [:= | .field | [index] | ^ ...] := expr
+
+          A const parameter can still be the receiver of a call, so the check
+          waits until a '.' has been ruled out. It fires again below on the
+          path that actually stores. }
+        if syms[sym].isConstParam and (tokKind <> tkDot) then
           Error('cannot assign to const parameter ''' + name + '''');
 
         { Track designator type as we process selectors }
@@ -7894,6 +7974,57 @@ begin
                 desTyp := types[desTypeIdx].elemType;
                 desStrMax := types[desTypeIdx].elemStrMax;
                 desTypeIdx := types[desTypeIdx].elemTypeIdx;
+              end;
+              { An interface value dispatches through its inline vtable. The
+                base address stays in a receiver slot across the arguments
+                because both Self and the table index are read out of it
+                afterwards, in that order: Self is the trailing parameter
+                and call_indirect takes the index last. }
+              if desTyp = tyInterface then begin
+                NextToken;
+                if tokKind <> tkIdent then
+                  Expected('method name');
+                fldIdx := LookupField(desTypeIdx, tokStr);
+                if (fldIdx < 0) or (fields[fldIdx].typ <> tyProc) then
+                  Error(tokStr + ' is not a method of this interface');
+                procSigIdx := types[fields[fldIdx].typeIdx].elemType;
+                procIsFn := types[fields[fldIdx].typeIdx].arrLo <> 0;
+                procNArgs := types[fields[fldIdx].typeIdx].elemSize;
+                tmpOfs := fields[fldIdx].offset;
+                curFuncNeedsStringTemp := true;
+                curFuncNeedsCaseTemp := true;
+                curFuncNeedsRecvTemp := true;
+                if recvDepth >= MaxRecvDepth then
+                  Error('method calls nested too deeply');
+                recvSlot := curRecvTempIdx + recvDepth;
+                recvDepth := recvDepth + 1;
+                EmitLocalSet(recvSlot);
+                NextToken;
+                argIdx := 0;
+                if tokKind = tkLParen then begin
+                  NextToken;
+                  while tokKind <> tkRParen do begin
+                    ParseExpression(PrecNone);
+                    argIdx := argIdx + 1;
+                    if tokKind = tkComma then
+                      NextToken;
+                  end;
+                  Expect(tkRParen);
+                end;
+                if argIdx <> procNArgs then
+                  Error('this interface method takes a different number of arguments');
+                recvDepth := recvDepth - 1;
+                EmitLocalGet(recvSlot);
+                EmitI32Load(2, 0);              { Self }
+                EmitLocalGet(recvSlot);
+                EmitI32Load(2, tmpOfs);         { table index }
+                EmitOp(OpCallIndirect);
+                EmitULEB128(startCode, procSigIdx);
+                EmitULEB128(startCode, 0);
+                if procIsFn then
+                  EmitOp(OpDrop);
+                isMethodStmt := true;
+                break;
               end;
               if desTyp <> tyRecord then
                 Error('record type expected before ''.''');
@@ -7966,6 +8097,8 @@ begin
           { The call is emitted and the designator ended with it. There is
             nothing left to assign to. }
         end else begin
+        if syms[sym].isConstParam then
+          Error('cannot assign to const parameter ''' + name + '''');
 
         if tokKind <> tkAssign then
           Expected(':=');
@@ -8028,6 +8161,62 @@ begin
             EmitI32Const(desStrMax);
             EmitLocalGet(curStringTempIdx);
             EmitCall(EnsureStrAssign);
+          end;
+        end
+        else if desTyp = tyInterface then begin
+          { Assigning to an interface. The right side is either another value
+            of the same interface, which copies, or a concrete record that
+            has been declared to conform, which builds the vtable in place.
+
+            Building it in the destination is why assignment is where the
+            conversion lives: there is no temporary to allocate and no
+            lifetime question about where the vtable itself lives. Self is a
+            different matter and is documented as the caller's problem. }
+          if recvDepth + 1 >= MaxRecvDepth then
+            Error('method calls nested too deeply');
+          curFuncNeedsStringTemp := true;
+          curFuncNeedsCaseTemp := true;
+          curFuncNeedsRecvTemp := true;
+          ifaceDst := curRecvTempIdx + recvDepth;
+          ifaceSrc := ifaceDst + 1;
+          recvDepth := recvDepth + 2;
+          if not desHasAddr then begin
+            if syms[sym].isVarParam then
+              EmitVarParamPtr(sym)
+            else if syms[sym].offset < 0 then
+              EmitLocalGet(-(syms[sym].offset + 1))
+            else begin
+              EmitFramePtr(syms[sym].level);
+              EmitI32Const(syms[sym].offset);
+              EmitOp(OpI32Add);
+            end;
+          end;
+          EmitLocalSet(ifaceDst);
+          ParseExpression(PrecNone);
+          EmitLocalSet(ifaceSrc);
+          recvDepth := recvDepth - 2;
+          if exprType = tyInterface then begin
+            if exprStructIdx <> desTypeIdx then
+              Error('cannot assign one interface type to another');
+            EmitLocalGet(ifaceDst);
+            EmitLocalGet(ifaceSrc);
+            EmitI32Const(types[desTypeIdx].size);
+            EmitMemoryCopy;
+          end else begin
+            if exprType <> tyRecord then
+              Error('only a record or a value of the same interface can be ' +
+                    'assigned to an interface');
+            conIdx := ConformIndex(desTypeIdx, exprStructIdx);
+            if conIdx < 0 then
+              Error('this record type has no implement block for that interface');
+            EmitLocalGet(ifaceDst);
+            EmitLocalGet(ifaceSrc);
+            EmitI32Store(2, 0);            { Self }
+            for i := 1 to types[desTypeIdx].fieldCount - 1 do begin
+              EmitLocalGet(ifaceDst);
+              EmitI32Const(conformSlot[conIdx, i]);
+              EmitI32Store(2, fields[types[desTypeIdx].fieldStart + i].offset);
+            end;
           end;
         end
         else if (desTyp = tyRecord) or (desTyp = tyArray)
@@ -8851,7 +9040,8 @@ begin
           paramSize[i] := syms[pTypSym].size;
           { Structured types (record/array): var/const pass by reference;
             value params pass address but callee copies into frame }
-          if ((syms[pTypSym].typ = tyRecord) or (syms[pTypSym].typ = tyArray)) then begin
+          if ((syms[pTypSym].typ = tyRecord) or (syms[pTypSym].typ = tyArray)
+              or (syms[pTypSym].typ = tyInterface)) then begin
             if paramIsVar[i] or paramIsConst[i] then begin
               { Already by-reference — force varParam for call site }
               paramIsVar[i] := true;
@@ -10316,10 +10506,15 @@ var
   minPages: longint;
 begin
   SmallBufInit(secMemory);
-  { Compute minimum pages needed: at least optMemPages, at least enough for data }
+  { At least optMemPages, and at least enough for the data segment plus the
+    stack that grows down into whatever is above it. Counting the stack here
+    is what makes the STACKSIZE directive mean anything: without it the
+    figure was printed and then ignored, and a program whose data filled
+    its last page got whatever was left over. }
   minPages := optMemPages;
-  if (dataPos + 65535) div 65536 > minPages then
-    minPages := (dataPos + 65535) div 65536;
+  if (dataPos + optStackSize + 65535) div 65536 > minPages then
+    minPages := (dataPos + optStackSize + 65535) div 65536;
+  initialPages := minPages;
   SmallBufEmit(secMemory, 1);    { 1 memory }
   SmallBufEmit(secMemory, 1);    { flags: has max }
   SmallEmitULEB128(secMemory, minPages);
@@ -10342,9 +10537,14 @@ begin
   { Global 0: $sp (stack pointer) }
   SmallBufEmit(secGlobal, WasmI32);  { type: i32 }
   SmallBufEmit(secGlobal, 1);        { mutable }
-  { init expr: i32.const SP (top of initial memory) }
+  { init expr: i32.const SP (top of initial memory).
+
+    The top of the memory the module actually asks for, not of optMemPages.
+    Using optMemPages meant that a module whose data needed more than one
+    page started its stack at 64 KB, inside the data segment, and the stack
+    guard fired on the first call. }
   SmallBufEmit(secGlobal, OpI32Const);
-  SmallEmitSLEB128(secGlobal, optMemPages * 65536);
+  SmallEmitSLEB128(secGlobal, initialPages * 65536);
   SmallBufEmit(secGlobal, OpEnd);
   { Globals 1..8: display[0]..display[7] — frame pointers for nested scopes }
   for i := 1 to MaxDisplayDepth do begin
