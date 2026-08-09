@@ -166,6 +166,12 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **Using a method's name without a receiver says so.** `Area(q)` or `@Area`,
+  where `Area` is a standalone method, reported "undeclared identifier",
+  which sends you looking for a declaration that is sitting right there. It
+  now names the receiver type. A method defined in an `implement` block names
+  the interface instead, because that one is not dot-callable on the concrete
+  type either.
 - **Argument counts are checked.** Calling a routine with the wrong number of
   arguments was never diagnosed. The call emitted a module that failed WASM
   validation, or, with too many arguments, one whose extra values were left

@@ -3136,6 +3136,93 @@ begin
     end;
 end;
 
+function TypeNameOf(tIdx: longint): string;
+{** The source name of a type descriptor, or the empty string. Used only for
+  diagnostics, so a linear scan is fine. }
+var i: longint;
+begin
+  TypeNameOf := '';
+  for i := 0 to numSyms - 1 do
+    if (syms[i].kind = skType) and (syms[i].typeIdx = tIdx) then begin
+      TypeNameOf := syms[i].name;
+      exit;
+    end;
+end;
+
+function MethodReceiverName(const mname: string; var viaIface: boolean): string;
+{** The name of the type a method called mname belongs to, or the empty
+  string if no such method was declared.
+
+  Methods are registered under a name no source can spell, so an ordinary
+  lookup misses them. This scans for one so that a failed lookup can say
+  where the name really lives instead of claiming it does not exist.
+
+  Both mangled forms put a decimal index right after the first character:
+  '#<recv>.NAME' for a standalone method, '@<iface>#<recv>.NAME' for one
+  defined in an implement block. The index wanted is the same either way,
+  the first one, because a block method is reached through its interface
+  and naming the concrete type would suggest a dot call that does not work. }
+var
+  i, j, k, tIdx: longint;
+  s, owner: string;
+  found: boolean;
+begin
+  MethodReceiverName := '';
+  viaIface := false;
+  for i := 0 to numSyms - 1 do begin
+    s := syms[i].name;
+    if length(s) = 0 then
+      continue;
+    if (s[1] <> '#') and (s[1] <> '@') then
+      continue;
+    j := pos('.', s);
+    if j = 0 then
+      continue;
+    if copy(s, j + 1, length(s) - j) <> mname then
+      continue;
+    viaIface := s[1] = '@';
+    k := 2;
+    tIdx := 0;
+    found := false;
+    while (k <= length(s)) and (s[k] >= '0') and (s[k] <= '9') do begin
+      tIdx := tIdx * 10 + (ord(s[k]) - ord('0'));
+      found := true;
+      k := k + 1;
+    end;
+    if not found then
+      continue;
+    owner := TypeNameOf(tIdx);
+    if owner = '' then begin
+      { The method exists but its type is no longer in scope. Saying so is
+        still better than denying the name. }
+      if viaIface then
+        owner := 'an interface'
+      else
+        owner := 'another type';
+    end;
+    MethodReceiverName := owner;
+    exit;
+  end;
+end;
+
+procedure ErrorUndeclared(const nm: string);
+{** Report an unknown identifier, and say something more useful when the name
+  is a method. A method is not a name in ordinary scope, so the plain message
+  sends the reader looking for a declaration that is sitting right there. }
+var
+  owner: string;
+  viaIface: boolean;
+begin
+  owner := MethodReceiverName(nm, viaIface);
+  if (owner <> '') and viaIface then
+    Error(nm + ' is defined in an implement block for ' + owner +
+          ' and is reached through a value of that interface')
+  else if owner <> '' then
+    Error(nm + ' is a method of ' + owner + ' and is reached through a ' +
+          'receiver, as in Value.' + nm);
+  Error('undeclared identifier: ' + nm);
+end;
+
 function LookupField(tIdx: longint; const fname: string): longint;
 {** Look up a field by name in a record type descriptor. Returns field index or -1. }
 var i: longint;
@@ -3945,7 +4032,7 @@ begin
     Error('a text file variable is required here');
   sym := LookupSym(tokStr);
   if sym < 0 then
-    Error('undeclared identifier: ' + tokStr);
+    ErrorUndeclared(tokStr);
   if syms[sym].kind <> skVar then
     Error('a text file variable is required here');
   NextToken;
@@ -4972,7 +5059,7 @@ begin
           Expected('identifier');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         EmitI32Const(syms[sym].size);
         NextToken;
         Expect(tkRParen);
@@ -5091,7 +5178,7 @@ begin
           end;
         end;
         if not withFound then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
       end;
       if sym >= 0 then
       case syms[sym].kind of
@@ -5632,7 +5719,7 @@ begin
                     Error('variable expected for var parameter');
                   argSym := LookupSym(tokStr);
                   if argSym < 0 then
-                    Error('undeclared identifier: ' + tokStr);
+                    ErrorUndeclared(tokStr);
                   if syms[argSym].kind <> skVar then
                     Error('variable expected for var parameter');
                   CheckIfaceArg(funcs[syms[exprCallSym].size].paramTyp[argIdx], syms[argSym].typ);
@@ -6653,7 +6740,7 @@ begin
             Error('read from a file requires a string or char variable');
           sym := LookupSym(tokStr);
           if sym < 0 then
-            Error('undeclared identifier: ' + tokStr);
+            ErrorUndeclared(tokStr);
           if (syms[sym].kind <> skVar) then
             Error('read from a file requires a string or char variable');
           if syms[sym].typ = tyChar then begin
@@ -6731,7 +6818,7 @@ begin
       name := tokStr;
       sym := LookupSym(name);
       if sym < 0 then
-        Error('undeclared identifier: ' + name);
+        ErrorUndeclared(name);
       if syms[sym].kind <> skVar then
         Error('variable expected in read');
       if syms[sym].isConstParam then
@@ -6977,7 +7064,7 @@ var
             Expected('type or variable name');
           sym := LookupSym(tokStr);
           if sym < 0 then
-            Error('undeclared identifier: ' + tokStr);
+            ErrorUndeclared(tokStr);
           case syms[sym].kind of
             skType: begin
               case syms[sym].typ of
@@ -7002,7 +7089,7 @@ var
           { Look up as a previously declared constant or type cast }
           sym := LookupSym(tokStr);
           if sym < 0 then
-            Error('undeclared identifier: ' + tokStr);
+            ErrorUndeclared(tokStr);
           if syms[sym].kind = skType then begin
             { Constant type cast: TypeName(constexpr) }
             castName := syms[sym].name;
@@ -7336,7 +7423,7 @@ begin
             Error('variable expected for var parameter');
           argSym := LookupSym(tokStr);
           if argSym < 0 then
-            Error('undeclared identifier: ' + tokStr);
+            ErrorUndeclared(tokStr);
           if syms[argSym].kind <> skVar then
             Error('variable expected for var parameter');
           CheckIfaceArg(funcs[syms[sym].size].paramTyp[argIdx], syms[argSym].typ);
@@ -7609,7 +7696,7 @@ begin
           Error('new/dispose requires a pointer variable');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         if syms[sym].kind <> skVar then
           Error('new/dispose requires a pointer variable');
         if syms[sym].typ <> tyPointer then
@@ -7658,7 +7745,7 @@ begin
           Error('delete() first argument must be a string variable');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         if syms[sym].typ <> tyString then
           Error('delete() first argument must be a string variable');
         { Push string address }
@@ -7693,7 +7780,7 @@ begin
           Error('insert() second argument must be a string variable');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         if syms[sym].typ <> tyString then
           Error('insert() second argument must be a string variable');
         { Push dst string address }
@@ -7719,7 +7806,7 @@ begin
           Error(name + '() argument must be a variable');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         if syms[sym].kind <> skVar then
           Error(name + '() argument must be a variable');
         if syms[sym].isConstParam then
@@ -7789,7 +7876,7 @@ begin
           Error('str() second argument must be a string variable');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         if syms[sym].typ <> tyString then
           Error('str() second argument must be a string variable');
         if syms[sym].kind <> skVar then
@@ -7823,7 +7910,7 @@ begin
           end;
         end;
         if not withFound then
-          Error('undeclared identifier: ' + name);
+          ErrorUndeclared(name);
       end;
       NextToken;
       if withFound and
@@ -8544,7 +8631,7 @@ begin
       name := tokStr;
       sym := LookupSym(name);
       if sym < 0 then
-        Error('undeclared identifier: ' + name);
+        ErrorUndeclared(name);
       if syms[sym].kind <> skVar then
         Error(name + ' is not a variable');
       NextToken;
@@ -8822,7 +8909,7 @@ begin
           Expected('record variable');
         sym := LookupSym(tokStr);
         if sym < 0 then
-          Error('undeclared identifier: ' + tokStr);
+          ErrorUndeclared(tokStr);
         if syms[sym].kind <> skVar then
           Error('variable expected in with statement');
         if syms[sym].typ <> tyRecord then
