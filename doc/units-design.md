@@ -4,6 +4,11 @@ Status: **proposal, for review.** This is Phase L1 of `PLAN.md`. Nothing here
 is implemented. It exists so the design can be argued with before four weeks
 of implementation are spent on it.
 
+**Revised after Phase M.** Procedural types, standalone methods, and
+interfaces landed after this document was first written, and they add three
+things a linker has to handle that were not accounted for here. They are
+folded into the sections below and summarized under "What Phase M changed".
+
 Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 ## What has to be true at the end
@@ -101,6 +106,7 @@ types       WASM type section entries, as emitted
 imports     WASM imports this unit needs (host functions only)
 functions   code bodies, concatenated, with a length per function
 data        the data segment bytes
+elements    the functions this unit put in the table, in its own order
 relocations one entry per patch site
 ```
 
@@ -111,7 +117,17 @@ A relocation is `(offset, kind, symbol)`, where kind is one of:
 | `func` | a `call` immediate | Final function indices are only known once every unit is placed. |
 | `data` | an `i32.const` operand | Data addresses shift as segments are concatenated. |
 | `type` | a type index | Type sections merge and deduplicate. |
+| `table` | an `i32.const` operand | A procedural value *is* a table slot number, and slots renumber when two units' tables merge. |
 | `global` | a global index | Only if a unit ever adds globals; today none do. |
+
+The `table` kind is the one this document originally missed, and it is not a
+variant of `data`. `@Add` compiles to `i32.const <slot>` and an interface
+conversion compiles to one `i32.const <slot>` per method, both filled in from
+a table the compiler numbers from 1 upward within a single compilation. Two
+units each numbering from 1 collide, so the linker assigns final slots and
+patches every site. Slot 0 stays empty in the linked module for the same
+reason it does today: it is what makes an unassigned procedural variable trap
+rather than call something arbitrary.
 
 **Every patch site must be a fixed-width immediate, and none are today.**
 LEB128 is variable width, so patching a small value with a large one would need
@@ -149,14 +165,59 @@ project independently agreed, which is the strongest external signal available
 on any of these questions.
 
 It holds what an importer needs and nothing else: exported constants, types,
-variables, and routine signatures. It is emitted as part of the object rather
-than as a separate file, so the two cannot disagree.
+variables, routine signatures, and **conformances**. It is emitted as part of
+the object rather than as a separate file, so the two cannot disagree.
+
+Conformances are the fourth item and were not in the first draft. When a unit
+writes `implement IPet for TCat;` the fact that TCat satisfies IPet, and which
+routine implements each signature, is what makes `Pet := MyCat` legal. It is
+held today in a compile-time table that dies with the compilation. An importer
+that can see `TCat` and `IPet` but not the conformance between them cannot
+perform the conversion, so the pair and its method routines have to travel in
+the object.
 
 The importer reads it and adds symbols to its table exactly as if it had parsed
 declarations. Because it is generated, a signature cannot drift between
 declaration and use — which is the failure the current `{$IMPORT}`/`{$EXPORT}`
 mechanism has, where an importer re-declares by hand and a mismatch surfaces at
 link time or later.
+
+## What Phase M changed
+
+Three things, of which two are ordinary linker work and one is a change the
+compiler needs before a linker is written at all.
+
+**Table slots need relocating.** Covered above as the `table` relocation kind.
+Ordinary work.
+
+**Conformances need exporting.** Covered above. Ordinary work.
+
+**Method symbol names do not survive separate compilation.** This one is not
+a relocation and cannot be fixed in the linker.
+
+A standalone method is registered in the symbol table under a name no source
+can spell, `#<typeIdx>.<NAME>`, where `typeIdx` is the type's index in the
+compiler's descriptor array. A call site knows the descriptor of the
+designator it just parsed, so keying on the index costs nothing and needs no
+lookup. Within one compilation that is exact.
+
+Across compilations it is meaningless. The index is a counter over the types
+a single run happened to see, in the order it saw them. `TPoint` might be 3 in
+the unit that declares it and 7 in the unit that imports it, or the importing
+unit might never build a descriptor for it at the same position. An importer
+cannot form the key, so it cannot find `Distance` at all.
+
+The fix is to key the name on the type rather than on where the type landed:
+`#<Unit>.<TypeName>.<NAME>`. A receiver must be a named type already, so the
+name exists at the declaration; what is missing is a way for the *call site*
+to recover it, because the call site holds a descriptor index and descriptors
+carry no name. Adding a name to the type descriptor is the whole change: 256
+descriptors at 64 bytes is 16 KB, against a compiler that already reserves
+16.7 MB. Five places form or look up the mangled name.
+
+Worth doing before the linker rather than during it, because every part of
+the object format that refers to a method refers to it by this name, and
+changing the naming scheme afterwards means changing the format.
 
 ## Syntax, and how it stays single-pass
 
@@ -248,6 +309,21 @@ The one interaction: two units importing the same host function should produce
 one import in the linked module, so the linker deduplicates imports by
 (module, name, type) the way it deduplicates types.
 
+## Memory sizing is the linker's job
+
+Not mentioned in the first draft, and worth stating because getting it wrong
+is a bug this project has already had once. The linked module's initial memory
+must cover the *merged* data segment plus the stack, and the stack pointer's
+initializer must be the top of that memory rather than of whatever
+`{$MEMORY}` any one unit asked for. A linker that concatenates data segments
+and leaves the memory section alone reproduces exactly the defect fixed in
+Phase M, where a program whose data outgrew its setting began with its stack
+inside the data segment and trapped on the first call.
+
+Which unit's `{$MEMORY}`, `{$MAXMEMORY}`, and `{$STACKSIZE}` win is an open
+question. The simplest rule that cannot surprise anyone is that they are
+program-level settings and a unit may not set them.
+
 ## Command line
 
 ```
@@ -296,7 +372,7 @@ promising more than any of these designs delivers.
   host that wants to load a unit separately at run time is asking for Option A
   after all, and it should be evaluated on its own terms if anyone wants it.
 - **Whether the compiler itself should be split into units.** `cpas.pas` is
-  thirteen thousand lines in one file and is the obvious candidate, which is
+  fifteen thousand lines in one file and is the obvious candidate, which is
   exactly why it should not be the first user. Splitting it would mean the
   fixpoint compares a linked module against a linked module, and the fpc
   bootstrap would need the same split in fpc's own unit system — two moving
@@ -325,3 +401,21 @@ separately because they were gaps rather than answers:
 | Where the linker lives | A mode of `cpas`, not a second binary |
 | Rebuild scope | Implementation changes relink; **interface changes force importers to recompile**, which no separate-compilation scheme avoids |
 | Splitting the compiler into units | Not first. It would put two moving parts into the fixpoint, and nothing requires it. |
+
+Found by re-reading this document against the compiler after Phase M, and
+listed separately again because they were misses rather than answers:
+
+| Question | Answer |
+|---|---|
+| Procedural values across units | A new `table` relocation kind. A procedural value is a table slot number, and two units both numbering from 1 collide. |
+| Conformances across units | Carried in the interface description. `implement IPet for TCat` is a fact an importer needs and the first draft did not export it. |
+| Method names across units | **The current mangling does not survive separate compilation** and this is a compiler change, not a linker one. Key on `#<Unit>.<TypeName>.<NAME>` instead of the type's descriptor index, which is a counter over one run. Do it before the linker: the object format refers to methods by this name. |
+| Memory sizing of the linked module | The linker's job, and the place a fixed bug could come back. Initial memory must cover merged data plus stack, and `$sp` must start at the top of it. Proposed: `{$MEMORY}`, `{$MAXMEMORY}`, and `{$STACKSIZE}` are program-level and a unit may not set them. |
+
+### Effect on the estimate
+
+The four-week figure stands, with the work redistributed. The `table`
+relocation and conformance export are the same kind of work already counted
+for `func` and `data` relocations. The method renaming is new and is not part
+of the linker: it is about a day, and it is the one item that should be done
+first, because the object format encodes method names.
