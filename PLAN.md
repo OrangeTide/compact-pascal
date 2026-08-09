@@ -1096,6 +1096,12 @@ The first attempt at the statement path left `isMethodStmt` uninitialized when a
 
 **`$sp` was initialized to `optMemPages * 65536` rather than to the top of the memory the module asked for.** Any program whose data segment spilled past `{$MEMORY}` began with its stack inside the data segment and trapped on the first call. It surfaced when the compiler's own arrays crossed its 192-page setting, so the bug had been reachable for a long time and nothing had reached it. Fixing it also made `{$STACKSIZE}` mean something: it had been parsed, validated, printed, and ignored, with the stack getting whatever was left in the last page.
 
+**Reviewing Phase M by probing found four defects that were not Phase M's.** Argument counts were never checked on any call. Structured assignment was never type-checked, so unrelated records could be assigned to one another. A discarded structured result emitted an invalid module. All three had been reachable for many phases and nothing had reached them, because the test suite only exercises code that is meant to work. The fourth, a function returning an interface handed a concrete value, was new.
+
+The method is worth keeping: write twenty small programs that each do one thing slightly wrong or slightly unusual, compile them, and validate the output. Four of the twenty were compiler defects and three of those predated the phase under review. A test suite proves what works; a probe set finds what is accepted and should not be.
+
+**A stale `exprStructIdx` almost caused a false rejection.** The type check reads a global the expression parser sets, and a function returning a record did not set it, so the check compared against whatever the previous designator had left. The rule adopted is that the global is cleared before each checked expression and the check only fires when it is set, so an unknown provenance is never rejected. A check that wrongly rejects valid code is worse than one that misses.
+
 **Three checks were written into the reference before they existed in the compiler**, and reading the draft back against the code is what surfaced them: signature mismatch, argument count, and the nested-routine address were all described as checked when none were. Same pattern as the nine documentation-versus-reality defects found in Phases C through L, arriving from the other direction. Writing the reference section first is worth keeping for that reason, provided every claim in it is then run.
 
 ### Compiler architecture

@@ -166,6 +166,21 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **Argument counts are checked.** Calling a routine with the wrong number of
+  arguments was never diagnosed. The call emitted a module that failed WASM
+  validation, or, with too many arguments, one whose extra values were left
+  on the stack. This affected every call, not only methods.
+- **Structured assignment is type-checked.** `a := b` between two unrelated
+  record types compiled and copied the destination's size in bytes. The
+  source's type is now compared when it is known, which covers a designator;
+  a value whose type the expression parser does not report is still not
+  checked.
+- **A structured result cannot be discarded.** `Tag;` where `Tag` returns a
+  string emitted an invalid module. It is now an error naming what to do.
+- **A function returning an interface must be assigned an interface value.**
+  Assigning a concrete record copied it into an interface-sized buffer and
+  never built the vtable. Converting there is possible but pointless: `Self`
+  would point at a local of the function that is about to return.
 - **`$sp` started at the wrong address when a module needed more than one
   page.** It was initialized to `{$MEMORY}` pages worth of bytes rather than
   to the top of the memory the module actually asked for, so a program whose

@@ -4683,6 +4683,7 @@ var
   exprTypeIdx: longint;
   procSigIdx: longint;
   exprCallSym: longint;
+  nExpected: longint;
   ifaceOfs: longint;
   exprRecvTemp: longint;
   methSym: longint;
@@ -5578,10 +5579,16 @@ begin
             stmtArenaBytes := stmtArenaBytes + retBufSize;
             retMark := stmtArenaBytes;
           end;
+          { A method's receiver is a parameter but not a visible one. }
+          nExpected := funcs[syms[exprCallSym].size].nparams;
+          if exprRecvTemp >= 0 then
+            nExpected := nExpected - 1;
+          argIdx := 0;
           if tokKind = tkLParen then begin
             NextToken;
-            argIdx := 0;
             while tokKind <> tkRParen do begin
+              if argIdx >= nExpected then
+                Error('too many arguments to ' + funcs[syms[exprCallSym].size].name);
               if funcs[syms[exprCallSym].size].varParams[argIdx] then begin
                 { var param: pass address of the variable }
                 if funcs[syms[exprCallSym].size].constParams[argIdx] then begin
@@ -5724,6 +5731,8 @@ begin
             $sp plus whatever the arguments pushed below it, which is exactly
             the concat scratch that is about to be released. Deriving it that
             way avoids spending a local to hold it. }
+          if argIdx <> nExpected then
+            Error('too few arguments to ' + funcs[syms[exprCallSym].size].name);
           { The receiver goes on before the result buffer. A method's
             parameters run: visible arguments, receiver, then the hidden
             buffer, because ParseProcDecl appends the receiver to the list
@@ -5775,6 +5784,8 @@ begin
               EmitOp(OpI32Add);
             end;
             exprTypeIdx := funcs[syms[exprCallSym].size].retTypeIdx;
+            if (exprType = tyRecord) or (exprType = tyInterface) then
+              exprStructIdx := exprTypeIdx;
             exprStrMax := funcs[syms[exprCallSym].size].retStrMax;
             retBufSize := 0;
           end;
@@ -7254,6 +7265,7 @@ var
   fldIdx: longint;
   i: longint;
   savedConcatPieces, savedConcatBase: longint;
+  nExpected: longint;
   concatSPAllocs: longint;
 begin
   concatSPAllocs := 0;
@@ -7263,10 +7275,24 @@ begin
   concatPieces := 0;
   if concatScratchBase + 68 > ConcatScratchBytes then
     Error('string concatenation nested too deeply');
+  { A method's receiver is a parameter but not a visible one. }
+  nExpected := funcs[syms[sym].size].nparams;
+  if recvLocal >= 0 then
+    nExpected := nExpected - 1;
+  { A structured result is written through a buffer the caller allocates, and
+    a statement has nowhere to put one: the arena that holds it belongs to
+    expression parsing. Emitting the call anyway produced a module that
+    failed WASM validation with nothing to point the author at. }
+  if IsStructuredRet(funcs[syms[sym].size].retTyp) then
+    Error('the result of ' + funcs[syms[sym].size].name +
+          ' is a string, record, or array and cannot be discarded; ' +
+          'assign it to a variable');
+  argIdx := 0;
   if tokKind = tkLParen then begin
     NextToken;
-    argIdx := 0;
     while tokKind <> tkRParen do begin
+      if argIdx >= nExpected then
+        Error('too many arguments to ' + funcs[syms[sym].size].name);
       if funcs[syms[sym].size].varParams[argIdx] then begin
         { var param: pass address of the variable }
         if funcs[syms[sym].size].constParams[argIdx] then begin
@@ -7424,6 +7450,8 @@ begin
     end;
     Expect(tkRParen);
   end;
+  if argIdx <> nExpected then
+    Error('too few arguments to ' + funcs[syms[sym].size].name);
   concatPieces := savedConcatPieces;
   concatScratchBase := savedConcatBase;
   if recvLocal >= 0 then begin
@@ -8192,11 +8220,14 @@ begin
             end;
           end;
           EmitLocalSet(ifaceDst);
+          exprStructIdx := -1;
           ParseExpression(PrecNone);
           EmitLocalSet(ifaceSrc);
           recvDepth := recvDepth - 2;
           if exprType = tyInterface then begin
-            if exprStructIdx <> desTypeIdx then
+            { Checked only when the source's descriptor is known, for the
+              same reason the record case is. }
+            if (exprStructIdx >= 0) and (exprStructIdx <> desTypeIdx) then
               Error('cannot assign one interface type to another');
             EmitLocalGet(ifaceDst);
             EmitLocalGet(ifaceSrc);
@@ -8235,7 +8266,17 @@ begin
             end;
           end;
           { dst addr is on stack; parse src expr (leaves src addr) }
+          exprStructIdx := -1;
           ParseExpression(PrecNone);
+          { Structured assignment copies a fixed number of bytes and had no
+            type check at all, so a record could be assigned from an
+            unrelated record, or from an interface, and the copy would run
+            with the destination's size. Checked only when the source's
+            descriptor is known: a designator reports one, and anything that
+            does not leaves -1 rather than risking a wrong rejection. }
+          if (desTyp = tyRecord) and (exprStructIdx >= 0)
+             and (exprStructIdx <> desTypeIdx) then
+            Error('the value on the right is a different type than ' + name);
           if (desTyp = tySet) and (exprSetSize <= 4) then begin
             { RHS is small (e.g. []) but dest is large — drop i32, use zero block }
             EnsureSetTemp;
@@ -8356,9 +8397,23 @@ begin
             EmitCall(EnsureStrAssign);
           end;
         end
-        else if (funcs[fi].retTyp = tyRecord) or (funcs[fi].retTyp = tyArray) then begin
+        else if (funcs[fi].retTyp = tyRecord) or (funcs[fi].retTyp = tyArray)
+                or (funcs[fi].retTyp = tyInterface) then begin
           EmitLocalGet(funcs[fi].nparams);   { dst = caller's buffer }
+          exprStructIdx := -1;
           ParseExpression(PrecNone);          { src address }
+          { Same check the assignment path makes, and for the same reason:
+            without it a record is copied into an interface-sized buffer and
+            the vtable is never built. Converting here is possible but
+            pointless, because Self would point at a local of the function
+            that is about to return. }
+          if (funcs[fi].retTyp = tyInterface) and (exprType <> tyInterface) then
+            Error('a function returning an interface must be assigned an ' +
+                  'interface value, not a concrete one');
+          if (exprStructIdx >= 0) and (funcs[fi].retTypeIdx >= 0)
+             and (exprStructIdx <> funcs[fi].retTypeIdx) then
+            Error('the value on the right is a different type than the ' +
+                  'result of ' + funcs[fi].name);
           EmitI32Const(funcs[fi].retSize);
           EmitMemoryCopy;
         end
@@ -8907,6 +8962,7 @@ begin
   if tokKind <> tkIdent then
     Expected('identifier');
   procName := tokStr;
+  plainName := procName;   { the mangled name is for lookup, not for messages }
   NextToken;
 
   { A standalone method names its receiver after 'for'.
@@ -9147,7 +9203,7 @@ begin
     { Register in funcs table so call sites can look up param metadata }
     if numFuncs >= MaxFuncs then
       Error('too many functions');
-    funcs[numFuncs].name := procName;
+    funcs[numFuncs].name := plainName;
     funcs[numFuncs].typeidx := typIdx;
     funcs[numFuncs].bodyStart := -2; { marker: external import }
     funcs[numFuncs].bodyLen := 0;
@@ -9209,7 +9265,7 @@ begin
     { Register in funcs table with empty body }
     if numFuncs >= MaxFuncs then
       Error('too many functions');
-    funcs[numFuncs].name := procName;
+    funcs[numFuncs].name := plainName;
     funcs[numFuncs].typeidx := typIdx;
     funcs[numFuncs].bodyStart := -1; { marker: forward-declared, no body yet }
     funcs[numFuncs].bodyLen := 0;
@@ -9312,7 +9368,7 @@ begin
     if numFuncs >= MaxFuncs then
       Error('too many functions');
     funcIdx := numFuncs;
-    funcs[numFuncs].name := procName;
+    funcs[numFuncs].name := plainName;
     funcs[numFuncs].typeidx := typIdx;
     funcs[numFuncs].bodyStart := 0;
     funcs[numFuncs].bodyLen := 0;
