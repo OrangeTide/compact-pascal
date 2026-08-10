@@ -2198,6 +2198,13 @@ else depends on.
 - [x] **`-c` and `-o` options, and the unit header.** `unit Name; interface
       ... implementation ... end.` parses. A unit without `-c` and a program
       with `-c` are both errors at the header. Tests c009–c011.
+- [x] **A unit compiles.** The implementation section is a second run of the
+      same declaration loop, which is what repeating each header in full
+      buys. An interface header is a `forward` declaration that does not say
+      so, which is how the implementation's repeated header gets checked
+      against the interface's: that check already existed. `-c` requires
+      `-o`, checked late so a missing `-o` does not suppress other
+      diagnostics. Tests c011, c012.
 - [ ] **Object writer**: interface description, code, data, elements,
       relocations. Needs padded LEB128 encoders in `-c` mode.
 - [ ] **Object reader**: interface description into the symbol table.

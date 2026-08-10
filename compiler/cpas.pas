@@ -647,6 +647,9 @@ var
   optDump: boolean;           (* -dump command-line flag *)
   optCompileUnit: boolean;    (* -c: compile a unit to an object *)
   isUnit: boolean;            (* the source began with a unit header *)
+  pendingUnitBlock: boolean;  (* the next ParseBlock is a unit's top level *)
+  inUnitImpl: boolean;        (* parsing a unit implementation section *)
+  inUnitInterface: boolean;   (* parsing a unit interface section *)
   optOutName: string[63];     (* -o: where the object or module goes *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
   optStackChecks: boolean;    (* S+/-, default true: stack overflow guard *)
@@ -9348,12 +9351,23 @@ begin
     exit;
   end;
 
-  { Check for forward declaration }
-  if tokKind = tkForward then begin
+  { Check for forward declaration.
+
+    A routine header in a unit's interface section is one of these without
+    saying so. The interface declares and the implementation defines, which
+    is exactly the split `forward` already expresses, so the interface reuses
+    the machinery rather than growing its own. It is also what makes the
+    implementation's repeated header get checked against the interface's:
+    that check already exists, for forward declarations. }
+  if (tokKind = tkForward) or inUnitInterface then begin
     if hasPendingExport then
       Error('{$EXPORT} cannot be used with forward declarations');
-    NextToken;
-    Expect(tkSemicolon);
+    { `forward` is a word and a semicolon of its own. An interface header
+      ends at the semicolon the signature already consumed. }
+    if tokKind = tkForward then begin
+      NextToken;
+      Expect(tkSemicolon);
+    end;
     { Allocate function slot now, body comes later }
     slot := numDefinedFuncs;
     numDefinedFuncs := numDefinedFuncs + 1;
@@ -10219,6 +10233,130 @@ begin
   numConform := numConform + 1;
 end;
 
+procedure ParseDeclaration;
+{** Parse one const, type, var, procedure, function, or implement block.
+
+  Extracted from ParseBlock because a unit runs the same loop twice, once
+  for its interface section and once for its implementation section. The two
+  differ in what they mean and not in what they contain. }
+var
+  typDeclName: string;
+  typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax: longint;
+  typDeclSuffix: string[11];
+  sym: longint;
+  initVal, initValTyp: longint;
+  dataAddr: longint;
+  si: longint;
+  ci: longint;
+begin
+case tokKind of
+  tkConst: begin
+    NextToken;
+    while tokKind = tkIdent do begin
+      typDeclName := tokStr;
+      NextToken;
+      if tokKind = tkColon then begin
+        { Typed constant: const NAME : TYPE = INIT ; }
+        NextToken;
+        ParseTypeSpec(typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax);
+        Expect(tkEqual);
+        sym := AddSym(typDeclName, skConst, typDeclTyp);
+        syms[sym].typeIdx := typDeclTypeIdx;
+        syms[sym].size := typDeclSize;
+        syms[sym].strMax := typDeclStrMax;
+        if typDeclTyp = tyArray then begin
+          dataAddr := AllocDataAligned(typDeclSize, 4);
+          EmitArrayInitializer(typDeclTypeIdx);
+          syms[sym].offset := dataAddr;
+        end else if typDeclTyp = tyRecord then begin
+          dataAddr := AllocDataAligned(typDeclSize, 4);
+          EmitRecordInitializer(typDeclTypeIdx);
+          syms[sym].offset := dataAddr;
+        end else if typDeclTyp = tySet then begin
+          dataAddr := AllocDataAligned(typDeclSize, 4);
+          EmitSetInitializer(typDeclTypeIdx);
+          syms[sym].offset := dataAddr;
+        end else if typDeclTyp = tyString then begin
+          if tokKind <> tkString then
+            Error('string constant expected');
+          if length(tokStr) > typDeclStrMax then
+            Error('string literal exceeds type capacity');
+          dataAddr := AllocData(typDeclStrMax + 1);
+          DataBufEmit(secData, byte(length(tokStr)));
+          for si := 1 to length(tokStr) do
+            DataBufEmit(secData, byte(ord(tokStr[si])));
+          for si := length(tokStr) + 1 to typDeclStrMax do
+            DataBufEmit(secData, 0);
+          syms[sym].offset := dataAddr;
+          NextToken;
+        end else begin
+          { Scalar typed const: store value directly in offset }
+          EvalConstExpr(initVal, initValTyp);
+          syms[sym].offset := initVal;
+        end;
+      end else begin
+        Expect(tkEqual);
+        EvalConstExpr(typDeclSize, typDeclTyp);
+        sym := AddSym(typDeclName, skConst, typDeclTyp);
+        syms[sym].offset := typDeclSize;
+        if typDeclTyp = tyString then
+          syms[sym].size := 256
+        else
+          syms[sym].size := 4;
+      end;
+      Expect(tkSemicolon);
+    end;
+  end;
+  tkVar: begin
+    NextToken;
+    ParseVarDecl;
+  end;
+  tkType: begin
+    NextToken;
+    { Parse type declarations: TypeName = TypeSpec ; }
+    while tokKind = tkIdent do begin
+      typDeclName := tokStr;
+      NextToken;
+      Expect(tkEqual);
+      ParseTypeSpec(typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax);
+      sym := AddSym(typDeclName, skType, typDeclTyp);
+      syms[sym].typeIdx := typDeclTypeIdx;
+      syms[sym].size := typDeclSize;
+      syms[sym].strMax := typDeclStrMax;
+      { Name the descriptor, but only the first time. `B = A` shares A's
+        descriptor and must not rename it: the two are one type, and
+        methods declared for either belong to both. First name wins,
+        which is the name the type was declared under.
+
+        A type declared inside a routine gets its descriptor index tacked
+        on. Only a top-level type can be exported, so only a top-level
+        name has to be stable across compilations; without the suffix a
+        local TR and a global TR would collide and their methods would
+        look like duplicates of each other. Depth 1 is program scope,
+        which EnterScope has already opened by the time a declaration
+        is read. }
+      if (typDeclTypeIdx >= 0) and (types[typDeclTypeIdx].name = '') then
+      begin
+        types[typDeclTypeIdx].name := curUnitName + '.' + typDeclName;
+        if scopeDepth > 1 then begin
+          str(typDeclTypeIdx, typDeclSuffix);
+          types[typDeclTypeIdx].name :=
+            types[typDeclTypeIdx].name + '$' + typDeclSuffix;
+        end;
+      end;
+      Expect(tkSemicolon);
+    end;
+    ResolvePendingPointers;
+  end;
+  tkProcedure, tkFunction: begin
+    ParseProcDecl;
+  end;
+  tkImplement: begin
+    ParseImplementBlock;
+  end;
+end;
+end;
+
 procedure ParseBlock;
 var
   savedFrameSize: longint;
@@ -10230,7 +10368,12 @@ var
   dataAddr: longint;
   initVal, initValTyp: longint;
   si: longint;
+  unitBlock: boolean;
 begin
+  { A unit's top level. ParseBlock recurses for every routine body, and only
+    the outermost call is the unit: program scope is depth 1 and a routine
+    body has entered one of its own. }
+  unitBlock := isUnit and (scopeDepth = 1);
   savedFrameSize := curFrameSize;
 
   { A uses clause reaching here is in the wrong place. Saying so beats the
@@ -10241,115 +10384,37 @@ begin
           'before any declaration');
 
   { Declarations }
+  inUnitInterface := unitBlock;
   while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
         or (tokKind = tkProcedure) or (tokKind = tkFunction)
         or (tokKind = tkImplement) do begin
-    case tokKind of
-      tkConst: begin
-        NextToken;
-        while tokKind = tkIdent do begin
-          typDeclName := tokStr;
-          NextToken;
-          if tokKind = tkColon then begin
-            { Typed constant: const NAME : TYPE = INIT ; }
-            NextToken;
-            ParseTypeSpec(typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax);
-            Expect(tkEqual);
-            sym := AddSym(typDeclName, skConst, typDeclTyp);
-            syms[sym].typeIdx := typDeclTypeIdx;
-            syms[sym].size := typDeclSize;
-            syms[sym].strMax := typDeclStrMax;
-            if typDeclTyp = tyArray then begin
-              dataAddr := AllocDataAligned(typDeclSize, 4);
-              EmitArrayInitializer(typDeclTypeIdx);
-              syms[sym].offset := dataAddr;
-            end else if typDeclTyp = tyRecord then begin
-              dataAddr := AllocDataAligned(typDeclSize, 4);
-              EmitRecordInitializer(typDeclTypeIdx);
-              syms[sym].offset := dataAddr;
-            end else if typDeclTyp = tySet then begin
-              dataAddr := AllocDataAligned(typDeclSize, 4);
-              EmitSetInitializer(typDeclTypeIdx);
-              syms[sym].offset := dataAddr;
-            end else if typDeclTyp = tyString then begin
-              if tokKind <> tkString then
-                Error('string constant expected');
-              if length(tokStr) > typDeclStrMax then
-                Error('string literal exceeds type capacity');
-              dataAddr := AllocData(typDeclStrMax + 1);
-              DataBufEmit(secData, byte(length(tokStr)));
-              for si := 1 to length(tokStr) do
-                DataBufEmit(secData, byte(ord(tokStr[si])));
-              for si := length(tokStr) + 1 to typDeclStrMax do
-                DataBufEmit(secData, 0);
-              syms[sym].offset := dataAddr;
-              NextToken;
-            end else begin
-              { Scalar typed const: store value directly in offset }
-              EvalConstExpr(initVal, initValTyp);
-              syms[sym].offset := initVal;
-            end;
-          end else begin
-            Expect(tkEqual);
-            EvalConstExpr(typDeclSize, typDeclTyp);
-            sym := AddSym(typDeclName, skConst, typDeclTyp);
-            syms[sym].offset := typDeclSize;
-            if typDeclTyp = tyString then
-              syms[sym].size := 256
-            else
-              syms[sym].size := 4;
-          end;
-          Expect(tkSemicolon);
-        end;
-      end;
-      tkVar: begin
-        NextToken;
-        ParseVarDecl;
-      end;
-      tkType: begin
-        NextToken;
-        { Parse type declarations: TypeName = TypeSpec ; }
-        while tokKind = tkIdent do begin
-          typDeclName := tokStr;
-          NextToken;
-          Expect(tkEqual);
-          ParseTypeSpec(typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax);
-          sym := AddSym(typDeclName, skType, typDeclTyp);
-          syms[sym].typeIdx := typDeclTypeIdx;
-          syms[sym].size := typDeclSize;
-          syms[sym].strMax := typDeclStrMax;
-          { Name the descriptor, but only the first time. `B = A` shares A's
-            descriptor and must not rename it: the two are one type, and
-            methods declared for either belong to both. First name wins,
-            which is the name the type was declared under.
+    ParseDeclaration;
+  end;
+  inUnitInterface := false;
 
-            A type declared inside a routine gets its descriptor index tacked
-            on. Only a top-level type can be exported, so only a top-level
-            name has to be stable across compilations; without the suffix a
-            local TR and a global TR would collide and their methods would
-            look like duplicates of each other. Depth 1 is program scope,
-            which EnterScope has already opened by the time a declaration
-            is read. }
-          if (typDeclTypeIdx >= 0) and (types[typDeclTypeIdx].name = '') then
-          begin
-            types[typDeclTypeIdx].name := curUnitName + '.' + typDeclName;
-            if scopeDepth > 1 then begin
-              str(typDeclTypeIdx, typDeclSuffix);
-              types[typDeclTypeIdx].name :=
-                types[typDeclTypeIdx].name + '$' + typDeclSuffix;
-            end;
-          end;
-          Expect(tkSemicolon);
-        end;
-        ResolvePendingPointers;
-      end;
-      tkProcedure, tkFunction: begin
-        ParseProcDecl;
-      end;
-      tkImplement: begin
-        ParseImplementBlock;
-      end;
-    end;
+  { A unit's implementation section is a second run of the same declaration
+    loop. The two sections differ in what they mean, not in what they
+    contain: the interface declares and the implementation defines, and both
+    are declarations as far as the parser is concerned. Repeating each header
+    in full is what lets this work without new machinery, and it is why the
+    language asks for the repetition. }
+  if unitBlock and (tokKind = tkImplementation) then begin
+    NextToken;
+    inUnitImpl := true;
+    while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
+          or (tokKind = tkProcedure) or (tokKind = tkFunction)
+          or (tokKind = tkImplement) do
+      ParseDeclaration;
+    inUnitImpl := false;
+  end;
+
+  { A unit has no statement part, no frame, and no entry point. Everything
+    below builds the body of a program or of a routine. }
+  if unitBlock then begin
+    Expect(tkEnd);
+    if tokKind <> tkDot then
+      Expected('.');
+    exit;
   end;
 
   { Align frame size to 4 bytes }
@@ -10464,10 +10529,6 @@ begin
           'before any declaration')
   else if tokKind = tkBegin then
     ParseStatement
-  else if tokKind = tkImplementation then
-    Error('a unit''s implementation section is not compiled yet; the unit ' +
-          'header and interface section parse, and the object writer and ' +
-          'linker are the rest of this phase')
   else
     Expected('"begin"');
 
@@ -14534,6 +14595,8 @@ begin
   optAlign := 4;
   optDump := false;
   optCompileUnit := false;
+  inUnitInterface := false;
+  inUnitImpl := false;
   optOutName := '';
   optStackChecks := true;
   optProgress := false;
@@ -14762,7 +14825,20 @@ begin
     startNlocals := 4;
 
   { Assemble and write WASM module }
-  WriteModule;
+  { A unit has no entry point, so there is no module to write. The object
+    writer takes its place and is the next part of this phase; until then a
+    unit compiles, is checked, and produces nothing. Emitting a module here
+    would produce something with no _start that looks like output. }
+  if isUnit then begin
+    { Checked late rather than at option-parsing time so that the unit is
+      still fully parsed and diagnosed. A missing -o should not stop the
+      compiler from telling the author what else is wrong. }
+    if optOutName = '' then
+      Error('no object was written: -c needs -o to say where the object goes');
+    Error('the object writer is not built yet, so ' + optOutName +
+          ' was not written; the unit itself compiled');
+  end else
+    WriteModule;
 
   { Final progress line. In line mode the count is forced to the total so
     a host sees the ratio reach 1 even if it passed a high line count. }
