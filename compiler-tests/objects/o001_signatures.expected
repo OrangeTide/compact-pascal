@@ -1,4 +1,5 @@
 unit GEOMETRY
+types 0
 exports 5
   const ORIGIN: integer = 0
   const SCALE: integer = 100

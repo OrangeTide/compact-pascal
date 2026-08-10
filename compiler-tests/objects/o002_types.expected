@@ -1,0 +1,16 @@
+unit SHAPES
+types 3
+  record TPOINT size 8
+    field X: integer at 0
+    field Y: integer at 4
+  record TRECT size 20
+    field LO: record TPOINT at 0
+    field HI: record TPOINT at 8
+    field TAG: char at 16
+  array TROW size 16
+    of integer [1..4]
+exports 4
+  const MAXSHAPES: integer = 8
+  function AREA(const record TRECT): integer
+  procedure MOVE(var record TRECT; integer; integer)
+  function ORIGIN(): record TPOINT

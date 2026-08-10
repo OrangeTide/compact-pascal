@@ -654,6 +654,9 @@ var
   inUnitInterface: boolean;   (* parsing a unit interface section *)
   ifaceSymFirst, ifaceSymLast: longint;  (* the interface section's symbols *)
   objFile: text;
+  objTypeOf: array[0..MaxTypes-1] of longint;  (* descriptor -> object type index *)
+  dumpTypeName: array[0..MaxTypes-1] of string[63];
+  numDumpTypes: longint;
   optOutName: string[63];     (* -o: where the object or module goes *)
   optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
@@ -14392,6 +14395,56 @@ begin
     ObjByte(ord(s[i]));
 end;
 
+procedure ObjTypeRef(typ, typeIdx: longint);
+{** A reference to an exported type, or -1 for anything with no descriptor.
+
+  A scalar has no descriptor and needs none: its tag says everything. A
+  structured type that is not exported cannot cross, and saying so here
+  beats writing a reference an importer would resolve to nothing. }
+begin
+  if typeIdx < 0 then
+    ObjU32(-1)
+  else if objTypeOf[typeIdx] < 0 then
+    Error('a routine or field in the interface uses a type that the ' +
+          'interface does not export, so an importer could not name it')
+  else
+    ObjU32(objTypeOf[typeIdx]);
+end;
+
+procedure ObjWriteType(const nm: string; tIdx: longint);
+{** One exported type.
+
+  Records carry their fields, because an importer has to be able to reach
+  them by name and offset. Arrays carry their bounds and element type.
+  Everything else is its tag and its size, which is all a scalar alias or an
+  enumeration needs. }
+var f, first, count: longint;
+begin
+  ObjByte(types[tIdx].kind);
+  ObjStr(nm);
+  ObjU32(types[tIdx].size);
+  if types[tIdx].kind = tyRecord then begin
+    first := types[tIdx].fieldStart;
+    count := types[tIdx].fieldCount;
+    ObjByte(count);
+    for f := first to first + count - 1 do begin
+      ObjStr(fields[f].name);
+      ObjByte(fields[f].typ);
+      ObjTypeRef(fields[f].typ, fields[f].typeIdx);
+      ObjU32(fields[f].offset);
+      ObjU32(fields[f].size);
+      ObjU32(fields[f].strMax);
+    end;
+  end
+  else if types[tIdx].kind = tyArray then begin
+    ObjByte(types[tIdx].elemType);
+    ObjTypeRef(types[tIdx].elemType, types[tIdx].elemTypeIdx);
+    ObjU32(types[tIdx].elemSize);
+    ObjU32(types[tIdx].arrLo);
+    ObjU32(types[tIdx].arrHi);
+  end;
+end;
+
 procedure WriteObject;
 {** Write the object for the unit just compiled.
 
@@ -14411,6 +14464,23 @@ begin
 
   ObjByte(ord('C')); ObjByte(ord('P')); ObjByte(ord('O')); ObjByte(ord('1'));
   ObjStr(curUnitName);
+
+  { Exported types come first, because everything else may refer to one and
+    a reference is an index into this list. Declaration order is emission
+    order, so a record field that names an earlier type finds it already
+    placed; declare-before-use is what guarantees that. }
+  for i := 0 to MaxTypes - 1 do
+    objTypeOf[i] := -1;
+  n := 0;
+  for i := ifaceSymFirst to ifaceSymLast - 1 do
+    if (syms[i].kind = skType) and (syms[i].typeIdx >= 0) then begin
+      objTypeOf[syms[i].typeIdx] := n;
+      n := n + 1;
+    end;
+  ObjU32(n);
+  for i := ifaceSymFirst to ifaceSymLast - 1 do
+    if (syms[i].kind = skType) and (syms[i].typeIdx >= 0) then
+      ObjWriteType(syms[i].name, syms[i].typeIdx);
 
   n := 0;
   for i := ifaceSymFirst to ifaceSymLast - 1 do
@@ -14437,10 +14507,12 @@ begin
       ObjByte(funcs[fi].nparams);
       for p := 0 to funcs[fi].nparams - 1 do begin
         ObjByte(funcs[fi].paramTyp[p]);
+        ObjTypeRef(funcs[fi].paramTyp[p], funcs[fi].paramTypeIdx[p]);
         if funcs[fi].varParams[p] then ObjByte(1) else ObjByte(0);
         if funcs[fi].constParams[p] then ObjByte(1) else ObjByte(0);
       end;
       ObjByte(funcs[fi].retTyp);
+      ObjTypeRef(funcs[fi].retTyp, funcs[fi].retTypeIdx);
     end;
   end;
 
@@ -14499,6 +14571,18 @@ begin
   end;
 end;
 
+function ObjRTypeRef: string;
+{** A type reference as it reads in a dump: the exported type's name, or the
+  empty string when there is none. }
+var r: longint;
+begin
+  r := ObjRU32;
+  if (r < 0) or (r >= numDumpTypes) then
+    ObjRTypeRef := ''
+  else
+    ObjRTypeRef := dumpTypeName[r];
+end;
+
 procedure DumpObject(const path: string);
 {** Read an object back and print what it holds, one record per line.
 
@@ -14509,6 +14593,8 @@ var
   n, i, p, np, k, v: longint;
   nm: string;
   line: string;
+  ref: string;
+  isVarP: boolean;
   num: string[11];
 begin
   assign(objFile, path);
@@ -14523,6 +14609,49 @@ begin
      or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
     Error(path + ' is not a Compact Pascal object');
   writeln('unit ', ObjRStr);
+
+  { Types first, and their names are recorded as they are read so that a
+    later reference prints as a name rather than an index. }
+  numDumpTypes := ObjRU32;
+  str(numDumpTypes, num);
+  writeln('types ', num);
+  for i := 0 to numDumpTypes - 1 do begin
+    k := ObjRByte;
+    nm := ObjRStr;
+    dumpTypeName[i] := nm;
+    v := ObjRU32;
+    str(v, num);
+    line := '  ' + TypeTagName(k) + ' ' + nm + ' size ' + num;
+    writeln(line);
+    if k = tyRecord then begin
+      np := ObjRByte;
+      for p := 1 to np do begin
+        line := '    field ' + ObjRStr + ': ';
+        v := ObjRByte;
+        line := line + TypeTagName(v);
+        ref := ObjRTypeRef;
+        if ref <> '' then
+          line := line + ' ' + ref;
+        str(ObjRU32, num);
+        line := line + ' at ' + num;
+        v := ObjRU32;   { size }
+        v := ObjRU32;   { strMax }
+        writeln(line);
+      end;
+    end
+    else if k = tyArray then begin
+      v := ObjRByte;
+      line := '    of ' + TypeTagName(v);
+      ref := ObjRTypeRef;
+      if ref <> '' then
+        line := line + ' ' + ref;
+      v := ObjRU32;   { element size }
+      str(ObjRU32, num);
+      line := line + ' [' + num;
+      str(ObjRU32, num);
+      writeln(line, '..', num, ']');
+    end;
+  end;
 
   n := ObjRU32;
   str(n, num);
@@ -14547,16 +14676,27 @@ begin
         if p > 1 then
           line := line + '; ';
         v := ObjRByte;
+        ref := ObjRTypeRef;
+        { A const structured parameter is passed by reference, so both flags
+          are set on it. Printing the source's word rather than both keeps
+          the dump readable as the declaration it came from. }
+        isVarP := ObjRByte <> 0;
         if ObjRByte <> 0 then
+          line := line + 'const '
+        else if isVarP then
           line := line + 'var ';
-        if ObjRByte <> 0 then
-          line := line + 'const ';
         line := line + TypeTagName(v);
+        if ref <> '' then
+          line := line + ' ' + ref;
       end;
       line := line + ')';
       v := ObjRByte;
-      if v <> tyNone then
+      ref := ObjRTypeRef;
+      if v <> tyNone then begin
         line := line + ': ' + TypeTagName(v);
+        if ref <> '' then
+          line := line + ' ' + ref;
+      end;
       writeln(line);
     end
     else

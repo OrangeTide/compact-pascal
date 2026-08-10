@@ -2212,8 +2212,12 @@ else depends on.
       `-dump-obj` reads one back, and `make check-objects` compares the dump
       against what the unit declared, so the format is proved by a round
       trip rather than by reading a hex dump.
-- [ ] **Object writer, the rest**: exported types, then code, data,
-      elements, relocations. Needs padded LEB128 encoders in `-c` mode.
+- [x] **Exported types.** Records with their fields, arrays with their
+      bounds, and aliases. A field or parameter whose type the interface
+      does not export is refused rather than written as a reference an
+      importer could not resolve. Tests o002, c013.
+- [ ] **Object writer, the rest**: code, data, elements, relocations. Needs
+      padded LEB128 encoders in `-c` mode.
 - [ ] **Object reader into the symbol table**, so `uses` can resolve.
 - [ ] **Linker**: merge, relocate, recompute memory sizing.
 - [ ] **`uses` resolving to objects** named on the command line.
