@@ -14,3 +14,9 @@ exports 4
   function AREA(const record TRECT): integer
   procedure MOVE(var record TRECT; integer; integer)
   function ORIGIN(): record TPOINT
+bodies 3
+  AREA
+  MOVE
+  ORIGIN
+data 0 bytes
+relocations 0

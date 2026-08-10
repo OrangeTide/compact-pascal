@@ -6,3 +6,9 @@ exports 5
   function DISTANCE(integer; integer): integer
   procedure RESET(var integer; const integer)
   function NEAR(integer): boolean
+bodies 3
+  DISTANCE
+  RESET
+  NEAR
+data 0 bytes
+relocations 0

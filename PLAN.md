@@ -2216,8 +2216,15 @@ else depends on.
       bounds, and aliases. A field or parameter whose type the interface
       does not export is refused rather than written as a reference an
       importer could not resolve. Tests o002, c013.
-- [ ] **Object writer, the rest**: code, data, elements, relocations. Needs
-      padded LEB128 encoders in `-c` mode.
+- [x] **Padded immediates and func relocations.** Five-byte ULEB128 and
+      SLEB128 in `-c` mode, so an immediate can be patched in place. `-pad`
+      turns the same encoders on for a program, which validates and runs, so
+      the encoders are checked against wasmtime rather than by inspection;
+      an object is never executed. Every call records a relocation. Object
+      carries bodies, the data segment, and the relocation table.
+- [ ] **Data and table relocations.** Need an emit path that says an
+      i32.const is an address or a table slot rather than a number.
+- [ ] **Elements** in the object.
 - [ ] **Object reader into the symbol table**, so `uses` can resolve.
 - [ ] **Linker**: merge, relocate, recompute memory sizing.
 - [ ] **`uses` resolving to objects** named on the command line.

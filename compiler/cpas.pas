@@ -249,6 +249,10 @@ const
   MaxRecvDepth = 4;   { method calls nested inside one another's arguments }
   ObjKindConst   = 1;
   ObjKindRoutine = 2;
+  MaxRelocs   = 4096;
+  RelocFunc   = 1;
+  RelocData   = 2;
+  RelocTable  = 3;
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
   IOErrPastEof = 200;
@@ -648,6 +652,7 @@ var
   optAlign: longint;          (* ALIGN n, record field alignment in bytes (1,2,4,8), default 4 *)
   optDump: boolean;           (* -dump command-line flag *)
   optCompileUnit: boolean;    (* -c: compile a unit to an object *)
+  optPadImmediates: boolean;  (* -pad: five-byte immediates in a program too *)
   isUnit: boolean;            (* the source began with a unit header *)
   pendingUnitBlock: boolean;  (* the next ParseBlock is a unit's top level *)
   inUnitImpl: boolean;        (* parsing a unit implementation section *)
@@ -657,6 +662,8 @@ var
   objTypeOf: array[0..MaxTypes-1] of longint;  (* descriptor -> object type index *)
   dumpTypeName: array[0..MaxTypes-1] of string[63];
   numDumpTypes: longint;
+  relocKind, relocOffset, relocSymbol, relocInFunc: array[0..MaxRelocs-1] of longint;
+  numRelocs: longint;
   optOutName: string[63];     (* -o: where the object or module goes *)
   optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
@@ -2218,6 +2225,43 @@ end;
   bit of the last emitted byte matches. TP shr is logical, so we
   manually sign-extend after the shift for negative values. Used for
   i32.const operands in WASM. }
+procedure EmitULEB128Pad(var b: TCodeBuf; value: longint);
+{** A ULEB128 padded to five bytes, whatever the value.
+
+  Only in -c mode. A relocation patches an immediate in place, and LEB128 is
+  variable width, so patching a small value with a large one would mean
+  moving the rest of the function. Five bytes covers every 32-bit value, and
+  a redundant continuation byte is valid LEB128 that every runtime accepts:
+  a hand-assembled i32.const encoded as 41 81 80 80 80 00 validates and
+  returns 1.
+
+  Padding stays off outside -c so single-file output is byte-for-byte what
+  it was, which matters because the self-hosting fixpoint compares those
+  bytes. }
+var i: longint;
+begin
+  for i := 0 to 3 do
+    CodeBufEmit(b, ((value shr (i * 7)) and $7F) or $80);
+  CodeBufEmit(b, (value shr 28) and $7F);
+end;
+
+procedure EmitSLEB128Pad(var b: TCodeBuf; value: longint);
+{** An SLEB128 padded to five bytes.
+
+  The fifth byte holds bits 28 through 34, which for a 32-bit value must be
+  the sign extended: all ones for a negative, all zeros otherwise. Anything
+  else would decode to a number outside i32 and fail validation. }
+var i, top: longint;
+begin
+  for i := 0 to 3 do
+    CodeBufEmit(b, ((value shr (i * 7)) and $7F) or $80);
+  if value < 0 then
+    top := ((value shr 28) or longint($FFFFFFF0)) and $7F
+  else
+    top := (value shr 28) and $7F;
+  CodeBufEmit(b, top);
+end;
+
 procedure EmitSLEB128Fix(var b: TCodeBuf; value: longint);
 var
   byt: byte;
@@ -2752,16 +2796,41 @@ end;
 procedure EmitI32Const(value: longint);
 begin
   CodeBufEmit(startCode, OpI32Const);
-  EmitSLEB128Fix(startCode, value);
+  if optCompileUnit or optPadImmediates then
+    EmitSLEB128Pad(startCode, value)
+  else
+    EmitSLEB128Fix(startCode, value);
   InvalidateOp(startCode);
 end;
 
 {** Emit call to a WASM function by index.
   ;; WAT: call <funcIdx> }
+procedure AddReloc(kind, offset, symbol: longint);
+{** Record a patch site.
+
+  Offsets are into the function body being emitted, and the linker adds the
+  body's final position when it places the function. Recording at emit time
+  is the only moment the symbol is known; afterwards the immediate is just
+  five bytes among others. }
+begin
+  if numRelocs >= MaxRelocs then
+    Error('too many relocations in one unit');
+  relocKind[numRelocs] := kind;
+  relocOffset[numRelocs] := offset;
+  relocSymbol[numRelocs] := symbol;
+  relocInFunc[numRelocs] := numFuncs;
+  numRelocs := numRelocs + 1;
+end;
+
 procedure EmitCall(funcIdx: longint);
 begin
   CodeBufEmit(startCode, OpCall);
-  EmitULEB128(startCode, funcIdx);
+  if optCompileUnit or optPadImmediates then begin
+    if optCompileUnit then
+      AddReloc(RelocFunc, startCode.len, funcIdx);
+    EmitULEB128Pad(startCode, funcIdx);
+  end else
+    EmitULEB128(startCode, funcIdx);
   InvalidateOp(startCode);
 end;
 
@@ -14513,7 +14582,38 @@ begin
       end;
       ObjByte(funcs[fi].retTyp);
       ObjTypeRef(funcs[fi].retTyp, funcs[fi].retTypeIdx);
+      ObjU32(fi);          { which body implements it }
     end;
+  end;
+
+  { Bodies. Each carries its own length so the reader can walk them without
+    knowing the code section's shape. }
+  ObjU32(numFuncs);
+  for i := 0 to numFuncs - 1 do begin
+    ObjStr(funcs[i].name);
+    ObjU32(funcs[i].nlocals);
+    if funcs[i].bodyStart < 0 then
+      ObjU32(0)
+    else begin
+      ObjU32(funcs[i].bodyLen);
+      for p := 0 to funcs[i].bodyLen - 1 do
+        ObjByte(funcBodies.data[funcs[i].bodyStart + p]);
+    end;
+  end;
+
+  { The data segment as emitted. Addresses inside it are absolute and shift
+    when segments are concatenated, which is what a data relocation is for;
+    those are not recorded yet. }
+  ObjU32(secData.len);
+  for i := 0 to secData.len - 1 do
+    ObjByte(secData.data[i]);
+
+  ObjU32(numRelocs);
+  for i := 0 to numRelocs - 1 do begin
+    ObjByte(relocKind[i]);
+    ObjU32(relocInFunc[i]);
+    ObjU32(relocOffset[i]);
+    ObjU32(relocSymbol[i]);
   end;
 
   close(objFile);
@@ -14697,10 +14797,55 @@ begin
         if ref <> '' then
           line := line + ' ' + ref;
       end;
+      v := ObjRU32;   { body index }
       writeln(line);
     end
     else
       Error('unknown record kind in ' + path);
+  end;
+
+  { Bodies, data, and relocations are reported by size and count rather than
+    byte by byte. What a round trip has to prove here is that the framing is
+    right, and a wall of hex would not be checked by anyone. }
+  n := ObjRU32;
+  str(n, num);
+  writeln('bodies ', num);
+  for i := 1 to n do begin
+    nm := ObjRStr;
+    v := ObjRU32;    { locals }
+    p := ObjRU32;    { length }
+    for k := 1 to p do
+      v := ObjRByte;
+    { The byte count is deliberately not printed. It would pin every
+      expectation to the current code generator, and the framing is already
+      proved by the reader walking these lengths and arriving at the
+      sections that follow. }
+    writeln('  ', nm);
+  end;
+
+  n := ObjRU32;
+  for i := 1 to n do
+    v := ObjRByte;
+  str(n, num);
+  writeln('data ', num, ' bytes');
+
+  n := ObjRU32;
+  str(n, num);
+  writeln('relocations ', num);
+  for i := 1 to n do begin
+    k := ObjRByte;
+    v := ObjRU32;
+    p := ObjRU32;
+    if k = RelocFunc then
+      line := 'func'
+    else if k = RelocData then
+      line := 'data'
+    else if k = RelocTable then
+      line := 'table'
+    else
+      line := 'kind?';
+    str(ObjRU32, num);
+    writeln('  ', line, ' -> ', num);
   end;
   close(objFile);
 end;
@@ -14952,10 +15097,12 @@ begin
   optAlign := 4;
   optDump := false;
   optCompileUnit := false;
+  optPadImmediates := false;
   inUnitInterface := false;
   inUnitImpl := false;
   optOutName := '';
   optDumpObj := '';
+  numRelocs := 0;
   optStackChecks := true;
   optProgress := false;
   optVerbose := false;
@@ -14974,6 +15121,8 @@ begin
   for i := 1 to ParamCount do begin
     if skipArg then
       skipArg := false
+    else if ParamStr(i) = '-pad' then
+      optPadImmediates := true
     else if ParamStr(i) = '-c' then
       optCompileUnit := true
     else if ParamStr(i) = '-o' then begin

@@ -12,7 +12,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 fail=0
-for src in "$here"/objects/*.pas; do
+for src in "$here"/objects/o*.pas; do
     [ -f "$src" ] || continue
     name=$(basename "$src" .pas)
     want="$here/objects/$name.expected"
@@ -41,6 +41,37 @@ for src in "$here"/objects/*.pas; do
     fi
     echo "PASS $name"
 done
+
+
+# Padded immediates are what makes a relocation patchable, and an object is
+# never executed, so the encoders would otherwise go unchecked until the
+# linker existed. -pad turns the same encoders on for a program, which can be
+# validated and run. The padded module must be larger and behave identically.
+pad_src="$here/objects/pad-program.pas"
+if [ -f "$pad_src" ]; then
+    "$cpas" < "$pad_src" > "$tmp/plain.wasm"
+    "$cpas" -pad < "$pad_src" > "$tmp/padded.wasm"
+    plain_size=$(wc -c < "$tmp/plain.wasm")
+    padded_size=$(wc -c < "$tmp/padded.wasm")
+    if [ "$padded_size" -le "$plain_size" ]; then
+        echo "FAIL pad-program (padding did not grow the module)" >&2
+        fail=$((fail + 1))
+    elif ! wasm-validate "$tmp/padded.wasm" 2>"$tmp/pad.err"; then
+        echo "FAIL pad-program (padded module does not validate)" >&2
+        sed 's/^/  /' "$tmp/pad.err" >&2
+        fail=$((fail + 1))
+    else
+        ( cd "$tmp" && wasmtime run plain.wasm > plain.out 2>&1 ) || true
+        ( cd "$tmp" && wasmtime run padded.wasm > padded.out 2>&1 ) || true
+        if ! diff -u "$tmp/plain.out" "$tmp/padded.out" > "$tmp/pad.diff"; then
+            echo "FAIL pad-program (padded output differs)" >&2
+            sed 's/^/  /' "$tmp/pad.diff" >&2
+            fail=$((fail + 1))
+        else
+            echo "PASS pad-program"
+        fi
+    fi
+fi
 
 if [ "$fail" -ne 0 ]; then
     echo "check-objects: $fail failed" >&2

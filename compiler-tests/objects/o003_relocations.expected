@@ -1,0 +1,12 @@
+unit CALLS
+types 0
+exports 2
+  function TWICE(integer): integer
+  function QUAD(integer): integer
+bodies 2
+  TWICE
+  QUAD
+data 0 bytes
+relocations 2
+  func -> 37
+  func -> 37
