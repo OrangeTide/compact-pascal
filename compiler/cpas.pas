@@ -347,6 +347,11 @@ type
   { Type descriptor — for structured types (records, arrays) }
   TTypeDesc = record
     kind: longint;       { tyRecord or tyArray }
+    { The unit-qualified name this descriptor was first declared under, or
+      empty for an anonymous one. Method symbol names are built from it,
+      because a descriptor index is a counter over one compilation and means
+      nothing to a second one. }
+    name: string[63];
     size: longint;       { total byte size }
     { Record fields }
     fieldStart: longint; { index into fields[] }
@@ -423,6 +428,7 @@ var
   numConform: longint;
   { Set while an implement block's methods are being parsed. }
   implIfaceIdx, implConcIdx, implConcSym: longint;
+  curUnitName: string[63];
   secCode:   TCodeBuf;
   secData:   TDataBuf;
   secName:   TSmallBuf;
@@ -2969,6 +2975,7 @@ function AddTypeDesc: longint;
 begin
   if numTypes >= MaxTypes then
     Error('type table full');
+  types[numTypes].name := '';
   types[numTypes].kind := tyNone;
   types[numTypes].size := 0;
   types[numTypes].fieldStart := 0;
@@ -3100,13 +3107,14 @@ function MethodSymName(recvTypeIdx: longint; const mname: string): string;
   apparatus, including forward declarations, duplicate detection, and nesting
   scope, without a second table to keep in step with the first.
 
-  The key is the receiver's type descriptor index rather than its name. A call
-  site knows the descriptor of the designator it just parsed and does not know
-  which of possibly several names that type was reached by. }
-var s: string[11];
+  The key is the receiver's unit-qualified type name, carried on the type
+  descriptor. It was the descriptor index at first, which a call site has to
+  hand and which costs no lookup, but an index is a counter over the types
+  one compilation happened to see. A second compilation numbers the same type
+  differently and cannot form the key, so separately compiled units could
+  never have found each other's methods. }
 begin
-  str(recvTypeIdx, s);
-  MethodSymName := '#' + s + '.' + mname;
+  MethodSymName := '#' + types[recvTypeIdx].name + '.' + mname;
 end;
 
 function ImplMethodName(ifaceIdx, concIdx: longint; const mname: string): string;
@@ -3115,12 +3123,12 @@ function ImplMethodName(ifaceIdx, concIdx: longint; const mname: string): string
   Distinct from MethodSymName so that a block method is not dot-callable on
   the concrete type. The two forms have different jobs: a standalone method
   is part of the type's own surface, a block method only satisfies an
-  interface. }
-var a, b: string[11];
+  interface.
+
+  Keyed on unit-qualified type names for the reason MethodSymName is. }
 begin
-  str(ifaceIdx, a);
-  str(concIdx, b);
-  ImplMethodName := '@' + a + '#' + b + '.' + mname;
+  ImplMethodName := '@' + types[ifaceIdx].name + '#' + types[concIdx].name +
+                    '.' + mname;
 end;
 
 function ConformIndex(ifaceIdx, concIdx: longint): longint;
@@ -3136,17 +3144,25 @@ begin
     end;
 end;
 
-function TypeNameOf(tIdx: longint): string;
-{** The source name of a type descriptor, or the empty string. Used only for
-  diagnostics, so a linear scan is fine. }
+function ShortTypeName(const qualified: string): string;
+{** The bare type name out of a unit-qualified one, for diagnostics. Drops
+  the unit prefix and the '$' disambiguator a type declared inside a routine
+  carries, neither of which is anything the author wrote. }
 var i: longint;
+  s: string;
 begin
-  TypeNameOf := '';
-  for i := 0 to numSyms - 1 do
-    if (syms[i].kind = skType) and (syms[i].typeIdx = tIdx) then begin
-      TypeNameOf := syms[i].name;
-      exit;
+  s := qualified;
+  for i := length(s) downto 1 do
+    if s[i] = '.' then begin
+      s := copy(s, i + 1, length(s) - i);
+      break;
     end;
+  for i := 1 to length(s) do
+    if s[i] = '$' then begin
+      s := copy(s, 1, i - 1);
+      break;
+    end;
+  ShortTypeName := s;
 end;
 
 function MethodReceiverName(const mname: string; var viaIface: boolean): string;
@@ -3157,15 +3173,15 @@ function MethodReceiverName(const mname: string; var viaIface: boolean): string;
   lookup misses them. This scans for one so that a failed lookup can say
   where the name really lives instead of claiming it does not exist.
 
-  Both mangled forms put a decimal index right after the first character:
-  '#<recv>.NAME' for a standalone method, '@<iface>#<recv>.NAME' for one
-  defined in an implement block. The index wanted is the same either way,
-  the first one, because a block method is reached through its interface
-  and naming the concrete type would suggest a dot call that does not work. }
+  Both mangled forms end in '.' followed by the method name, and both carry
+  the owner's unit-qualified type name just before it: '#<Type>.NAME' for a
+  standalone method and '@<Iface>#<Type>.NAME' for one defined in an
+  implement block. The owner reported for a block method is the interface,
+  because naming the concrete type would suggest a dot call that does not
+  work. }
 var
-  i, j, k, tIdx: longint;
+  i, j, k: longint;
   s, owner: string;
-  found: boolean;
 begin
   MethodReceiverName := '';
   viaIface := false;
@@ -3175,32 +3191,31 @@ begin
       continue;
     if (s[1] <> '#') and (s[1] <> '@') then
       continue;
-    j := pos('.', s);
+    { The method name follows the last dot; a unit or type name has none. }
+    j := 0;
+    for k := length(s) downto 1 do
+      if s[k] = '.' then begin
+        j := k;
+        break;
+      end;
     if j = 0 then
       continue;
     if copy(s, j + 1, length(s) - j) <> mname then
       continue;
     viaIface := s[1] = '@';
-    k := 2;
-    tIdx := 0;
-    found := false;
-    while (k <= length(s)) and (s[k] >= '0') and (s[k] <= '9') do begin
-      tIdx := tIdx * 10 + (ord(s[k]) - ord('0'));
-      found := true;
-      k := k + 1;
-    end;
-    if not found then
-      continue;
-    owner := TypeNameOf(tIdx);
-    if owner = '' then begin
-      { The method exists but its type is no longer in scope. Saying so is
-        still better than denying the name. }
-      if viaIface then
-        owner := 'an interface'
-      else
-        owner := 'another type';
-    end;
-    MethodReceiverName := owner;
+    if viaIface then begin
+      { Between '@' and the '#' that separates the two type names. }
+      owner := '';
+      for k := 2 to length(s) do begin
+        if s[k] = '#' then
+          break;
+        owner := owner + s[k];
+      end;
+    end else
+      owner := copy(s, 2, j - 2);
+    if owner = '' then
+      owner := 'another type';
+    MethodReceiverName := ShortTypeName(owner);
     exit;
   end;
 end;
@@ -9101,6 +9116,12 @@ begin
     if syms[recvTypSym].typ <> tyRecord then
       Error('a method receiver must be a record type, and ' +
             recvTypeName + ' is not one');
+    { The method's symbol name is built from the descriptor's name, so a
+      descriptor without one cannot carry methods. A named record always has
+      one; this catches the case where it somehow does not, rather than
+      registering a method under a key nothing can look up. }
+    if types[syms[recvTypSym].typeIdx].name = '' then
+      Error(recvTypeName + ' has no name the compiler can attach a method to');
     recvTypeIdx := syms[recvTypSym].typeIdx;
     { A method that shares a name with a field would make MyCat.Name
       ambiguous. Reported here rather than at the call, because the call is
@@ -10195,6 +10216,7 @@ procedure ParseBlock;
 var
   savedFrameSize: longint;
   typDeclName: string;
+  typDeclSuffix: string[11];
   typDeclTyp, typDeclTypeIdx, typDeclSize, typDeclStrMax: longint;
   sym: longint;
   ci: longint;
@@ -10289,6 +10311,27 @@ begin
           syms[sym].typeIdx := typDeclTypeIdx;
           syms[sym].size := typDeclSize;
           syms[sym].strMax := typDeclStrMax;
+          { Name the descriptor, but only the first time. `B = A` shares A's
+            descriptor and must not rename it: the two are one type, and
+            methods declared for either belong to both. First name wins,
+            which is the name the type was declared under.
+
+            A type declared inside a routine gets its descriptor index tacked
+            on. Only a top-level type can be exported, so only a top-level
+            name has to be stable across compilations; without the suffix a
+            local TR and a global TR would collide and their methods would
+            look like duplicates of each other. Depth 1 is program scope,
+            which EnterScope has already opened by the time a declaration
+            is read. }
+          if (typDeclTypeIdx >= 0) and (types[typDeclTypeIdx].name = '') then
+          begin
+            types[typDeclTypeIdx].name := curUnitName + '.' + typDeclName;
+            if scopeDepth > 1 then begin
+              str(typDeclTypeIdx, typDeclSuffix);
+              types[typDeclTypeIdx].name :=
+                types[typDeclTypeIdx].name + '$' + typDeclSuffix;
+            end;
+          end;
           Expect(tkSemicolon);
         end;
         ResolvePendingPointers;
@@ -14591,6 +14634,7 @@ begin
   Expect(tkProgram);
   if tokKind <> tkIdent then
     Expected('program name');
+  curUnitName := tokStr;
   NextToken;
   Expect(tkSemicolon);
 

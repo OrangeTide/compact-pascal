@@ -193,7 +193,8 @@ Ordinary work.
 **Conformances need exporting.** Covered above. Ordinary work.
 
 **Method symbol names do not survive separate compilation.** This one is not
-a relocation and cannot be fixed in the linker.
+a relocation and cannot be fixed in the linker. **Fixed ahead of L2**; the
+description below is kept because it is why the scheme is what it is.
 
 A standalone method is registered in the symbol table under a name no source
 can spell, `#<typeIdx>.<NAME>`, where `typeIdx` is the type's index in the
@@ -207,17 +208,23 @@ the unit that declares it and 7 in the unit that imports it, or the importing
 unit might never build a descriptor for it at the same position. An importer
 cannot form the key, so it cannot find `Distance` at all.
 
-The fix is to key the name on the type rather than on where the type landed:
-`#<Unit>.<TypeName>.<NAME>`. A receiver must be a named type already, so the
-name exists at the declaration; what is missing is a way for the *call site*
-to recover it, because the call site holds a descriptor index and descriptors
-carry no name. Adding a name to the type descriptor is the whole change: 256
-descriptors at 64 bytes is 16 KB, against a compiler that already reserves
-16.7 MB. Five places form or look up the mangled name.
+The key is now the type rather than where the type landed:
+`#<Unit>.<TypeName>.<NAME>`. A type descriptor carries the unit-qualified
+name it was first declared under, which is what lets a call site holding only
+a descriptor recover it. First name wins, so `B = A` shares A's descriptor
+and its methods rather than renaming it.
 
-Worth doing before the linker rather than during it, because every part of
-the object format that refers to a method refers to it by this name, and
-changing the naming scheme afterwards means changing the format.
+A type declared inside a routine gets its descriptor index appended,
+`#<Unit>.TR$7.<NAME>`. Only a top-level type can be exported, so only a
+top-level name has to be stable; without the suffix a local `TR` and a global
+`TR` produce the same key and their methods look like duplicates of each
+other. Diagnostics strip both the unit prefix and the suffix, neither of
+which is anything the author wrote.
+
+Done before the linker rather than during it, because every part of the
+object format that refers to a method refers to it by this name, and changing
+the naming scheme afterwards would mean changing the format. What remains for
+L2 is to set the unit name from a `unit` header instead of the `program` one.
 
 ## Syntax, and how it stays single-pass
 
@@ -409,7 +416,7 @@ listed separately again because they were misses rather than answers:
 |---|---|
 | Procedural values across units | A new `table` relocation kind. A procedural value is a table slot number, and two units both numbering from 1 collide. |
 | Conformances across units | Carried in the interface description. `implement IPet for TCat` is a fact an importer needs and the first draft did not export it. |
-| Method names across units | **The current mangling does not survive separate compilation** and this is a compiler change, not a linker one. Key on `#<Unit>.<TypeName>.<NAME>` instead of the type's descriptor index, which is a counter over one run. Do it before the linker: the object format refers to methods by this name. |
+| Method names across units | **Fixed ahead of L2.** The mangling keyed on the type's descriptor index, a counter over one run, so a second compilation could never form the key. Now `#<Unit>.<TypeName>.<NAME>`, carried on the type descriptor. Only setting the unit name from a `unit` header remains. |
 | Memory sizing of the linked module | The linker's job, and the place a fixed bug could come back. Initial memory must cover merged data plus stack, and `$sp` must start at the top of it. Proposed: `{$MEMORY}`, `{$MAXMEMORY}`, and `{$STACKSIZE}` are program-level and a unit may not set them. |
 
 ### Effect on the estimate
