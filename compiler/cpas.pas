@@ -247,6 +247,8 @@ const
   MaxConform  = 32;   { (interface, concrete type) pairs in one program }
   MaxIfaceMethods = 8;
   MaxRecvDepth = 4;   { method calls nested inside one another's arguments }
+  ObjKindConst   = 1;
+  ObjKindRoutine = 2;
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
   IOErrPastEof = 200;
@@ -650,7 +652,10 @@ var
   pendingUnitBlock: boolean;  (* the next ParseBlock is a unit's top level *)
   inUnitImpl: boolean;        (* parsing a unit implementation section *)
   inUnitInterface: boolean;   (* parsing a unit interface section *)
+  ifaceSymFirst, ifaceSymLast: longint;  (* the interface section's symbols *)
+  objFile: text;
   optOutName: string[63];     (* -o: where the object or module goes *)
+  optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
   optStackChecks: boolean;    (* S+/-, default true: stack overflow guard *)
   optProgress: boolean;       (* -progress command-line flag *)
@@ -10384,12 +10389,16 @@ begin
           'before any declaration');
 
   { Declarations }
+  if unitBlock then
+    ifaceSymFirst := numSyms;
   inUnitInterface := unitBlock;
   while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
         or (tokKind = tkProcedure) or (tokKind = tkFunction)
         or (tokKind = tkImplement) do begin
     ParseDeclaration;
   end;
+  if unitBlock then
+    ifaceSymLast := numSyms;
   inUnitInterface := false;
 
   { A unit's implementation section is a second run of the same declaration
@@ -14348,6 +14357,214 @@ begin
   writeln(stderr);
 end;
 
+{ ---- Object files ---- }
+
+(* An object is what -c produces and the linker consumes. It is not a WASM
+   module: it holds the unit's interface description plus, eventually, its
+   code, data, and relocations.
+
+   It travels through a text file because the language has no binary one.
+   Write(f, c) and Read(f, c) go straight to fd_write and fd_read with no
+   translation, so a text file is a byte stream. Verified over all 256 byte
+   values before any of this was written.
+
+   Everything is little-endian, which matches WASM and costs nothing here. *)
+
+procedure ObjByte(b: longint);
+begin
+  write(objFile, chr(b and $FF));
+end;
+
+procedure ObjU32(v: longint);
+begin
+  ObjByte(v);
+  ObjByte(v shr 8);
+  ObjByte(v shr 16);
+  ObjByte(v shr 24);
+end;
+
+procedure ObjStr(const s: string);
+{** A length byte then the bytes. Names are identifiers, so 255 is ample. }
+var i: longint;
+begin
+  ObjByte(length(s));
+  for i := 1 to length(s) do
+    ObjByte(ord(s[i]));
+end;
+
+procedure WriteObject;
+{** Write the object for the unit just compiled.
+
+  The interface description is the range of symbols the interface section
+  declared. That the section *is* the exported set is why no separate export
+  table is collected: the symbol table already holds exactly the right
+  entries in exactly the right order. }
+var
+  i, n, fi, p: longint;
+begin
+  assign(objFile, optOutName);
+  {$I-}
+  rewrite(objFile);
+  {$I+}
+  if IOResult <> 0 then
+    Error('cannot write object file: ' + optOutName);
+
+  ObjByte(ord('C')); ObjByte(ord('P')); ObjByte(ord('O')); ObjByte(ord('1'));
+  ObjStr(curUnitName);
+
+  n := 0;
+  for i := ifaceSymFirst to ifaceSymLast - 1 do
+    if (syms[i].kind = skConst) or (syms[i].kind = skProc)
+       or (syms[i].kind = skFunc) then
+      n := n + 1;
+  ObjU32(n);
+
+  for i := ifaceSymFirst to ifaceSymLast - 1 do begin
+    if syms[i].kind = skConst then begin
+      ObjByte(ObjKindConst);
+      ObjStr(syms[i].name);
+      ObjByte(syms[i].typ);
+      ObjU32(syms[i].offset);
+    end
+    else if (syms[i].kind = skProc) or (syms[i].kind = skFunc) then begin
+      ObjByte(ObjKindRoutine);
+      ObjStr(syms[i].name);
+      fi := syms[i].size;
+      if syms[i].kind = skFunc then
+        ObjByte(1)
+      else
+        ObjByte(0);
+      ObjByte(funcs[fi].nparams);
+      for p := 0 to funcs[fi].nparams - 1 do begin
+        ObjByte(funcs[fi].paramTyp[p]);
+        if funcs[fi].varParams[p] then ObjByte(1) else ObjByte(0);
+        if funcs[fi].constParams[p] then ObjByte(1) else ObjByte(0);
+      end;
+      ObjByte(funcs[fi].retTyp);
+    end;
+  end;
+
+  close(objFile);
+end;
+
+function ObjRByte: longint;
+{** One byte from the object being read. Reading past the end is an error
+  rather than a zero, for the reason reading past the end of any file is:
+  a zero byte is a legal thing to find in a file. }
+var c: char;
+begin
+  if eof(objFile) then
+    Error('object file ends in the middle of a record: ' + optOutName);
+  read(objFile, c);
+  ObjRByte := ord(c);
+end;
+
+function ObjRU32: longint;
+var b0, b1, b2, b3: longint;
+begin
+  b0 := ObjRByte; b1 := ObjRByte; b2 := ObjRByte; b3 := ObjRByte;
+  ObjRU32 := b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24);
+end;
+
+function ObjRStr: string;
+var n, i: longint;
+  s: string;
+begin
+  n := ObjRByte;
+  s := '';
+  for i := 1 to n do
+    s := s + chr(ObjRByte);
+  ObjRStr := s;
+end;
+
+function TypeTagName(t: longint): string;
+{** A tag as it reads in a dump. Diagnostics and dumps only. }
+begin
+  case t of
+    tyNone:      TypeTagName := 'none';
+    tyInteger:   TypeTagName := 'integer';
+    tyBoolean:   TypeTagName := 'boolean';
+    tyChar:      TypeTagName := 'char';
+    tyString:    TypeTagName := 'string';
+    tyRecord:    TypeTagName := 'record';
+    tyArray:     TypeTagName := 'array';
+    tyEnum:      TypeTagName := 'enum';
+    tySet:       TypeTagName := 'set';
+    tyPointer:   TypeTagName := 'pointer';
+    tyText:      TypeTagName := 'text';
+    tyProc:      TypeTagName := 'proc';
+    tyInterface: TypeTagName := 'interface';
+  else
+    TypeTagName := 'tag?';
+  end;
+end;
+
+procedure DumpObject(const path: string);
+{** Read an object back and print what it holds, one record per line.
+
+  This exists so the format is proved by a round trip rather than by
+  inspection of a hex dump. It is also the first consumer of the reader the
+  linker will use. }
+var
+  n, i, p, np, k, v: longint;
+  nm: string;
+  line: string;
+  num: string[11];
+begin
+  assign(objFile, path);
+  {$I-}
+  reset(objFile);
+  {$I+}
+  if IOResult <> 0 then
+    Error('cannot read object file: ' + path);
+  optOutName := path;   { for the end-of-file message }
+
+  if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
+     or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
+    Error(path + ' is not a Compact Pascal object');
+  writeln('unit ', ObjRStr);
+
+  n := ObjRU32;
+  str(n, num);
+  writeln('exports ', num);
+  for i := 1 to n do begin
+    k := ObjRByte;
+    nm := ObjRStr;
+    if k = ObjKindConst then begin
+      v := ObjRByte;
+      line := '  const ' + nm + ': ' + TypeTagName(v);
+      str(ObjRU32, num);
+      writeln(line, ' = ', num);
+    end
+    else if k = ObjKindRoutine then begin
+      if ObjRByte <> 0 then
+        line := '  function ' + nm
+      else
+        line := '  procedure ' + nm;
+      np := ObjRByte;
+      line := line + '(';
+      for p := 1 to np do begin
+        if p > 1 then
+          line := line + '; ';
+        v := ObjRByte;
+        if ObjRByte <> 0 then
+          line := line + 'var ';
+        if ObjRByte <> 0 then
+          line := line + 'const ';
+        line := line + TypeTagName(v);
+      end;
+      line := line + ')';
+      v := ObjRByte;
+      if v <> tyNone then
+        line := line + ': ' + TypeTagName(v);
+      writeln(line);
+    end
+    else
+      Error('unknown record kind in ' + path);
+  end;
+  close(objFile);
+end;
+
 procedure WriteModule;
 var i: longint;
 begin
@@ -14598,6 +14815,7 @@ begin
   inUnitInterface := false;
   inUnitImpl := false;
   optOutName := '';
+  optDumpObj := '';
   optStackChecks := true;
   optProgress := false;
   optVerbose := false;
@@ -14624,6 +14842,14 @@ begin
         halt(1);
       end;
       optOutName := ParamStr(i + 1);
+      skipArg := true;
+    end
+    else if ParamStr(i) = '-dump-obj' then begin
+      if i >= ParamCount then begin
+        WriteErrorLn('Error: -dump-obj needs a file name');
+        halt(1);
+      end;
+      optDumpObj := ParamStr(i + 1);
       skipArg := true;
     end
     else if ParamStr(i) = '-dump' then
@@ -14694,6 +14920,13 @@ end;
 
 begin
   Init;
+
+  { Reading an object is a job of its own and reads no source, so it happens
+    before anything expects a program on stdin. }
+  if optDumpObj <> '' then begin
+    DumpObject(optDumpObj);
+    halt(0);
+  end;
 
   ProgressStage(0, 'Parsing');
   if optProgress and (optProgressTotal > 0) then
@@ -14835,8 +15068,7 @@ begin
       compiler from telling the author what else is wrong. }
     if optOutName = '' then
       Error('no object was written: -c needs -o to say where the object goes');
-    Error('the object writer is not built yet, so ' + optOutName +
-          ' was not written; the unit itself compiled');
+    WriteObject;
   end else
     WriteModule;
 

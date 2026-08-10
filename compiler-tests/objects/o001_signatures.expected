@@ -1,0 +1,7 @@
+unit GEOMETRY
+exports 5
+  const ORIGIN: integer = 0
+  const SCALE: integer = 100
+  function DISTANCE(integer; integer): integer
+  procedure RESET(var integer; const integer)
+  function NEAR(integer): boolean

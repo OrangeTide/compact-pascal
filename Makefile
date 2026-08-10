@@ -54,7 +54,7 @@ HTML_FLAGS := --template=$(TEMPLATE) \
 
 .PHONY: help all pdf html clean
 .PHONY: bootstrap test test-checks check-private check-fixpoint test-all deploy-playground bump-version
-.PHONY: check-wasm-features check-rust release preflight check-determinism check-selfhost-gen2 check-runtimes check-doc-examples check-windows check-playground
+.PHONY: check-wasm-features check-rust release preflight check-determinism check-selfhost-gen2 check-runtimes check-doc-examples check-windows check-playground check-objects
 
 help:
 	@echo "Compact Pascal build targets:"
@@ -182,7 +182,7 @@ check-fixpoint: $(CPAS_BIN)
 	@tmp=$$(mktemp -d); 	trap 'rm -rf "$$tmp"' EXIT; 	$(CPAS_BIN) < $(CPAS_SRC) > "$$tmp/gen1.wasm"; 	if ! cmp -s "$$tmp/gen1.wasm" $(SNAPSHOT); then 	    echo "check-fixpoint: committed snapshot is stale; run 'make bootstrap'" >&2; 	    exit 1; 	fi; 	$(WASMRUN) $(SNAPSHOT) < $(CPAS_SRC) > "$$tmp/gen2.wasm"; 	if ! cmp -s "$$tmp/gen1.wasm" "$$tmp/gen2.wasm"; then 	    echo "check-fixpoint: fixpoint broken; self-compiled output differs" >&2; 	    exit 1; 	fi; 	echo "check-fixpoint: snapshot current, fixpoint holds"
 
 # Everything CI runs, reproducible locally.
-test-all: check-private test test-checks check-fixpoint
+test-all: check-private test test-checks check-fixpoint check-objects
 	@echo "test-all: all checks passed"
 
 # ── Checks CI does not run ───────────────────────────────────────
@@ -243,6 +243,9 @@ check-runtimes: $(CPAS_BIN)
 # Every self-contained example in the documentation, compiled and run.
 check-doc-examples: $(CPAS_BIN)
 	@bash compiler-tests/check-doc-examples.sh
+
+check-objects: $(CPAS_BIN)
+	@sh compiler-tests/check-objects.sh
 
 # The compiler cross-compiled for Windows must produce the same bytes. Needs
 # fp-units-win-rtl and wine; skipped with a note rather than failing when

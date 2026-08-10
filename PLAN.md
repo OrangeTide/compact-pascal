@@ -2205,9 +2205,16 @@ else depends on.
       against the interface's: that check already existed. `-c` requires
       `-o`, checked late so a missing `-o` does not suppress other
       diagnostics. Tests c011, c012.
-- [ ] **Object writer**: interface description, code, data, elements,
-      relocations. Needs padded LEB128 encoders in `-c` mode.
-- [ ] **Object reader**: interface description into the symbol table.
+- [x] **Object writer and reader, interface description only.** `CPO1`, the
+      unit name, and the exported constants and routine signatures. The
+      interface section *is* the exported set, so the range of symbols it
+      declared is the description and no separate export table is collected.
+      `-dump-obj` reads one back, and `make check-objects` compares the dump
+      against what the unit declared, so the format is proved by a round
+      trip rather than by reading a hex dump.
+- [ ] **Object writer, the rest**: exported types, then code, data,
+      elements, relocations. Needs padded LEB128 encoders in `-c` mode.
+- [ ] **Object reader into the symbol table**, so `uses` can resolve.
 - [ ] **Linker**: merge, relocate, recompute memory sizing.
 - [ ] **`uses` resolving to objects** named on the command line.
 
