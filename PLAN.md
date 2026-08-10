@@ -1096,6 +1096,10 @@ The first attempt at the statement path left `isMethodStmt` uninitialized when a
 
 **`$sp` was initialized to `optMemPages * 65536` rather than to the top of the memory the module asked for.** Any program whose data segment spilled past `{$MEMORY}` began with its stack inside the data segment and trapped on the first call. It surfaced when the compiler's own arrays crossed its 192-page setting, so the bug had been reachable for a long time and nothing had reached it. Fixing it also made `{$STACKSIZE}` mean something: it had been parsed, validated, printed, and ignored, with the stack getting whatever was left in the last page.
 
+**An object file has to travel through the text file type, because there is no binary one.** The L1 design specifies `cpas -c geometry.pas -o geometry.cpo` and never asks how the compiler reads or writes a `.cpo`, which is binary. There is no `file of T` and no untyped file. What there is: `Write(f, c)` and `Read(f, c)` on a `text` file go straight to `fd_write` and `fd_read` with no translation, so a text file is a byte stream and an object can travel through it a byte at a time. Verified by writing every value from 0 to 255 and reading them back.
+
+That verification found a data-corruption bug first. The flush wrote whatever byte count the control block held, and the read path uses the same field for the bytes it has buffered, so writing a file, reopening the same variable to read it, and closing appended a second copy of the data. The helper's own comment claimed it was a no-op outside write mode; the mode half was never implemented. Write-then-read-back is the first thing an object file pipeline does, which is why it surfaced immediately and had not before.
+
 **Phase M invalidated part of the L1 units design, and the L1 review caught it.** Procedural values are table slot numbers baked into code as `i32.const`, which needs a relocation kind the design did not have. Conformances are a fourth kind of exported fact the interface description did not carry. Neither is hard; both are the same shape as work already planned.
 
 The third is not linker work at all. A standalone method is registered under `#<typeIdx>.<NAME>`, keyed on the type's index in the compiler's descriptor array. Within one compilation that is exact and costs nothing, which is why it was chosen: a call site holds a descriptor and not a name. Across compilations the index is a counter over the types one run happened to see, so an importer cannot form the key. The fix is `#<Unit>.<TypeName>.<NAME>`, which needs a name on the type descriptor because the call site has no other way to recover it. Worth doing before the linker rather than during it: the object format refers to methods by this name.
@@ -2184,6 +2188,22 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 progress
+
+- [x] **Binary file I/O verified.** No `file of T` exists, so an object
+      travels through a `text` file a byte at a time. `Write(f, c)` and
+      `Read(f, c)` go straight to `fd_write`/`fd_read` with no translation.
+      Verified over all 256 byte values, which found and fixed a flush bug
+      that appended a second copy of a written file (t132).
+- [x] **`-c` and `-o` options, and the unit header.** `unit Name; interface
+      ... implementation ... end.` parses. A unit without `-c` and a program
+      with `-c` are both errors at the header. Tests c009–c011.
+- [ ] **Object writer**: interface description, code, data, elements,
+      relocations. Needs padded LEB128 encoders in `-c` mode.
+- [ ] **Object reader**: interface description into the symbol table.
+- [ ] **Linker**: merge, relocate, recompute memory sizing.
+- [ ] **`uses` resolving to objects** named on the command line.
+
 - [x] **M3: interfaces** and `implement` blocks. Inline vtable, conformance
       verified when the block closes, satisfaction by a standalone method or
       by a block method, conversion on assignment, dispatch by

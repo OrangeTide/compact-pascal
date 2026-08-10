@@ -215,6 +215,8 @@ const
   tkUses      = 148;
   tkInterface = 149;
   tkImplement = 150;
+  tkUnit          = 151;
+  tkImplementation = 152;
 
   { Type kinds }
   tyNone      = 0;
@@ -643,6 +645,9 @@ var
   optExtLiterals: boolean;    (* EXTLITERALS ON/OFF, default false *)
   optAlign: longint;          (* ALIGN n, record field alignment in bytes (1,2,4,8), default 4 *)
   optDump: boolean;           (* -dump command-line flag *)
+  optCompileUnit: boolean;    (* -c: compile a unit to an object *)
+  isUnit: boolean;            (* the source began with a unit header *)
+  optOutName: string[63];     (* -o: where the object or module goes *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
   optStackChecks: boolean;    (* S+/-, default true: stack overflow guard *)
   optProgress: boolean;       (* -progress command-line flag *)
@@ -1560,6 +1565,8 @@ begin
   else if s = 'FOR' then LookupKeyword := tkFor
   else if s = 'INTERFACE' then LookupKeyword := tkInterface
   else if s = 'IMPLEMENT' then LookupKeyword := tkImplement
+  else if s = 'UNIT' then LookupKeyword := tkUnit
+  else if s = 'IMPLEMENTATION' then LookupKeyword := tkImplementation
   else if s = 'TO' then LookupKeyword := tkTo
   else if s = 'DOWNTO' then LookupKeyword := tkDownto
   else if s = 'REPEAT' then LookupKeyword := tkRepeat
@@ -10457,6 +10464,10 @@ begin
           'before any declaration')
   else if tokKind = tkBegin then
     ParseStatement
+  else if tokKind = tkImplementation then
+    Error('a unit''s implementation section is not compiled yet; the unit ' +
+          'header and interface section parse, and the object writer and ' +
+          'linker are the rest of this phase')
   else
     Expected('"begin"');
 
@@ -14522,6 +14533,8 @@ begin
   optExtLiterals := false;
   optAlign := 4;
   optDump := false;
+  optCompileUnit := false;
+  optOutName := '';
   optStackChecks := true;
   optProgress := false;
   optVerbose := false;
@@ -14540,6 +14553,16 @@ begin
   for i := 1 to ParamCount do begin
     if skipArg then
       skipArg := false
+    else if ParamStr(i) = '-c' then
+      optCompileUnit := true
+    else if ParamStr(i) = '-o' then begin
+      if i >= ParamCount then begin
+        WriteErrorLn('Error: -o needs a file name');
+        halt(1);
+      end;
+      optOutName := ParamStr(i + 1);
+      skipArg := true;
+    end
     else if ParamStr(i) = '-dump' then
       optDump := true
     else if ParamStr(i) = '-I' then
@@ -14642,13 +14665,45 @@ begin
   { Read first token }
   NextToken;
 
-  { Parse: program Ident ; Block . }
-  Expect(tkProgram);
-  if tokKind <> tkIdent then
-    Expected('program name');
+  { Parse: (program | unit) Ident ; ...
+
+    The two headers select the two jobs the compiler has. A program becomes a
+    module and a unit becomes an object, and neither can be asked to be the
+    other: compiling a unit to a module would produce something with no
+    _start, and compiling a program to an object would produce something no
+    linker has a use for. Saying so at the header is better than failing
+    later on a missing entry point. }
+  isUnit := tokKind = tkUnit;
+  if isUnit then begin
+    if not optCompileUnit then
+      Error('this is a unit and needs -c; without it the compiler is being ' +
+            'asked to make a program out of it');
+  end else begin
+    if optCompileUnit then
+      Error('-c compiles a unit, and this is a program');
+    Expect(tkProgram);
+  end;
+  if isUnit then
+    NextToken;
+  if tokKind <> tkIdent then begin
+    if isUnit then
+      Expected('unit name')
+    else
+      Expected('program name');
+  end;
   curUnitName := tokStr;
   NextToken;
   Expect(tkSemicolon);
+
+  { A unit's interface section declares what importers may see. The
+    implementation section repeats each header in full and supplies the
+    body, which is what keeps a unit single-pass: the interface precedes the
+    implementation, and declare-before-use holds inside each. }
+  if isUnit then begin
+    if tokKind <> tkInterface then
+      Expected('interface');
+    NextToken;
+  end;
 
   { uses clause.
 
