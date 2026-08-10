@@ -166,6 +166,13 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **Closing a file that was written and then read appended a second copy of
+  the data.** The buffer flush wrote whatever byte count the control block
+  held, and the read path uses that same field for the bytes it has
+  buffered. So write, close, reopen the same `text` variable with `Reset`,
+  read anything, close, and the file had grown by the size of the read
+  buffer. The flush was documented as a no-op outside write mode and did not
+  check the mode.
 - **Using a method's name without a receiver says so.** `Area(q)` or `@Area`,
   where `Area` is a standalone method, reported "undeclared identifier",
   which sends you looking for a declaration that is sitting right there. It

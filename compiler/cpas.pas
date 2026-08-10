@@ -11257,8 +11257,20 @@ procedure BuildTextFlushHelper;
 begin
   CodeBufInit(helperCode);
 
+  (* Write mode and a non-empty buffer, both. The mode check was described
+     here and not implemented, and the read path shares TextOfsLen for the
+     bytes it has buffered. So closing a file that had been written, reopened
+     for reading, and read from wrote the read buffer back out and appended a
+     second copy of the data to the file. *)
   EmitHelperLocalGet(0);
   EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsLen);
+  EmitHelper(OpI32Eqz);
+  EmitHelper(OpI32Eqz);
+  EmitHelperLocalGet(0);
+  EmitHelper(OpI32Load); EmitHelperULEB128(2); EmitHelperULEB128(TextOfsMode);
+  EmitHelperI32Const(TextModeWrite);
+  EmitHelper(OpI32Eq);
+  EmitHelper(OpI32And);
   EmitHelper(OpIf); EmitHelper(WasmVoid);
     (* iovec.buf = t + TextOfsBuf; iovec.len = t^.len *)
     EmitHelperI32Const(addrIovec);
