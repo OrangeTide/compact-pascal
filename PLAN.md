@@ -2222,8 +2222,12 @@ else depends on.
       the encoders are checked against wasmtime rather than by inspection;
       an object is never executed. Every call records a relocation. Object
       carries bodies, the data segment, and the relocation table.
-- [ ] **Data and table relocations.** Need an emit path that says an
-      i32.const is an address or a table slot rather than a number.
+- [x] **Table relocations.** A procedural value and an interface vtable slot
+      go through EmitTableSlot, which records one. Two sites. Test o004.
+- [ ] **Data relocations.** 92 sites emit an i32.const that may be an
+      address: 64 name a compiler-owned buffer and are unambiguous, 28 push
+      syms[sym].offset and need reading one at a time. See the design doc
+      for why a base-relative alternative does not avoid the same work.
 - [ ] **Elements** in the object.
 - [ ] **Object reader into the symbol table**, so `uses` can resolve.
 - [ ] **Linker**: merge, relocate, recompute memory sizing.

@@ -1,0 +1,12 @@
+unit OPS
+types 1
+  proc TOP size 4
+exports 2
+  function TWICE(integer): integer
+  function PICK(): proc TOP
+bodies 2
+  TWICE
+  PICK
+data 0 bytes
+relocations 1
+  table -> 1

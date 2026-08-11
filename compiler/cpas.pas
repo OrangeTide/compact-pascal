@@ -2822,6 +2822,26 @@ begin
   numRelocs := numRelocs + 1;
 end;
 
+procedure EmitTableSlot(slot: longint);
+{** Push a function table index.
+
+  Separate from EmitI32Const because a table slot is not a number: slots are
+  assigned per compilation from 1 upward, and two units both numbering from 1
+  collide. The linker reassigns them, which it can only do if it knows which
+  immediates are slots. }
+begin
+  CodeBufEmit(startCode, OpI32Const);
+  if optCompileUnit then begin
+    AddReloc(RelocTable, startCode.len, slot);
+    EmitSLEB128Pad(startCode, slot);
+  end else if optPadImmediates then
+    EmitSLEB128Pad(startCode, slot)
+  else
+    EmitSLEB128Fix(startCode, slot);
+  InvalidateOp(startCode);
+end;
+
+
 procedure EmitCall(funcIdx: longint);
 begin
   CodeBufEmit(startCode, OpCall);
@@ -5654,7 +5674,7 @@ begin
             own parent. }
           if syms[sym].level > 0 then
             Error('cannot take the address of the nested routine ' + tokStr);
-          EmitI32Const(ProcRefIndex(syms[sym].offset));
+          EmitTableSlot(ProcRefIndex(syms[sym].offset));
           exprType := tyProc;
           exprTypeIdx := ProcTypeDescFor(syms[sym].size);
           exprProcSig := types[exprTypeIdx].elemType;
@@ -8434,7 +8454,7 @@ begin
             EmitI32Store(2, 0);            { Self }
             for i := 1 to types[desTypeIdx].fieldCount - 1 do begin
               EmitLocalGet(ifaceDst);
-              EmitI32Const(conformSlot[conIdx, i]);
+              EmitTableSlot(conformSlot[conIdx, i]);
               EmitI32Store(2, fields[types[desTypeIdx].fieldStart + i].offset);
             end;
           end;

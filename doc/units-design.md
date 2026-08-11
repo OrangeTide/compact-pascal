@@ -129,6 +129,27 @@ patches every site. Slot 0 stays empty in the linked module for the same
 reason it does today: it is what makes an unassigned procedural variable trap
 rather than call something arbitrary.
 
+### Data relocations need the emitter to know an address from a number
+
+Measured rather than estimated. `i32.const` carries both, and the compiler
+has 92 sites that emit one: 64 name a compiler-owned buffer and are
+unambiguous by name, and 28 push `syms[sym].offset`, which is a data address
+for a string literal or a typed constant and a plain value for an ordinary
+constant. Those 28 need reading one at a time.
+
+A base-relative alternative was considered and does not help. Adding a
+`__data_base` global that unit code adds to every data reference removes the
+relocation, but it needs to know which `i32.const`s are addresses in order to
+add to them, which is the same problem with a runtime cost attached.
+
+So: an `EmitDataAddr` beside `EmitI32Const`, and the conversion done site by
+site. The risk worth naming is that a missed site is silent. It emits an
+address that was right for the unit alone and is wrong once the data segments
+are concatenated, and it fails as a wrong value read from the wrong place at
+run time, far from the cause. Two things reduce it: the conversion is
+mechanical for the 64 named ones, and a linked three-unit program that
+exercises strings is a test that would catch a miss in the remaining 28.
+
 **Every patch site must be a fixed-width immediate, and none are today.**
 LEB128 is variable width, so patching a small value with a large one would need
 the rest of the function moved, which is what a relocation exists to avoid.
