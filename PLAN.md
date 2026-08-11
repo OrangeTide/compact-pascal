@@ -2188,6 +2188,42 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 review findings
+
+Probed rather than re-read, the same way Phase M was reviewed. Six small
+units, each doing one ordinary thing, found five defects. None is hard; all
+five are silent, which is what makes them worth listing before the linker is
+written on top of them.
+
+1. **An interface `var` is dropped without a word.** `var Counter: integer;`
+   in an interface section produces an object that exports the routines and
+   not the variable. The writer handles `skConst`, `skProc`, and `skFunc`,
+   and anything else falls out of the loop. Either export variables or refuse
+   them; silently losing one is the only wrong answer.
+2. **A unit's imports are not in the object.** A unit that uses `Files`
+   compiles to an object whose code calls import indices, with nothing
+   recording what those imports are. The design's object format lists an
+   `imports` section and it was never implemented. The linker cannot resolve
+   these and would produce a module calling the wrong function.
+3. **System unit names are not reserved.** `unit Files` compiles. The design
+   says the names are reserved, and the reason holds: `uses Files` resolves
+   to the system unit first, so such an object could never be imported by
+   anyone. It should be refused at the header.
+4. **`MaxRelocs` of 4096 is far too low.** Exhausted at roughly 340 `writeln`
+   statements, because every data address and every call takes an entry. A
+   thousand-line unit will not compile. The diagnostic is clean, so this
+   fails loudly rather than badly, but the ceiling has to rise.
+5. **A standalone method exports under its mangled name**, `#U.TR.AREA`. It
+   will probably work, because an importer rebuilds the same name from the
+   type descriptor it just created, but that is a consequence of keying
+   method names on the type rather than a decision anyone made. Make it
+   deliberate and test it, or the first change to the mangling breaks
+   importing in a way nothing catches.
+
+Two things that did hold: the WASM snapshot writes objects correctly under
+`wasmtime --dir=.`, so self-hosted `-c` works; and an empty unit produces a
+valid empty object.
+
 ### Phase L2 progress
 
 - [x] **Binary file I/O verified.** No `file of T` exists, so an object
