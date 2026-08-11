@@ -1,0 +1,30 @@
+unit WORDS
+types 0
+exports 3
+  const GREETING: string = 4
+  function LABEL_(): string
+  procedure ANNOUNCE()
+bodies 2
+  LABEL_
+  ANNOUNCE
+data 34 bytes
+relocations 19
+  data -> 4
+  func -> 8
+  data -> 10
+  func -> 8
+  func -> 9
+  data -> 20
+  data -> 33
+  data -> 24
+  data -> 20
+  data -> 28
+  func -> 0
+  data -> 4
+  func -> 9
+  data -> 20
+  data -> 32
+  data -> 24
+  data -> 20
+  data -> 28
+  func -> 0

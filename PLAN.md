@@ -2224,10 +2224,14 @@ else depends on.
       carries bodies, the data segment, and the relocation table.
 - [x] **Table relocations.** A procedural value and an interface vtable slot
       go through EmitTableSlot, which records one. Two sites. Test o004.
-- [ ] **Data relocations.** 92 sites emit an i32.const that may be an
-      address: 64 name a compiler-owned buffer and are unambiguous, 28 push
-      syms[sym].offset and need reading one at a time. See the design doc
-      for why a base-relative alternative does not avoid the same work.
+- [x] **Data relocations.** The 92 sites turned out to be 68. 27 of the 28
+      ambiguous ones were preceded by EmitFramePtr and are frame offsets,
+      not data addresses; the 28th is an ordinary constant's value. Reading
+      them cost one careful look and saved most of the work. An exported
+      string or typed constant carries an address in the export table too,
+      which the linker relocates by the same rule, inferred from the type
+      tag. Test o005.
+- [ ] **Elements** in the object.
 - [ ] **Elements** in the object.
 - [ ] **Object reader into the symbol table**, so `uses` can resolve.
 - [ ] **Linker**: merge, relocate, recompute memory sizing.

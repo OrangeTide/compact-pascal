@@ -2822,6 +2822,29 @@ begin
   numRelocs := numRelocs + 1;
 end;
 
+procedure EmitDataAddr(addr: longint);
+{** Push an address in the data segment.
+
+  Separate from EmitI32Const because the linker concatenates data segments
+  and every address in one shifts by wherever that segment lands. The value
+  recorded is the unit-relative address; the linker adds the unit's base.
+
+  A data address emitted through EmitI32Const instead is the failure this
+  exists to prevent, and it is silent: correct for the unit alone, wrong once
+  anything is placed before it, and it surfaces as a bad read far from the
+  cause. }
+begin
+  CodeBufEmit(startCode, OpI32Const);
+  if optCompileUnit then begin
+    AddReloc(RelocData, startCode.len, addr);
+    EmitSLEB128Pad(startCode, addr);
+  end else if optPadImmediates then
+    EmitSLEB128Pad(startCode, addr)
+  else
+    EmitSLEB128Fix(startCode, addr);
+  InvalidateOp(startCode);
+end;
+
 procedure EmitTableSlot(slot: longint);
 {** Push a function table index.
 
@@ -4128,7 +4151,7 @@ procedure EmitTextVarAddr(sym: longint);
 begin
   if textRefIndexed then begin
     EnsureTextRefSlot;
-    EmitI32Const(addrTextRef);
+    EmitDataAddr(addrTextRef);
     EmitI32Load(2, 0);
   end
   else if syms[sym].isVarParam then
@@ -4166,7 +4189,7 @@ begin
       Error('a text file variable is required here');
     NextToken;
     EnsureTextRefSlot;
-    EmitI32Const(addrTextRef);
+    EmitDataAddr(addrTextRef);
     if syms[sym].isVarParam then
       EmitVarParamPtr(sym)
     else begin
@@ -4206,7 +4229,7 @@ begin
   EnsureIOResultSlot;
   curFuncNeedsCaseTemp := true;
   EmitLocalSet(curCaseTempIdx);
-  EmitI32Const(addrIOResult);
+  EmitDataAddr(addrIOResult);
   EmitLocalGet(curCaseTempIdx);
   EmitI32Store(2, 0);
   if optIOChecks then begin
@@ -4241,20 +4264,20 @@ begin
   fdw := EnsureFdWrite;
 
   { Set iovec.buf = addr }
-  EmitI32Const(addrIovec);
-  EmitI32Const(addr);
+  EmitDataAddr(addrIovec);
+  EmitDataAddr(addr);   { the string being written lives in the data segment }
   EmitI32Store(2, 0);
 
   { Set iovec.len = len }
-  EmitI32Const(addrIovec + 4);
+  EmitDataAddr(addrIovec + 4);
   EmitI32Const(len);
   EmitI32Store(2, 0);
 
   { Call fd_write(fd, iovec, 1, nwritten) }
   EmitI32Const(fd);
-  EmitI32Const(addrIovec);      { iovs }
+  EmitDataAddr(addrIovec);      { iovs }
   EmitI32Const(1);              { iovs_len }
-  EmitI32Const(addrNwritten);   { nwritten }
+  EmitDataAddr(addrNwritten);   { nwritten }
   EmitCall(fdw);
   EmitOp(OpDrop);               { discard errno }
 end;
@@ -4824,21 +4847,21 @@ begin
   { Save addr to local }
   EmitLocalSet(localIdx);
   { iovec.buf = addr + 1 (skip length byte) }
-  EmitI32Const(addrIovec);
+  EmitDataAddr(addrIovec);
   EmitLocalGet(localIdx);
   EmitI32Const(1);
   EmitOp(OpI32Add);
   EmitI32Store(2, 0);
   { iovec.len = addr[0] (length byte) }
-  EmitI32Const(addrIovec + 4);
+  EmitDataAddr(addrIovec + 4);
   EmitLocalGet(localIdx);
   EmitI32Load8u(0, 0);
   EmitI32Store(2, 0);
   { fd_write(fd, iovec, 1, nwritten) }
   EmitI32Const(fd);
-  EmitI32Const(addrIovec);
+  EmitDataAddr(addrIovec);
   EmitI32Const(1);
-  EmitI32Const(addrNwritten);
+  EmitDataAddr(addrNwritten);
   EmitCall(fdw);
   EmitOp(OpDrop);
 end;
@@ -4950,7 +4973,7 @@ begin
     tkString: begin
       { String literal in expression — push address of Pascal-format
         string in data segment (length byte + data) }
-      EmitI32Const(EmitDataPascalString(tokStr));
+      EmitDataAddr(EmitDataPascalString(tokStr));
       exprType := tyString;
       NextToken;
     end;
@@ -5007,10 +5030,10 @@ begin
         Expect(tkRParen);
         { Stack: [src, idx, count]. Push dst temp addr, call helper. }
         EnsureCopyTemp;
-        EmitI32Const(addrCopyTemp);
+        EmitDataAddr(addrCopyTemp);
         EmitCall(EnsureStrCopy);
         { Result is the temp buffer address }
-        EmitI32Const(addrCopyTemp);
+        EmitDataAddr(addrCopyTemp);
         exprType := tyString;
       end
       else if tokStr = 'POS' then begin
@@ -5042,7 +5065,7 @@ begin
             Error('too many concat pieces (max 16)');
           curFuncNeedsStringTemp := true;
           EmitLocalSet(curStringTempIdx);
-          EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
+          EmitDataAddr(addrConcatScratch + concatScratchBase + concatPieces * 4);
           EmitLocalGet(curStringTempIdx);
           EmitI32Store(2, 0);
           concatPieces := concatPieces + 1;
@@ -5136,7 +5159,7 @@ begin
           Expect(tkRParen);
         end;
         EnsureArgsInit;
-        EmitI32Const(addrArgc);
+        EmitDataAddr(addrArgc);
         EmitI32Load(2, 0);
         EmitI32Const(1);
         EmitOp(OpI32Sub);
@@ -5157,7 +5180,7 @@ begin
         EmitOp(OpI32And);
         EmitI32Const(8);
         EmitOp(OpI32Shl);
-        EmitI32Const(addrArgSlots);
+        EmitDataAddr(addrArgSlots);
         EmitOp(OpI32Add);
         exprType := tyString;
       end
@@ -5217,9 +5240,9 @@ begin
           matters: it makes "did that work" a question with one answer. }
         NextToken;
         EnsureIOResultSlot;
-        EmitI32Const(addrIOResult);
+        EmitDataAddr(addrIOResult);
         EmitI32Load(2, 0);
-        EmitI32Const(addrIOResult);
+        EmitDataAddr(addrIOResult);
         EmitI32Const(0);
         EmitI32Store(2, 0);
         exprType := tyInteger;
@@ -5260,7 +5283,7 @@ begin
         end else begin
           { eof — returns true when last fd_read returned 0 bytes }
           EnsureReadBuffers;
-          EmitI32Const(addrNread);
+          EmitDataAddr(addrNread);
           EmitI32Load(2, 0);
           EmitOp(OpI32Eqz);
         end;
@@ -5305,7 +5328,16 @@ begin
       if sym >= 0 then
       case syms[sym].kind of
         skConst: begin
-          EmitI32Const(syms[sym].offset);
+          { A constant's offset is its value for a scalar and its address in
+            the data segment for anything larger: a string literal, or a
+            typed constant's record, array, or set. The two cases have to be
+            told apart here, because only one of them shifts when the linker
+            concatenates data segments. }
+          if (syms[sym].typ = tyString) or (syms[sym].typ = tyRecord)
+             or (syms[sym].typ = tyArray) or (syms[sym].typ = tySet) then
+            EmitDataAddr(syms[sym].offset)
+          else
+            EmitI32Const(syms[sym].offset);
           exprType := syms[sym].typ;
           exprTypeIdx := syms[sym].typeIdx;
           exprStrMax := syms[sym].strMax;
@@ -5762,7 +5794,7 @@ begin
                 EmitI32Const(fi * 4);
                 EmitOp(OpI32Add);
               end;
-              EmitI32Const(addrConcatScratch + concatScratchBase + fi * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + fi * 4);
               EmitI32Load(2, 0);
               EmitI32Store(2, 0);
             end;
@@ -5822,7 +5854,7 @@ begin
                     for fi := 0 to concatPieces - 1 do begin
                       EmitGlobalGet(0);
                       EmitI32Const(255);
-                      EmitI32Const(addrConcatScratch + concatScratchBase + fi * 4);
+                      EmitDataAddr(addrConcatScratch + concatScratchBase + fi * 4);
                       EmitI32Load(2, 0);
                       EmitCall(EnsureStrAppend);
                     end;
@@ -5971,7 +6003,7 @@ begin
             the concat temps having been released. }
           if pieceSaveBytes > 0 then begin
             for fi := 0 to concatPieces - 1 do begin
-              EmitI32Const(addrConcatScratch + concatScratchBase + fi * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + fi * 4);
               EmitGlobalGet(0);
               if (stmtArenaBytes - saveMark) + fi * 4 > 0 then begin
                 EmitI32Const((stmtArenaBytes - saveMark) + fi * 4);
@@ -6283,7 +6315,7 @@ begin
       { Save left addr from WASM stack to scratch[concatPieces] }
       curFuncNeedsStringTemp := true;
       EmitLocalSet(curStringTempIdx);
-      EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
+      EmitDataAddr(addrConcatScratch + concatScratchBase + concatPieces * 4);
       EmitLocalGet(curStringTempIdx);
       EmitI32Store(2, 0);
       concatPieces := concatPieces + 1;
@@ -6325,13 +6357,13 @@ begin
       { Stack has char value. Store as Pascal string: len=1, data=char }
       curFuncNeedsStringTemp := true;
       EmitLocalSet(curStringTempIdx);  { save char value }
-      EmitI32Const(addrCharStr);
+      EmitDataAddr(addrCharStr);
       EmitI32Const(1);
       EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);  { len=1 }
-      EmitI32Const(addrCharStr + 1);
+      EmitDataAddr(addrCharStr + 1);
       EmitLocalGet(curStringTempIdx);
       EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);  { data }
-      EmitI32Const(addrCharStr);  { push string address }
+      EmitDataAddr(addrCharStr);  { push string address }
       exprType := tyString;
     end;
 
@@ -6465,7 +6497,7 @@ begin
           { Right operand is small (e.g. []) — stack: ..., left_addr, right_i32.
             Drop i32, push addrSetZero. }
           EmitOp(OpDrop);
-          EmitI32Const(addrSetZero);
+          EmitDataAddr(addrSetZero);
         end;
         if (leftSetSize <= 4) then begin
           { Left operand is small — stack: ..., left_i32, right_addr.
@@ -6473,7 +6505,7 @@ begin
           curFuncNeedsCaseTemp := true;
           EmitLocalSet(curCaseTempIdx);
           EmitOp(OpDrop);
-          EmitI32Const(addrSetZero);
+          EmitDataAddr(addrSetZero);
           EmitLocalGet(curCaseTempIdx);
         end;
         curFuncNeedsCaseTemp := true;
@@ -6639,7 +6671,7 @@ begin
           NextToken;
           if tokKind = tkString then begin
             EmitTextVarAddr(textSym);
-            EmitI32Const(EmitDataPascalString(tokStr));
+            EmitDataAddr(EmitDataPascalString(tokStr));
             EmitCall(EnsureTextHelpers + 4);   { __text_write_str }
             NextToken;
           end else begin
@@ -6663,10 +6695,10 @@ begin
               { Integers go through the same decimal conversion the console
                 path uses, then out as a string. }
               EnsureIntToStr;
-              EmitI32Const(addrIntBuf);
+              EmitDataAddr(addrIntBuf);
               EmitCall(EnsureIntToStrHelper);
               EmitTextVarAddr(textSym);
-              EmitI32Const(addrIntBuf);
+              EmitDataAddr(addrIntBuf);
               EmitCall(EnsureTextHelpers + 4);
             end;
           end;
@@ -6714,12 +6746,12 @@ begin
               { Park the final piece in scratch memory. EmitInlineWriteStr
                 below uses curStringTempIdx as its own scratch and would
                 otherwise overwrite the address before we get to it. }
-              EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + concatPieces * 4);
               EmitLocalGet(curStringTempIdx);
               EmitI32Store(2, 0);
             end;
             for i := 0 to concatPieces - 1 do begin
-              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + i * 4);
               EmitI32Load(2, 0);
               if fd = 1 then
                 EmitCall(EnsureWriteStr)
@@ -6730,7 +6762,7 @@ begin
               EmitLocalGet(curStringTempIdx);
               EmitCall(EnsureWriteStr);
             end else begin
-              EmitI32Const(addrConcatScratch + concatScratchBase + concatPieces * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + concatPieces * 4);
               EmitI32Load(2, 0);
               EmitInlineWriteStr(fd, curStringTempIdx);
             end;
@@ -6759,9 +6791,9 @@ begin
           else begin
             { For stderr: convert to string via __int_to_str, then write string }
             EnsureIntToStr;
-            EmitI32Const(addrIntBuf);
+            EmitDataAddr(addrIntBuf);
             EmitCall(EnsureIntToStrHelper);
-            EmitI32Const(addrIntBuf);
+            EmitDataAddr(addrIntBuf);
             curFuncNeedsStringTemp := true;
             EmitInlineWriteStr(fd, curStringTempIdx);
           end;
@@ -6794,29 +6826,29 @@ begin
   EmitOp(OpBlock); EmitOp(WasmVoid);   { $done = label 1 from inside loop }
   EmitOp(OpLoop); EmitOp(WasmVoid);    { $again = label 0 }
     { Set up iovec: buf = addrReadBuf, len = 1 }
-    EmitI32Const(addrIovec);
-    EmitI32Const(addrReadBuf);
+    EmitDataAddr(addrIovec);
+    EmitDataAddr(addrReadBuf);
     EmitI32Store(2, 0);
-    EmitI32Const(addrIovec + 4);
+    EmitDataAddr(addrIovec + 4);
     EmitI32Const(1);
     EmitI32Store(2, 0);
 
     { fd_read(0, iovec, 1, nread) }
     EmitI32Const(0);
-    EmitI32Const(addrIovec);
+    EmitDataAddr(addrIovec);
     EmitI32Const(1);
-    EmitI32Const(addrNread);
+    EmitDataAddr(addrNread);
     EmitCall(idxFdRead);
     EmitOp(OpDrop);
 
     { if nread == 0: br 1 (exit block = EOF) }
-    EmitI32Const(addrNread);
+    EmitDataAddr(addrNread);
     EmitI32Load(2, 0);
     EmitOp(OpI32Eqz);
     EmitOp(OpBrIf); EmitULEB128(startCode, 1);
 
     { if readbuf[0] == 10 (LF): br 1 (exit block) }
-    EmitI32Const(addrReadBuf);
+    EmitDataAddr(addrReadBuf);
     CodeBufEmit(startCode, OpI32Load8u);
     EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
     EmitI32Const(10);
@@ -6890,7 +6922,7 @@ begin
             EmitOp(OpI32Eq);
             EmitOp(OpIf); EmitOp(WasmI32);
               EnsureIOResultSlot;
-              EmitI32Const(addrIOResult);
+              EmitDataAddr(addrIOResult);
               EmitI32Const(IOErrPastEof);
               EmitI32Store(2, 0);
               if optIOChecks then begin
@@ -6963,21 +6995,21 @@ begin
         { Char variable: read 1 byte from stdin via fd_read }
         EnsureReadBuffers;
         { Set up iovec: buf=addrReadBuf, len=1 }
-        EmitI32Const(addrIovec);
-        EmitI32Const(addrReadBuf);
+        EmitDataAddr(addrIovec);
+        EmitDataAddr(addrReadBuf);
         EmitI32Store(2, 0);
-        EmitI32Const(addrIovec + 4);
+        EmitDataAddr(addrIovec + 4);
         EmitI32Const(1);
         EmitI32Store(2, 0);
         { fd_read(0, iovec, 1, nread) }
         EmitI32Const(0);
-        EmitI32Const(addrIovec);
+        EmitDataAddr(addrIovec);
         EmitI32Const(1);
-        EmitI32Const(addrNread);
+        EmitDataAddr(addrNread);
         EmitCall(idxFdRead);
         EmitOp(OpDrop);
         { Load the byte from addrReadBuf }
-        EmitI32Const(addrReadBuf);
+        EmitDataAddr(addrReadBuf);
         EmitI32Load8u(0, 0);
         { Store to variable }
         if syms[sym].isVarParam then begin
@@ -7526,7 +7558,7 @@ begin
             for i := 0 to concatPieces - 1 do begin
               EmitGlobalGet(0);
               EmitI32Const(255);
-              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + i * 4);
               EmitI32Load(2, 0);
               EmitCall(EnsureStrAppend);
             end;
@@ -7641,7 +7673,7 @@ begin
           for i := 0 to concatPieces - 1 do begin
             EmitLocalGet(curStringTempIdx);
             EmitI32Const(255);
-            EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+            EmitDataAddr(addrConcatScratch + concatScratchBase + i * 4);
             EmitI32Load(2, 0);
             EmitCall(EnsureStrAppend);
           end;
@@ -8130,7 +8162,7 @@ begin
             { RHS is small (e.g. []) but dest is large — drop i32, use zero block }
             EnsureSetTemp;
             EmitOp(OpDrop);
-            EmitI32Const(addrSetZero);
+            EmitDataAddr(addrSetZero);
           end;
           EmitI32Const(types[desTypeIdx].size);
           EmitMemoryCopy;
@@ -8351,19 +8383,19 @@ begin
             EmitLocalSet(curStringTempIdx);
             { Build result in addrConcatTemp to avoid self-referencing bugs }
             { Zero temp[0] }
-            EmitI32Const(addrConcatTemp);
+            EmitDataAddr(addrConcatTemp);
             EmitI32Const(0);
             EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
             { Append saved pieces to temp }
             for i := 0 to concatPieces - 1 do begin
-              EmitI32Const(addrConcatTemp);
+              EmitDataAddr(addrConcatTemp);
               EmitI32Const(255);
-              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + i * 4);
               EmitI32Load(2, 0);
               EmitCall(EnsureStrAppend);
             end;
             { Append last piece (on stack via stringTemp) to temp }
-            EmitI32Const(addrConcatTemp);
+            EmitDataAddr(addrConcatTemp);
             EmitI32Const(255);
             EmitLocalGet(curStringTempIdx);
             EmitCall(EnsureStrAppend);
@@ -8376,7 +8408,7 @@ begin
               EmitOp(OpI32Add);
             end;
             EmitI32Const(desStrMax);
-            EmitI32Const(addrConcatTemp);
+            EmitDataAddr(addrConcatTemp);
             EmitCall(EnsureStrAssign);
             concatPieces := 0;
           end else begin
@@ -8490,7 +8522,7 @@ begin
             { RHS is small (e.g. []) but dest is large — drop i32, use zero block }
             EnsureSetTemp;
             EmitOp(OpDrop);
-            EmitI32Const(addrSetZero);
+            EmitDataAddr(addrSetZero);
           end;
           EmitI32Const(types[desTypeIdx].size);
           EmitMemoryCopy;
@@ -8578,23 +8610,23 @@ begin
               be one of the operands. }
             curFuncNeedsStringTemp := true;
             EmitLocalSet(curStringTempIdx);
-            EmitI32Const(addrConcatTemp);
+            EmitDataAddr(addrConcatTemp);
             EmitI32Const(0);
             EmitOp(OpI32Store8); EmitULEB128(startCode, 0); EmitULEB128(startCode, 0);
             for i := 0 to concatPieces - 1 do begin
-              EmitI32Const(addrConcatTemp);
+              EmitDataAddr(addrConcatTemp);
               EmitI32Const(255);
-              EmitI32Const(addrConcatScratch + concatScratchBase + i * 4);
+              EmitDataAddr(addrConcatScratch + concatScratchBase + i * 4);
               EmitI32Load(2, 0);
               EmitCall(EnsureStrAppend);
             end;
-            EmitI32Const(addrConcatTemp);
+            EmitDataAddr(addrConcatTemp);
             EmitI32Const(255);
             EmitLocalGet(curStringTempIdx);
             EmitCall(EnsureStrAppend);
             EmitLocalGet(funcs[fi].nparams);
             EmitI32Const(funcs[fi].retStrMax);
-            EmitI32Const(addrConcatTemp);
+            EmitDataAddr(addrConcatTemp);
             EmitCall(EnsureStrAssign);
             concatPieces := 0;
           end else begin
@@ -10606,7 +10638,7 @@ begin
       EmitI32Const(varInitOffset[ci]);
       EmitOp(OpI32Add);
       EmitI32Const(varInitStrMax[ci]);
-      EmitI32Const(varInitVal[ci]);
+      EmitDataAddr(varInitVal[ci]);   { the initializer literal is in the data segment }
       EmitCall(EnsureStrAssign);
     end else begin
       { Scalar init: store constant at frame+offset }
@@ -14583,6 +14615,11 @@ begin
       ObjByte(ObjKindConst);
       ObjStr(syms[i].name);
       ObjByte(syms[i].typ);
+      { For a scalar this is the value. For a string, record, array, or set
+        it is an address in this unit's data segment, and the linker has to
+        add the unit's base to it exactly as it does for a data relocation
+        in code. The type tag is what says which, by the same rule the
+        emitter uses, so no flag is stored. }
       ObjU32(syms[i].offset);
     end
     else if (syms[i].kind = skProc) or (syms[i].kind = skFunc) then begin
