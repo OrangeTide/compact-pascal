@@ -2188,40 +2188,40 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
-### Phase L2 review findings
+### Phase L2 review findings — all fixed
 
 Probed rather than re-read, the same way Phase M was reviewed. Six small
-units, each doing one ordinary thing, found five defects. None is hard; all
-five are silent, which is what makes them worth listing before the linker is
+units, each doing one ordinary thing, found five defects. None was hard; all
+five were silent, which is what made them worth finding before a linker was
 written on top of them.
 
-1. **An interface `var` is dropped without a word.** `var Counter: integer;`
-   in an interface section produces an object that exports the routines and
-   not the variable. The writer handles `skConst`, `skProc`, and `skFunc`,
-   and anything else falls out of the loop. Either export variables or refuse
-   them; silently losing one is the only wrong answer.
-2. **A unit's imports are not in the object.** A unit that uses `Files`
-   compiles to an object whose code calls import indices, with nothing
-   recording what those imports are. The design's object format lists an
-   `imports` section and it was never implemented. The linker cannot resolve
-   these and would produce a module calling the wrong function.
-3. **System unit names are not reserved.** `unit Files` compiles. The design
-   says the names are reserved, and the reason holds: `uses Files` resolves
-   to the system unit first, so such an object could never be imported by
-   anyone. It should be refused at the header.
-4. **`MaxRelocs` of 4096 is far too low.** Exhausted at roughly 340 `writeln`
-   statements, because every data address and every call takes an entry. A
-   thousand-line unit will not compile. The diagnostic is clean, so this
-   fails loudly rather than badly, but the ceiling has to rise.
-5. **A standalone method exports under its mangled name**, `#U.TR.AREA`. It
-   will probably work, because an importer rebuilds the same name from the
-   type descriptor it just created, but that is a consequence of keying
-   method names on the type rather than a decision anyone made. Make it
-   deliberate and test it, or the first change to the mangling breaks
-   importing in a way nothing catches.
+1. **An interface `var` was dropped without a word**, and one in the
+   implementation section was worse: it compiled, and the routines read it
+   through `display[0]`, a frame a unit never sets up. Unit variables need
+   storage the linker places, which is a feature rather than a patch, so
+   both are refused for now. A `var` inside a routine is a local and is
+   unaffected. Test c014.
+2. **A unit's imports never reached the object.** Import indices come first
+   in a module's function index space and are fixed before parsing, so a
+   unit that uses `Files` and a program that does not disagree about every
+   index in the code. The object now carries module, name, and signature for
+   each, and the linker deduplicates on those three. Test o007.
+3. **System unit names were not reserved.** `unit Files` compiled to an
+   object nothing could name, because `uses Files` resolves to the system
+   unit first. Refused at the header. Test c015.
+4. **`MaxRelocs` of 4096 was far too low**, exhausted at about 340 `writeln`
+   statements; a thousand-line unit needs twelve thousand. Raised to 65536,
+   which costs 1 MB against a compiler that reserves 16.7. The binding limit
+   is now the code buffer, which is where it should be and which programs
+   share.
+5. **A standalone method exported under its mangled name** and would have
+   worked, because an importer rebuilds the same key from the type
+   descriptor it creates, but nothing had decided that. Now stated where the
+   name is written and pinned by test o006, so re-keying the mangling breaks
+   a test rather than importing.
 
-Two things that did hold: the WASM snapshot writes objects correctly under
-`wasmtime --dir=.`, so self-hosted `-c` works; and an empty unit produces a
+Two things held: the WASM snapshot writes objects correctly under
+`wasmtime --dir=.`, so self-hosted `-c` works, and an empty unit produces a
 valid empty object.
 
 ### Phase L2 progress

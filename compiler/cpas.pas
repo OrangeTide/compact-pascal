@@ -249,7 +249,7 @@ const
   MaxRecvDepth = 4;   { method calls nested inside one another's arguments }
   ObjKindConst   = 1;
   ObjKindRoutine = 2;
-  MaxRelocs   = 4096;
+  MaxRelocs   = 65536;  { every call and every data address takes one }
   RelocFunc   = 1;
   RelocData   = 2;
   RelocTable  = 3;
@@ -10437,6 +10437,19 @@ case tokKind of
     end;
   end;
   tkVar: begin
+    { A unit has no frame. A program's own variables live in the main
+      routine's frame, and routines reach them through display[0]; a unit
+      never sets that up, so a variable declared at a unit's top level would
+      be read out of whatever frame the program happened to leave there.
+
+      It compiled and produced exactly that until this check existed. Unit
+      variables need storage in the data segment, placed by the linker,
+      which is a feature and not a patch. Refusing is the honest state until
+      then, and scopeDepth of 1 is the unit's own level: a var inside a
+      routine is a local and is fine. }
+    if isUnit and (scopeDepth = 1) then
+      Error('a unit cannot declare variables yet: they would need storage ' +
+            'the linker places, and a unit has no frame to put them in');
     NextToken;
     ParseVarDecl;
   end;
@@ -14624,6 +14637,17 @@ begin
     end
     else if (syms[i].kind = skProc) or (syms[i].kind = skFunc) then begin
       ObjByte(ObjKindRoutine);
+      { A standalone method's symbol name is its mangled one, and that is
+        exactly what should be written. The mangling is built from the
+        receiver's unit-qualified type name, so an importer that recreates
+        the type descriptor from this same object rebuilds the identical key
+        and finds the method. Writing the plain name instead would export
+        something no call site could ever look up.
+
+        This works because method names were re-keyed on the type before the
+        object format existed. It is recorded here because it reads like an
+        accident otherwise, and because the first change to the mangling
+        would break importing with nothing to catch it but t133. }
       ObjStr(syms[i].name);
       fi := syms[i].size;
       if syms[i].kind = skFunc then
@@ -14641,6 +14665,24 @@ begin
       ObjTypeRef(funcs[fi].retTyp, funcs[fi].retTypeIdx);
       ObjU32(fi);          { which body implements it }
     end;
+  end;
+
+  { The host functions this unit needs.
+
+    Without these an object's calls reference import indices with nothing
+    saying what they are, and a linker would resolve them to whatever
+    happened to occupy those indices in the merged module. Import indices
+    come first in a module's function index space and are fixed before
+    parsing, so a unit that uses Files and a program that does not disagree
+    about every index in the code.
+
+    The linker deduplicates by module, name, and signature, so two units
+    importing the same host function produce one import. }
+  ObjU32(numImports);
+  for i := 0 to numImports - 1 do begin
+    ObjStr(imports[i].modname);
+    ObjStr(imports[i].fieldname);
+    ObjU32(imports[i].typeidx);
   end;
 
   { Bodies. Each carries its own length so the reader can walk them without
@@ -14861,9 +14903,21 @@ begin
       Error('unknown record kind in ' + path);
   end;
 
-  { Bodies, data, and relocations are reported by size and count rather than
-    byte by byte. What a round trip has to prove here is that the framing is
-    right, and a wall of hex would not be checked by anyone. }
+  { Imports are named, because which host functions a unit needs is exactly
+    the kind of thing a reader of a dump wants to see. Bodies, data, and
+    relocations are reported by size and count: what a round trip has to
+    prove there is that the framing is right, and a wall of hex would not be
+    checked by anyone. }
+  n := ObjRU32;
+  str(n, num);
+  writeln('imports ', num);
+  for i := 1 to n do begin
+    nm := ObjRStr;
+    line := '  ' + nm + '.' + ObjRStr;
+    v := ObjRU32;
+    writeln(line);
+  end;
+
   n := ObjRU32;
   str(n, num);
   writeln('bodies ', num);
@@ -15334,6 +15388,13 @@ begin
       Expected('program name');
   end;
   curUnitName := tokStr;
+  { System unit names are reserved. `uses Files` resolves to the system unit
+    before anything on the command line, so a unit called Files could never
+    be imported by anybody: it would compile to an object nothing can name.
+    Refusing at the header says so at the point the mistake is made. }
+  if isUnit and ((curUnitName = 'SYSTEM') or (curUnitName = 'FILES')) then
+    Error(curUnitName + ' is a system unit name and is reserved, so a unit ' +
+          'of that name could never be imported');
   NextToken;
   Expect(tkSemicolon);
 
