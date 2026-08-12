@@ -2279,6 +2279,29 @@ valid empty object.
       yet. Test l001.
 - [ ] **Imported routines**: a funcs[] entry whose index the linker assigns,
       so a call into a unit can be emitted.
+**Linker, second attempt, notes for the next one.** Written end to end and
+reverted unfinished. It got as far as emitting a module: objects merged,
+bodies appended to `funcBodies`, data and table slots rebased, and the unit's
+own relocations patched. Two things were still wrong and both are cheap to
+find with a debug print, which is what the next attempt should start with
+rather than reasoning about it:
+
+- The program's own `RelocExtern` sites were not patched. The loop looks
+  right, the flag that selects linked objects is set, and the placeholder
+  survived to the module anyway, so the assumption to check first is that
+  `relocOffset` for a call in the main body really is an offset into
+  `startCode` at the time the patch runs.
+- The unit's appended bodies produced "local variable out of range" and a
+  block type mismatch, so `nlocals` or the body bytes are not being carried
+  across faithfully.
+
+Two things that did work and are worth keeping in the rewrite: bodies carry
+their signature shape rather than a type index, so the linker rebuilds the
+index with one `AddWasmType` call and needs no `type` relocation kind; and a
+unit whose host imports differ from the program's is refused, because import
+indices are positional and the two would disagree about every function index
+above them.
+
 - [ ] **Linker**: merge, relocate, recompute memory sizing. Scaffolding was
       written and set aside on finding that `relocInFunc` named the wrong
       function; it needs rewriting against the corrected field. Two gaps it
