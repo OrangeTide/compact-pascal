@@ -253,6 +253,9 @@ const
   RelocFunc   = 1;
   RelocData   = 2;
   RelocTable  = 3;
+  RelocExtern = 4;    { a call into another unit }
+  ExternFuncBase = 1000000;  { placeholder indices for unresolved routines }
+  MaxExterns  = 128;
   MaxObjArgs  = 16;   { objects named on one command line }
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
@@ -331,6 +334,8 @@ type
 
   { WASM type signature }
   TWasmParamArr = array[0..16] of byte;  { 16 visible params plus a hidden result pointer }
+  TParamTypeArr = array[0..16] of longint;
+  TParamFlagArr = array[0..16] of boolean;
   TWasmResultArr = array[0..3] of byte;
   TWasmType = record
     nparams: longint;
@@ -670,6 +675,10 @@ var
   objArgPath: array[0..MaxObjArgs-1] of string[63];
   objArgUnit: array[0..MaxObjArgs-1] of string[63];
   numObjArgs: longint;
+  externUnit: array[0..MaxExterns-1] of string[63];
+  externName: array[0..MaxExterns-1] of string[63];
+  numExterns: longint;
+  numExternCalls: longint;   (* how many calls actually reach another unit *)
   optOutName: string[63];     (* -o: where the object or module goes *)
   optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
@@ -2875,8 +2884,16 @@ procedure EmitCall(funcIdx: longint);
 begin
   CodeBufEmit(startCode, OpCall);
   if emitRelocatable or optPadImmediates then begin
-    if emitRelocatable then
-      AddReloc(RelocFunc, startCode.len, funcIdx);
+    if emitRelocatable then begin
+      { A call into another unit has no index yet. The placeholder says which
+        external symbol it is; the linker writes the real one. }
+      if funcIdx >= ExternFuncBase then begin
+        AddReloc(RelocExtern, startCode.len, funcIdx - ExternFuncBase);
+        numExternCalls := numExternCalls + 1;
+      end
+      else
+        AddReloc(RelocFunc, startCode.len, funcIdx);
+    end;
     EmitULEB128Pad(startCode, funcIdx);
   end else
     EmitULEB128(startCode, funcIdx);
@@ -3320,6 +3337,58 @@ begin
   numFields := numFields + 1;
 end;
 
+procedure DeclareImportedRoutine(const unitName, nm: string;
+                                 isFn: boolean; np: longint;
+                                 var pTyp, pRef: TParamTypeArr;
+                                 var pVar, pConst: TParamFlagArr;
+                                 retTyp, retRef: longint);
+{** Declare a routine another unit exports.
+
+  It gets a funcs[] entry like any routine, because every call site reads
+  parameter metadata from there, and a symbol whose function index is a
+  placeholder: the real one is only known once the linker has placed every
+  unit. The placeholder encodes which external symbol it is, so a call can
+  record a relocation naming it. }
+var
+  sym, fi, i: longint;
+begin
+  if numExterns >= MaxExterns then
+    Error('too many routines imported from units');
+  if numFuncs >= MaxFuncs then
+    Error('too many functions');
+  externUnit[numExterns] := unitName;
+  externName[numExterns] := nm;
+
+  fi := numFuncs;
+  funcs[fi].name := nm;
+  funcs[fi].typeidx := -1;      { the linker builds the signature }
+  funcs[fi].bodyStart := -3;    { marker: defined in another unit }
+  funcs[fi].bodyLen := 0;
+  funcs[fi].nlocals := 0;
+  funcs[fi].nparams := np;
+  funcs[fi].retTyp := retTyp;
+  funcs[fi].retTypeIdx := retRef;
+  funcs[fi].retSize := 0;
+  funcs[fi].retStrMax := 0;
+  for i := 0 to np - 1 do begin
+    funcs[fi].varParams[i] := pVar[i];
+    funcs[fi].constParams[i] := pConst[i];
+    funcs[fi].paramTyp[i] := pTyp[i];
+    funcs[fi].paramTypeIdx[i] := pRef[i];
+  end;
+  numFuncs := numFuncs + 1;
+
+  if isFn then
+    sym := AddSym(nm, skFunc, retTyp)
+  else
+    sym := AddSym(nm, skProc, tyNone);
+  syms[sym].offset := ExternFuncBase + numExterns;
+  syms[sym].size := fi;
+  syms[sym].typeIdx := retRef;
+
+  numExterns := numExterns + 1;
+end;
+
 procedure LoadObjectInterface(const path, want: string);
 {** Read an object's interface description and declare what it exports.
 
@@ -3334,6 +3403,10 @@ var
   nTypes, n, i, j, k, np, p, v, sym, tIdx: longint;
   nm, tname, unitName: string;
   fOfs, fSize, fStrMax: longint;
+  isFn: boolean;
+  retTyp, retRef: longint;
+  pTyp, pRef: TParamTypeArr;
+  pVar, pConst: TParamFlagArr;
   localType: array[0..MaxTypes-1] of longint;
 begin
   assign(objFile, path);
@@ -3424,17 +3497,30 @@ begin
       syms[sym].offset := p;
     end
     else if k = ObjKindRoutine then begin
-      { Signatures are read and discarded for now. Declaring the routine
-        needs a funcs[] entry whose index the linker assigns, which is the
-        next piece of this phase. }
+      isFn := ObjRByte <> 0;
       np := ObjRByte;
-      np := ObjRByte;
-      for p := 1 to np do begin
-        v := ObjRByte; v := ObjRU32; v := ObjRByte; v := ObjRByte;
+      for p := 0 to np - 1 do begin
+        { One read per statement and in order. Reading several as arguments
+          to one call takes them in whatever order the argument list is
+          evaluated, which is how record field offsets came back wrong. }
+        pTyp[p] := ObjRByte;
+        j := ObjRU32;
+        if (j >= 0) and (j < nTypes) then
+          pRef[p] := localType[j]
+        else
+          pRef[p] := -1;
+        pVar[p] := ObjRByte <> 0;
+        pConst[p] := ObjRByte <> 0;
       end;
-      v := ObjRByte;
-      v := ObjRU32;
-      v := ObjRU32;
+      retTyp := ObjRByte;
+      j := ObjRU32;
+      if (j >= 0) and (j < nTypes) then
+        retRef := localType[j]
+      else
+        retRef := -1;
+      v := ObjRU32;   { the body index in the exporting unit }
+      DeclareImportedRoutine(unitName, nm, isFn, np, pTyp, pRef,
+                             pVar, pConst, retTyp, retRef);
     end
     else
       Error('unknown record kind in ' + path);
@@ -11113,7 +11199,7 @@ begin
   SmallEmitULEB128(secFunc, TypeI32x3Void);
   { Slots 32+: User-defined functions (skip imports) }
   for i := 0 to numFuncs - 1 do
-    if funcs[i].bodyStart <> -2 then
+    if (funcs[i].bodyStart <> -2) and (funcs[i].bodyStart <> -3) then
       SmallEmitULEB128(secFunc, funcs[i].typeidx);
 end;
 
@@ -14232,7 +14318,8 @@ begin
 
   { Slots 32+: User-defined function bodies (skip imports) }
   for i := 0 to numFuncs - 1 do begin
-    if funcs[i].bodyStart = -2 then continue; { skip imports }
+    if (funcs[i].bodyStart = -2) or (funcs[i].bodyStart = -3) then
+      continue;   { a host import, or a routine another unit defines }
     if funcs[i].nlocals > 0 then begin
       bodyLen := 1 + 1 + 1 + funcs[i].bodyLen + 1;
       EmitULEB128(secCode, bodyLen);
@@ -14930,6 +15017,15 @@ begin
   for i := 0 to numProcRefs - 1 do
     ObjU32(procRefFunc[i]);
 
+  { Routines this unit calls but does not define. A RelocExtern names an
+    index into this list, and the linker resolves it against whichever unit
+    exports that name. }
+  ObjU32(numExterns);
+  for i := 0 to numExterns - 1 do begin
+    ObjStr(externUnit[i]);
+    ObjStr(externName[i]);
+  end;
+
   ObjU32(numRelocs);
   for i := 0 to numRelocs - 1 do begin
     ObjByte(relocKind[i]);
@@ -15142,6 +15238,14 @@ begin
 
   n := ObjRU32;
   str(n, num);
+  writeln('externs ', num);
+  for i := 1 to n do begin
+    nm := ObjRStr;
+    writeln('  ', nm, '.', ObjRStr);
+  end;
+
+  n := ObjRU32;
+  str(n, num);
   writeln('relocations ', num);
   for i := 1 to n do begin
     k := ObjRByte;
@@ -15153,6 +15257,8 @@ begin
       line := 'data'
     else if k = RelocTable then
       line := 'table'
+    else if k = RelocExtern then
+      line := 'extern'
     else
       line := 'kind?';
     str(ObjRU32, num);
@@ -15704,8 +15810,20 @@ begin
     if optOutName = '' then
       Error('no object was written: -c needs -o to say where the object goes');
     WriteObject;
-  end else
+  end else begin
+    { A program that called into a unit has placeholder indices in its code,
+      and a module carrying those would fail validation with nothing to
+      point at. Refusing beats writing it: the linker is what turns these
+      into real indices and it is the next piece of this phase.
+
+      Counted at the call and not at the declaration: importing a unit
+      declares every routine it exports, and a program that calls none of
+      them has nothing unresolved and still produces a module. }
+    if numExternCalls > 0 then
+      Error('this program calls into a unit, and linking is not built yet; ' +
+            'importing types and constants works, calling does not');
     WriteModule;
+  end;
 
   { Final progress line. In line mode the count is forced to the total so
     a host sees the ratio reach 1 even if it passed a high line count. }

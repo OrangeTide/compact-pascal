@@ -86,6 +86,23 @@ for src in "$here"/link/*.pas; do
         echo "FAIL $name (unit)" >&2; sed 's/^/  /' "$tmp/$name.uerr" >&2
         fail=$((fail + 1)); continue
     fi
+    # A .mustfail holds the diagnostic the compiler owes for something it
+    # cannot do yet. Refusing is behaviour worth pinning: the alternative
+    # here is a module that fails validation with nothing to point at.
+    mustfail="$here/link/$name.mustfail"
+    if [ -f "$mustfail" ]; then
+        if "$cpas" "$tmp/$name.cpo" < "$src" > "$tmp/$name.wasm" 2>"$tmp/$name.perr"; then
+            echo "FAIL $name (should have been refused)" >&2
+            fail=$((fail + 1))
+        elif ! grep -q -f "$mustfail" "$tmp/$name.perr"; then
+            echo "FAIL $name (wrong refusal)" >&2
+            sed 's/^/  /' "$tmp/$name.perr" >&2
+            fail=$((fail + 1))
+        else
+            echo "PASS $name"
+        fi
+        continue
+    fi
     if ! "$cpas" "$tmp/$name.cpo" < "$src" > "$tmp/$name.wasm" 2>"$tmp/$name.perr"; then
         echo "FAIL $name (program)" >&2; sed 's/^/  /' "$tmp/$name.perr" >&2
         fail=$((fail + 1)); continue

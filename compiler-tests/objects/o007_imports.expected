@@ -15,6 +15,7 @@ bodies 1
   P
 data 2 bytes
 elements 0
+externs 0
 relocations 2
   data -> 4
   func -> 11

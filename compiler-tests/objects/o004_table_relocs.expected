@@ -15,5 +15,6 @@ bodies 2
   PICK
 data 0 bytes
 elements 1
+externs 0
 relocations 1
   table -> 1
