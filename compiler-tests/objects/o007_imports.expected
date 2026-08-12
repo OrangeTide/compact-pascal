@@ -18,4 +18,4 @@ elements 0
 externs 0
 relocations 2
   data in body 0 -> 4
-  func in body 0 -> 11
+  data in body 0 -> 11

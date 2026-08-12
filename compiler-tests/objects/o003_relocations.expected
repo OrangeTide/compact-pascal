@@ -16,5 +16,5 @@ data 0 bytes
 elements 0
 externs 0
 relocations 2
-  func in body 1 -> 37
-  func in body 1 -> 37
+    wasi_snapshot_preview1.args_get in body 1 -> 37
+    wasi_snapshot_preview1.args_get in body 1 -> 37

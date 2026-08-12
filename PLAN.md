@@ -2279,37 +2279,35 @@ valid empty object.
       yet. Test l001.
 - [ ] **Imported routines**: a funcs[] entry whose index the linker assigns,
       so a call into a unit can be emitted.
-**Linker, second attempt, notes for the next one.** Written end to end and
-reverted unfinished. It got as far as emitting a module: objects merged,
-bodies appended to `funcBodies`, data and table slots rebased, and the unit's
-own relocations patched. Two things were still wrong and both are cheap to
-find with a debug print, which is what the next attempt should start with
-rather than reasoning about it:
+**Linker, what it took.** Written, reverted once, and finished on the second
+attempt with a debug print, which found in one line what an hour of reading
+had not. Five defects, four of them one-liners:
 
-- The program's own `RelocExtern` sites were not patched. The loop looks
-  right, the flag that selects linked objects is set, and the placeholder
-  survived to the module anyway, so the assumption to check first is that
-  `relocOffset` for a call in the main body really is an offset into
-  `startCode` at the time the patch runs.
-- The unit's appended bodies produced "local variable out of range" and a
-  block type mismatch, so `nlocals` or the body bytes are not being carried
-  across faithfully.
+1. `curFuncIdx` was never initialized, so it was zero and every relocation in
+   a program's main body was attributed to `funcs[0]`. The patch landed in
+   `funcBodies` instead of `startCode`, which both left the call unpatched
+   and corrupted the linked unit's body. One root cause, two symptoms, and
+   the two symptoms were what the first attempt had recorded as separate
+   unknowns.
+2. `numDefinedFuncs` already counts the 32 helper slots, so adding 32 again
+   put every linked function 32 slots past where it landed.
+3. Calls to host imports and to helper slots were being relocated. Those sit
+   at the same index in every module and must not move.
+4. A unit numbers its data from 4, past its own nil guard, so its address `v`
+   is byte `v-4` of what gets appended.
+5. A helper occupies a fixed slot in every module but its body is only
+   generated when something asks for it. A linked unit calls helpers the
+   program never needed and reached a three-byte stub. All helpers are
+   materialised when anything is linked, which is blunt: an object could
+   record which slots it uses instead, and should when the size matters.
 
-Two things that did work and are worth keeping in the rewrite: bodies carry
-their signature shape rather than a type index, so the linker rebuilds the
-index with one `AddWasmType` call and needs no `type` relocation kind; and a
-unit whose host imports differ from the program's is refused, because import
-indices are positional and the two would disagree about every function index
-above them.
-
-- [ ] **Linker**: merge, relocate, recompute memory sizing. Scaffolding was
-      written and set aside on finding that `relocInFunc` named the wrong
-      function; it needs rewriting against the corrected field. Two gaps it
-      surfaced that the next attempt has to handle: a relocation in a
-      program's main body belongs to `_start`, which is not a `funcs[]`
-      entry, and a unit whose host imports differ from the importing
-      program's disagrees with it about every function index above them.
-- [ ] **`uses` resolving to objects** named on the command line.
+- [x] **Linker.** A program compiles against a unit's object and the two
+      are merged into one module: bodies appended, function indices, data
+      addresses and table slots rebased, and all four relocation kinds
+      applied in place. Imported constants, imported routines, calls
+      private to a unit, and the unit's own string data all work. A unit
+      whose host imports differ from the program's is refused. Test l002.
+- [x] **`uses` resolving to objects** named on the command line.
 
 - [x] **M3: interfaces** and `implement` blocks. Inline vtable, conformance
       verified when the block closes, satisfaction by a standalone method or

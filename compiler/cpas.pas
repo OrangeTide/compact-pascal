@@ -661,6 +661,7 @@ var
   optPadImmediates: boolean;  (* -pad: five-byte immediates in a program too *)
   emitRelocatable: boolean;   (* output must be patchable by the linker *)
   isUnit: boolean;            (* the source began with a unit header *)
+  linkI, linkJ: longint;
   pendingUnitBlock: boolean;  (* the next ParseBlock is a unit's top level *)
   inUnitImpl: boolean;        (* parsing a unit implementation section *)
   inUnitInterface: boolean;   (* parsing a unit interface section *)
@@ -675,10 +676,15 @@ var
   objArgPath: array[0..MaxObjArgs-1] of string[63];
   objArgUnit: array[0..MaxObjArgs-1] of string[63];
   numObjArgs: longint;
+  objFuncBase: array[0..MaxObjArgs-1] of longint;
+  objArgLinked: array[0..MaxObjArgs-1] of boolean;
+  loadingObj: longint;
   externUnit: array[0..MaxExterns-1] of string[63];
   externName: array[0..MaxExterns-1] of string[63];
   numExterns: longint;
   numExternCalls: longint;   (* how many calls actually reach another unit *)
+  externBody: array[0..MaxExterns-1] of longint;
+  externObj: array[0..MaxExterns-1] of longint;
   curFuncIdx: longint;       (* funcs[] slot whose body is being compiled *)
   optOutName: string[63];     (* -o: where the object or module goes *)
   optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
@@ -3185,6 +3191,8 @@ begin
         the unit is an index the linker assigns. Reachable here only because
         a uses clause precedes every declaration and so precedes all code. }
       emitRelocatable := true;
+      loadingObj := objIdx;
+      objArgLinked[objIdx] := true;
       LoadObjectInterface(objArgPath[objIdx], name);
     end;
   end;
@@ -3409,6 +3417,7 @@ var
   nm, tname, unitName: string;
   fOfs, fSize, fStrMax: longint;
   isFn: boolean;
+  bodyIdx: longint;
   retTyp, retRef: longint;
   pTyp, pRef: TParamTypeArr;
   pVar, pConst: TParamFlagArr;
@@ -3523,7 +3532,9 @@ begin
         retRef := localType[j]
       else
         retRef := -1;
-      v := ObjRU32;   { the body index in the exporting unit }
+      bodyIdx := ObjRU32;
+      externBody[numExterns] := bodyIdx;
+      externObj[numExterns] := loadingObj;
       DeclareImportedRoutine(unitName, nm, isFn, np, pTyp, pRef,
                              pVar, pConst, retTyp, retRef);
     end
@@ -15001,6 +15012,10 @@ begin
   for i := 0 to numFuncs - 1 do begin
     ObjStr(funcs[i].name);
     ObjU32(funcs[i].nlocals);
+    { The signature shape, not the type index: an index means nothing in
+      another module's type section. The linker rebuilds it. }
+    ObjU32(wasmTypes[funcs[i].typeidx].nparams);
+    ObjU32(wasmTypes[funcs[i].typeidx].nresults);
     if funcs[i].bodyStart < 0 then
       ObjU32(0)
     else begin
@@ -15223,6 +15238,8 @@ begin
   for i := 1 to n do begin
     nm := ObjRStr;
     v := ObjRU32;    { locals }
+    v := ObjRU32;    { params }
+    v := ObjRU32;    { results }
     p := ObjRU32;    { length }
     for k := 1 to p do
       v := ObjRByte;
@@ -15260,7 +15277,12 @@ begin
     k := ObjRByte;
     v := ObjRU32;
     p := ObjRU32;
-    if k = RelocFunc then
+    if (k = RelocFunc) and (v < numImports + 32) then
+      { A call to a host import or to one of the 32 helper slots. Those sit
+        at the same index in every module this compiler emits, given the
+        same imports, so they do not move and must not be patched. Only a
+        user function shifts. }
+    else if k = RelocFunc then
       line := 'func'
     else if k = RelocData then
       line := 'data'
@@ -15279,6 +15301,213 @@ begin
       str(ObjRU32, num);
       writeln('  ', line, ' in body ', num2, ' -> ', num);
     end;
+  end;
+  close(objFile);
+end;
+
+procedure ForceAllHelpers;
+{** Materialise every helper before linking.
+
+  A helper occupies a fixed slot in every module but its body is only
+  generated when something asked for it. A linked unit calls helpers the
+  program never needed, and those slots are three-byte stubs: the unit's
+  call reached one and trapped.
+
+  Turning all of them on is blunt. The alternative is for an object to
+  record which slots it uses and for the linker to switch on exactly those,
+  which is worth doing when the size matters; a program that links a unit
+  currently carries all thirty-two whether or not anything calls them. }
+var ignore: longint;
+begin
+  ignore := EnsureWriteInt;   ignore := EnsureReadInt;
+  ignore := EnsureStrAssign;  ignore := EnsureWriteStr;
+  ignore := EnsureStrCompare; ignore := EnsureReadStr;
+  ignore := EnsureStrAppend;  ignore := EnsureStrCopy;
+  ignore := EnsureStrPos;     ignore := EnsureStrDelete;
+  ignore := EnsureStrInsert;  ignore := EnsureRangeCheck;
+  ignore := EnsureCheckedAdd; ignore := EnsureCheckedSub;
+  ignore := EnsureCheckedMul; ignore := EnsureSetUnion;
+  ignore := EnsureSetIntersect; ignore := EnsureSetDiff;
+  ignore := EnsureSetEq;      ignore := EnsureSetSubset;
+  ignore := EnsureIntToStrHelper; ignore := EnsureWriteChar;
+  ignore := EnsureNilCheck;   ignore := EnsureHeapAlloc;
+  ignore := EnsureHeapFree;
+  if optFileIO then
+    ignore := EnsureTextHelpers;
+end;
+
+procedure PatchPadded(var b: TCodeBuf; at, value: longint);
+{** Overwrite a five-byte padded LEB128 in place.
+
+  The site was emitted padded exactly so this can happen without moving
+  anything after it. The replacement is padded too: a narrower encoding
+  would leave stale bytes behind. }
+var i: longint;
+begin
+  for i := 0 to 3 do
+    b.data[at + i] := ((value shr (i * 7)) and $7F) or $80;
+  if value < 0 then
+    b.data[at + 4] := ((value shr 28) or longint($FFFFFFF0)) and $7F
+  else
+    b.data[at + 4] := (value shr 28) and $7F;
+end;
+
+procedure SkipObjectInterface;
+{** Step over the part of an object the first pass already read. }
+var n, i, k, np, p, v: longint;
+  nm: string;
+begin
+  n := ObjRU32;
+  for i := 0 to n - 1 do begin
+    k := ObjRByte;
+    nm := ObjRStr;
+    v := ObjRU32;
+    if k = tyRecord then begin
+      np := ObjRByte;
+      for p := 1 to np do begin
+        nm := ObjRStr;
+        v := ObjRByte; v := ObjRU32; v := ObjRU32; v := ObjRU32; v := ObjRU32;
+      end;
+    end else if k = tyArray then begin
+      v := ObjRByte; v := ObjRU32; v := ObjRU32; v := ObjRU32; v := ObjRU32;
+    end;
+  end;
+  n := ObjRU32;
+  for i := 1 to n do begin
+    k := ObjRByte;
+    nm := ObjRStr;
+    if k = ObjKindConst then begin
+      v := ObjRByte; v := ObjRU32;
+    end else begin
+      v := ObjRByte;
+      np := ObjRByte;
+      for p := 1 to np do begin
+        v := ObjRByte; v := ObjRU32; v := ObjRByte; v := ObjRByte;
+      end;
+      v := ObjRByte; v := ObjRU32; v := ObjRU32;
+    end;
+  end;
+end;
+
+procedure LinkObject(objIdx: longint);
+{** Merge one unit's object into the module being built.
+
+  Its functions are appended to funcs[] with their bodies in funcBodies,
+  which is where the module writer already reads them from, so there is no
+  second emission path to disagree with the first. Its data is appended to
+  the data segment and every address in its code shifted by where that
+  landed. Its table entries are appended and its slots renumbered. }
+var
+  n, i, j, k, np, p, v, dataBase, funcBase, slotBase: longint;
+  nm, path: string;
+  nprm, nres, sigIdx: longint;
+  lkParams: TWasmParamArr;
+  lkResults: TWasmResultArr;
+  bodyAt: array[0..MaxFuncs-1] of longint;
+  nBodies: longint;
+begin
+  path := objArgPath[objIdx];
+  assign(objFile, path);
+  {$I-}
+  reset(objFile);
+  {$I+}
+  if IOResult <> 0 then
+    Error('cannot read object file: ' + path);
+  objReadPath := path;
+  for i := 0 to 3 do
+    v := ObjRByte;
+  nm := ObjRStr;
+  SkipObjectInterface;
+
+  { Import indices are positional and are fixed before parsing, so a unit
+    that uses Files and a program that does not disagree about every
+    function index above the imports. Renumbering them is possible and is
+    not done, so the mismatch is refused. }
+  n := ObjRU32;
+  for i := 1 to n do begin
+    nm := ObjRStr; nm := ObjRStr; v := ObjRU32;
+  end;
+  if n <> numImports then
+    Error('unit ' + objArgUnit[objIdx] + ' declares' +
+          ' host imports and this program declares a different number' +
+          '; both must use Files or neither');
+
+  { numDefinedFuncs already counts the 32 helper slots, so the base is the
+    imports plus it. Adding 32 again put every linked function 32 slots past
+    where it landed. }
+  funcBase := numImports + numDefinedFuncs;
+  objFuncBase[objIdx] := funcBase;
+  nBodies := ObjRU32;
+  for i := 0 to nBodies - 1 do begin
+    nm := ObjRStr;
+    np := ObjRU32;            { locals, before the signature: writer order }
+    { Rebuild the type index here. One from another module's type section
+      means nothing, and rebuilding from the shape costs one call against a
+      relocation kind it would otherwise need. }
+    nprm := ObjRU32;
+    nres := ObjRU32;
+    for k := 0 to nprm - 1 do
+      lkParams[k] := WasmI32;
+    if nres > 0 then
+      lkResults[0] := WasmI32;
+    sigIdx := AddWasmType(nprm, lkParams, nres, lkResults);
+    p := ObjRU32;
+    bodyAt[i] := funcBodies.len;
+    for k := 1 to p do
+      CodeBufEmit(funcBodies, ObjRByte);
+    if numFuncs >= MaxFuncs then
+      Error('too many functions after linking');
+    funcs[numFuncs].name := nm;
+    funcs[numFuncs].typeidx := sigIdx;
+    funcs[numFuncs].bodyStart := bodyAt[i];
+    funcs[numFuncs].bodyLen := p;
+    funcs[numFuncs].nlocals := np;
+    funcs[numFuncs].nparams := 0;
+    funcs[numFuncs].retTyp := tyNone;
+    numFuncs := numFuncs + 1;
+    numDefinedFuncs := numDefinedFuncs + 1;
+  end;
+
+  dataBase := dataPos;
+  n := ObjRU32;
+  for i := 1 to n do
+    DataBufEmit(secData, ObjRByte);
+  dataPos := dataPos + n;
+
+  slotBase := numProcRefs;
+  n := ObjRU32;
+  for i := 1 to n do begin
+    v := ObjRU32;
+    if numProcRefs >= MaxProcRefs then
+      Error('too many procedures have had their address taken');
+    procRefFunc[numProcRefs] := funcBase + (v - (numImports + 32));
+    numProcRefs := numProcRefs + 1;
+  end;
+
+  n := ObjRU32;
+  if n > 0 then
+    Error('unit ' + objArgUnit[objIdx] + ' calls into another unit, which ' +
+          'the linker does not resolve yet');
+
+  n := ObjRU32;
+  for i := 1 to n do begin
+    k := ObjRByte;
+    j := ObjRU32;
+    p := ObjRU32;
+    v := ObjRU32;
+    if (j < 0) or (j >= nBodies) then
+      Error('a relocation in ' + path + ' names a function that is not there');
+    if k = RelocFunc then
+      PatchPadded(funcBodies, bodyAt[j] + p, funcBase + (v - (numImports + 32)))
+    else if k = RelocData then
+      { The unit numbered its data from 4, past its own nil guard, and its
+        bytes are appended at dataBase. So its address v is byte v-4 of what
+        was appended. Adding dataBase alone shifted every string by four. }
+      PatchPadded(funcBodies, bodyAt[j] + p, dataBase + v - 4)
+    else if k = RelocTable then
+      PatchPadded(funcBodies, bodyAt[j] + p, slotBase + v)
+    else
+      Error('unknown relocation kind in ' + path);
   end;
   close(objFile);
 end;
@@ -15548,6 +15777,11 @@ begin
   optOutName := '';
   optDumpObj := '';
   numRelocs := 0;
+  numExterns := 0;
+  numExternCalls := 0;
+  { The main body is _start, which is not a funcs[] entry. Left at zero this
+    attributed every relocation in the main body to funcs[0]. }
+  curFuncIdx := -1;
   optStackChecks := true;
   optProgress := false;
   optVerbose := false;
@@ -15835,9 +16069,32 @@ begin
       Counted at the call and not at the declaration: importing a unit
       declares every routine it exports, and a program that calls none of
       them has nothing unresolved and still produces a module. }
-    if numExternCalls > 0 then
-      Error('this program calls into a unit, and linking is not built yet; ' +
-            'importing types and constants works, calling does not');
+    { Link. Every object the program used is merged in, then the program's
+      own calls into them are patched: a call site holds a placeholder
+      naming an external symbol, whose routine now has a real index because
+      its unit has been placed. }
+    if numObjArgs > 0 then
+      ForceAllHelpers;
+    for linkI := 0 to numObjArgs - 1 do
+      if objArgLinked[linkI] then
+        LinkObject(linkI);
+    for linkI := 0 to numRelocs - 1 do
+      if relocKind[linkI] = RelocExtern then begin
+        linkJ := objFuncBase[externObj[relocSymbol[linkI]]]
+                 + externBody[relocSymbol[linkI]];
+        if optDebug then begin
+          write(stderr, 'link: extern ', relocSymbol[linkI],
+                ' in func ', relocInFunc[linkI],
+                ' at ', relocOffset[linkI], ' -> ', linkJ);
+          writeln(stderr);
+        end;
+        if relocInFunc[linkI] < 0 then
+          PatchPadded(startCode, relocOffset[linkI], linkJ)
+        else
+          PatchPadded(funcBodies,
+                      funcs[relocInFunc[linkI]].bodyStart + relocOffset[linkI],
+                      linkJ);
+      end;
     WriteModule;
   end;
 
