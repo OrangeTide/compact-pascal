@@ -679,6 +679,7 @@ var
   externName: array[0..MaxExterns-1] of string[63];
   numExterns: longint;
   numExternCalls: longint;   (* how many calls actually reach another unit *)
+  curFuncIdx: longint;       (* funcs[] slot whose body is being compiled *)
   optOutName: string[63];     (* -o: where the object or module goes *)
   optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
@@ -2833,7 +2834,11 @@ begin
   relocKind[numRelocs] := kind;
   relocOffset[numRelocs] := offset;
   relocSymbol[numRelocs] := symbol;
-  relocInFunc[numRelocs] := numFuncs;
+  { The function being compiled, which is not numFuncs: its slot is taken
+    and the counter advanced before the body is parsed. Recording numFuncs
+    named the next function, or one past the end for the last one. Nothing
+    consumed the field until the linker needed it, so nothing caught it. }
+  relocInFunc[numRelocs] := curFuncIdx;
   numRelocs := numRelocs + 1;
 end;
 
@@ -9465,6 +9470,7 @@ var
   savedStringTempIdx: longint;
   savedFuncNeedsStringTemp: boolean;
   savedCaseTempIdx: longint;
+  savedFuncIdx: longint;
   savedRecvTempIdx: longint;
   savedFuncNeedsRecvTemp: boolean;
   savedFuncNeedsCaseTemp: boolean;
@@ -9965,6 +9971,8 @@ begin
   savedStringTempIdx := curStringTempIdx;
   savedFuncNeedsStringTemp := curFuncNeedsStringTemp;
   curFuncNeedsStringTemp := false;
+  savedFuncIdx := curFuncIdx;
+  curFuncIdx := funcIdx;
   savedCaseTempIdx := curCaseTempIdx;
   savedFuncNeedsCaseTemp := curFuncNeedsCaseTemp;
   curFuncNeedsCaseTemp := false;
@@ -10163,6 +10171,7 @@ begin
   curStringTempIdx := savedStringTempIdx;
   curFuncNeedsStringTemp := savedFuncNeedsStringTemp;
   curCaseTempIdx := savedCaseTempIdx;
+  curFuncIdx := savedFuncIdx;
   curRecvTempIdx := savedRecvTempIdx;
   curFuncNeedsRecvTemp := savedFuncNeedsRecvTemp;
   curFuncNeedsCaseTemp := savedFuncNeedsCaseTemp;
@@ -15084,7 +15093,7 @@ var
   line: string;
   ref: string;
   isVarP: boolean;
-  num: string[11];
+  num, num2: string[11];
 begin
   assign(objFile, path);
   {$I-}
@@ -15261,8 +15270,15 @@ begin
       line := 'extern'
     else
       line := 'kind?';
-    str(ObjRU32, num);
-    writeln('  ', line, ' -> ', num);
+    { The body index is printed because it was wrong and nothing noticed:
+      the dump showed kind and symbol only, and no consumer existed yet. }
+    if v < 0 then
+      writeln('  ', line, ' in _start')
+    else begin
+      str(v, num2);
+      str(ObjRU32, num);
+      writeln('  ', line, ' in body ', num2, ' -> ', num);
+    end;
   end;
   close(objFile);
 end;

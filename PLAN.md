@@ -2279,7 +2279,13 @@ valid empty object.
       yet. Test l001.
 - [ ] **Imported routines**: a funcs[] entry whose index the linker assigns,
       so a call into a unit can be emitted.
-- [ ] **Linker**: merge, relocate, recompute memory sizing.
+- [ ] **Linker**: merge, relocate, recompute memory sizing. Scaffolding was
+      written and set aside on finding that `relocInFunc` named the wrong
+      function; it needs rewriting against the corrected field. Two gaps it
+      surfaced that the next attempt has to handle: a relocation in a
+      program's main body belongs to `_start`, which is not a `funcs[]`
+      entry, and a unit whose host imports differ from the importing
+      program's disagrees with it about every function index above them.
 - [ ] **`uses` resolving to objects** named on the command line.
 
 - [x] **M3: interfaces** and `implement` blocks. Inline vtable, conformance

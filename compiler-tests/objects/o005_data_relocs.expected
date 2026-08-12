@@ -17,22 +17,22 @@ data 34 bytes
 elements 0
 externs 0
 relocations 19
-  data -> 4
-  func -> 8
-  data -> 10
-  func -> 8
-  func -> 9
-  data -> 20
-  data -> 33
-  data -> 24
-  data -> 20
-  data -> 28
-  func -> 0
-  data -> 4
-  func -> 9
-  data -> 20
-  data -> 32
-  data -> 24
-  data -> 20
-  data -> 28
-  func -> 0
+  data in body 0 -> 4
+  func in body 0 -> 8
+  data in body 1 -> 10
+  func in body 1 -> 8
+  func in body 1 -> 9
+  data in body 1 -> 20
+  data in body 1 -> 33
+  data in body 1 -> 24
+  data in body 1 -> 20
+  data in body 1 -> 28
+  func in body 1 -> 0
+  data in body 1 -> 4
+  func in body 1 -> 9
+  data in body 1 -> 20
+  data in body 1 -> 32
+  data in body 1 -> 24
+  data in body 1 -> 20
+  data in body 1 -> 28
+  func in body 1 -> 0

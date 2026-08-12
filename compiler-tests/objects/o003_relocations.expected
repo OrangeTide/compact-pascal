@@ -16,5 +16,5 @@ data 0 bytes
 elements 0
 externs 0
 relocations 2
-  func -> 37
-  func -> 37
+  func in body 1 -> 37
+  func in body 1 -> 37

@@ -17,4 +17,4 @@ data 0 bytes
 elements 1
 externs 0
 relocations 1
-  table -> 1
+  table in body 1 -> 1
