@@ -73,6 +73,35 @@ if [ -f "$pad_src" ]; then
     fi
 fi
 
+
+# A program compiled against a unit's object. Only what needs no linking yet:
+# imported types and scalar constants. A call into a unit needs the linker.
+for src in "$here"/link/*.pas; do
+    case "$src" in *.unit.pas) continue;; esac
+    [ -f "$src" ] || continue
+    name=$(basename "$src" .pas)
+    unit="$here/link/$name.unit.pas"
+    want="$here/link/$name.expected"
+    if ! "$cpas" -c -o "$tmp/$name.cpo" < "$unit" 2>"$tmp/$name.uerr"; then
+        echo "FAIL $name (unit)" >&2; sed 's/^/  /' "$tmp/$name.uerr" >&2
+        fail=$((fail + 1)); continue
+    fi
+    if ! "$cpas" "$tmp/$name.cpo" < "$src" > "$tmp/$name.wasm" 2>"$tmp/$name.perr"; then
+        echo "FAIL $name (program)" >&2; sed 's/^/  /' "$tmp/$name.perr" >&2
+        fail=$((fail + 1)); continue
+    fi
+    if ! wasm-validate "$tmp/$name.wasm" 2>"$tmp/$name.verr"; then
+        echo "FAIL $name (invalid module)" >&2; sed 's/^/  /' "$tmp/$name.verr" >&2
+        fail=$((fail + 1)); continue
+    fi
+    ( cd "$tmp" && wasmtime run "$name.wasm" > "$name.out" 2>&1 ) || true
+    if ! diff -u "$want" "$tmp/$name.out" > "$tmp/$name.diff"; then
+        echo "FAIL $name (output differs)" >&2; sed 's/^/  /' "$tmp/$name.diff" >&2
+        fail=$((fail + 1)); continue
+    fi
+    echo "PASS $name"
+done
+
 if [ "$fail" -ne 0 ]; then
     echo "check-objects: $fail failed" >&2
     exit 1

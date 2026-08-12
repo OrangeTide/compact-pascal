@@ -1,7 +1,7 @@
 {$MODE TP}
 {$IFNDEF FPC}
-{$MEMORY 256}
-{$MAXMEMORY 384}
+{$MEMORY 320}
+{$MAXMEMORY 448}
 {$ENDIF}
 program cpas;
 {$IFNDEF FPC}
@@ -30,7 +30,7 @@ const
   { Symbol table limits }
   MaxSyms    = 1024;
   MaxScopes  = 32;
-  MaxFuncs   = 256;   { max user-defined functions }
+  MaxFuncs   = 384;   { max user-defined functions }
   { WASM global indices: 0 = $sp, 1..8 = display[0..7], 9 = __version,
     10 = __heap_end. }
   GlobalHeapEnd = 10;
@@ -253,6 +253,7 @@ const
   RelocFunc   = 1;
   RelocData   = 2;
   RelocTable  = 3;
+  MaxObjArgs  = 16;   { objects named on one command line }
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
   IOErrPastEof = 200;
@@ -653,17 +654,22 @@ var
   optDump: boolean;           (* -dump command-line flag *)
   optCompileUnit: boolean;    (* -c: compile a unit to an object *)
   optPadImmediates: boolean;  (* -pad: five-byte immediates in a program too *)
+  emitRelocatable: boolean;   (* output must be patchable by the linker *)
   isUnit: boolean;            (* the source began with a unit header *)
   pendingUnitBlock: boolean;  (* the next ParseBlock is a unit's top level *)
   inUnitImpl: boolean;        (* parsing a unit implementation section *)
   inUnitInterface: boolean;   (* parsing a unit interface section *)
   ifaceSymFirst, ifaceSymLast: longint;  (* the interface section's symbols *)
   objFile: text;
+  objReadPath: string[63];   (* the object being read, for diagnostics *)
   objTypeOf: array[0..MaxTypes-1] of longint;  (* descriptor -> object type index *)
   dumpTypeName: array[0..MaxTypes-1] of string[63];
   numDumpTypes: longint;
   relocKind, relocOffset, relocSymbol, relocInFunc: array[0..MaxRelocs-1] of longint;
   numRelocs: longint;
+  objArgPath: array[0..MaxObjArgs-1] of string[63];
+  objArgUnit: array[0..MaxObjArgs-1] of string[63];
+  numObjArgs: longint;
   optOutName: string[63];     (* -o: where the object or module goes *)
   optDumpObj: string[63];     (* -dump-obj: print an object and stop *)
   optLevel: longint;          (* -O0/-O1, peephole on/off, and {$OPT+/-}; no-op unless PEEPHOLE compiled in *)
@@ -2796,7 +2802,7 @@ end;
 procedure EmitI32Const(value: longint);
 begin
   CodeBufEmit(startCode, OpI32Const);
-  if optCompileUnit or optPadImmediates then
+  if emitRelocatable or optPadImmediates then
     EmitSLEB128Pad(startCode, value)
   else
     EmitSLEB128Fix(startCode, value);
@@ -2835,7 +2841,7 @@ procedure EmitDataAddr(addr: longint);
   cause. }
 begin
   CodeBufEmit(startCode, OpI32Const);
-  if optCompileUnit then begin
+  if emitRelocatable then begin
     AddReloc(RelocData, startCode.len, addr);
     EmitSLEB128Pad(startCode, addr);
   end else if optPadImmediates then
@@ -2854,7 +2860,7 @@ procedure EmitTableSlot(slot: longint);
   immediates are slots. }
 begin
   CodeBufEmit(startCode, OpI32Const);
-  if optCompileUnit then begin
+  if emitRelocatable then begin
     AddReloc(RelocTable, startCode.len, slot);
     EmitSLEB128Pad(startCode, slot);
   end else if optPadImmediates then
@@ -2868,8 +2874,8 @@ end;
 procedure EmitCall(funcIdx: longint);
 begin
   CodeBufEmit(startCode, OpCall);
-  if optCompileUnit or optPadImmediates then begin
-    if optCompileUnit then
+  if emitRelocatable or optPadImmediates then begin
+    if emitRelocatable then
       AddReloc(RelocFunc, startCode.len, funcIdx);
     EmitULEB128Pad(startCode, funcIdx);
   end else
@@ -3043,6 +3049,75 @@ end;
 {** Populate the outermost scope with built-in types and constants
   (INTEGER, BOOLEAN, CHAR, BYTE, WORD, SHORTINT, LONGINT, TRUE, FALSE,
   MAXINT). Must be called after InitSymTable before any user code. }
+function ObjRByte: longint;
+{** One byte from the object being read. Reading past the end is an error
+  rather than a zero, for the reason reading past the end of any file is:
+  a zero byte is a legal thing to find in a file. }
+var c: char;
+begin
+  if eof(objFile) then
+    Error('object file ends in the middle of a record: ' + objReadPath);
+  read(objFile, c);
+  ObjRByte := ord(c);
+end;
+
+function ObjRU32: longint;
+var b0, b1, b2, b3: longint;
+begin
+  b0 := ObjRByte; b1 := ObjRByte; b2 := ObjRByte; b3 := ObjRByte;
+  ObjRU32 := b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24);
+end;
+
+function ObjRStr: string;
+var n, i: longint;
+  s: string;
+begin
+  n := ObjRByte;
+  s := '';
+  for i := 1 to n do
+    s := s + chr(ObjRByte);
+  ObjRStr := s;
+end;
+
+
+procedure LoadObjectInterface(const path, want: string); forward;
+
+function FindObjectArg(const unitName: string): longint;
+{** Which object named on the command line holds this unit, or -1.
+
+  The unit name comes out of the object rather than off the file name, so a
+  file can be called anything and a program still means the same thing.
+  Names are read on first use rather than all at once, because a command
+  line may name more objects than a program turns out to need. }
+var
+  i: longint;
+  saved: string;
+begin
+  FindObjectArg := -1;
+  for i := 0 to numObjArgs - 1 do begin
+    if objArgUnit[i] = '' then begin
+      assign(objFile, objArgPath[i]);
+      {$I-}
+      reset(objFile);
+      {$I+}
+      if IOResult <> 0 then
+        Error('cannot read object file: ' + objArgPath[i]);
+      saved := objReadPath;
+      objReadPath := objArgPath[i];
+      if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
+         or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
+        Error(objArgPath[i] + ' is not a Compact Pascal object');
+      objArgUnit[i] := ObjRStr;
+      objReadPath := saved;
+      close(objFile);
+    end;
+    if objArgUnit[i] = unitName then begin
+      FindObjectArg := i;
+      exit;
+    end;
+  end;
+end;
+
 procedure UseSystemUnit(const name: string);
 {** Make a system unit's bindings visible.
 
@@ -3053,7 +3128,7 @@ procedure UseSystemUnit(const name: string);
   `System` is accepted and does nothing: the types, constants, and routines
   it would contain are visible without asking, which is what every Pascal
   does, and naming it explicitly should not be an error. }
-var unitSym: longint;
+var unitSym, objIdx: longint;
 begin
   if name = 'SYSTEM' then
     { Always in scope. Accepted so that writing it is not punished. }
@@ -3073,8 +3148,24 @@ begin
                                    TypeI32x2I32);
     end;
   end
-  else
-    Error('unknown unit: ' + name + ' (system units are System and Files)');
+  else begin
+    { Not a system unit, so it must be satisfied by an object handed to the
+      compiler. Matching is on the unit name recorded in the object, not on
+      the file name. An error names both possibilities, because "unknown
+      unit" is unhelpful when the real problem is a forgotten argument. }
+    objIdx := FindObjectArg(name);
+    if objIdx < 0 then
+      Error('unknown unit: ' + name + '. The system units are System and ' +
+            'Files; anything else must be an object named on the command ' +
+            'line')
+    else begin
+      { Importing makes this program's output patchable, because a call into
+        the unit is an index the linker assigns. Reachable here only because
+        a uses clause precedes every declaration and so precedes all code. }
+      emitRelocatable := true;
+      LoadObjectInterface(objArgPath[objIdx], name);
+    end;
+  end;
 end;
 
 procedure AddBuiltins;
@@ -3227,6 +3318,129 @@ begin
   fields[numFields].variantId := 0;
   AddField := numFields;
   numFields := numFields + 1;
+end;
+
+procedure LoadObjectInterface(const path, want: string);
+{** Read an object's interface description and declare what it exports.
+
+  The importer adds symbols exactly as if it had parsed the declarations
+  itself, which is the point of generating the description rather than
+  letting anyone write one: a signature cannot drift between what a unit
+  declared and what an importer believes, because there is only one of them.
+
+  Bodies, data, elements, and relocations are not read here. Those belong to
+  the linker, which runs after the program has been compiled. }
+var
+  nTypes, n, i, j, k, np, p, v, sym, tIdx: longint;
+  nm, tname, unitName: string;
+  fOfs, fSize, fStrMax: longint;
+  localType: array[0..MaxTypes-1] of longint;
+begin
+  assign(objFile, path);
+  {$I-}
+  reset(objFile);
+  {$I+}
+  if IOResult <> 0 then
+    Error('cannot read object file: ' + path);
+  objReadPath := path;
+
+  if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
+     or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
+    Error(path + ' is not a Compact Pascal object');
+  unitName := ObjRStr;
+  if unitName <> want then
+    Error(path + ' holds unit ' + unitName + ', not ' + want);
+
+  { Types first, each remembered so a later reference resolves. The
+    descriptor is named exactly as the exporting unit named it, which is
+    what lets a method's mangled name be rebuilt here and match. }
+  nTypes := ObjRU32;
+  for i := 0 to nTypes - 1 do begin
+    k := ObjRByte;
+    tname := ObjRStr;
+    tIdx := AddTypeDesc;
+    localType[i] := tIdx;
+    types[tIdx].kind := k;
+    types[tIdx].name := unitName + '.' + tname;
+    types[tIdx].size := ObjRU32;
+    if k = tyRecord then begin
+      types[tIdx].fieldStart := numFields;
+      np := ObjRByte;
+      types[tIdx].fieldCount := np;
+      types[tIdx].variantOfs := -1;
+      for p := 1 to np do begin
+        nm := ObjRStr;
+        v := ObjRByte;
+        j := ObjRU32;
+        if (j >= 0) and (j < i) then
+          j := localType[j]
+        else
+          j := -1;
+        { Read into temporaries in order. Passing three ObjRU32 calls as
+          arguments reads the file in whatever order the argument list
+          happens to be evaluated, which is not specified and was not the
+          order they were written in: fields came back with the wrong
+          offsets and a record's second field aliased its first. }
+        fOfs := ObjRU32;
+        fSize := ObjRU32;
+        fStrMax := ObjRU32;
+        AddField(nm, v, j, fOfs, fSize, fStrMax);
+      end;
+    end
+    else if k = tyArray then begin
+      types[tIdx].elemType := ObjRByte;
+      j := ObjRU32;
+      if (j >= 0) and (j < i) then
+        types[tIdx].elemTypeIdx := localType[j]
+      else
+        types[tIdx].elemTypeIdx := -1;
+      types[tIdx].elemSize := ObjRU32;
+      types[tIdx].arrLo := ObjRU32;
+      types[tIdx].arrHi := ObjRU32;
+    end;
+    sym := AddSym(tname, skType, k);
+    syms[sym].typeIdx := tIdx;
+    syms[sym].size := types[tIdx].size;
+  end;
+
+  n := ObjRU32;
+  for i := 1 to n do begin
+    k := ObjRByte;
+    nm := ObjRStr;
+    if k = ObjKindConst then begin
+      v := ObjRByte;
+      sym := AddSym(nm, skConst, v);
+      syms[sym].typeIdx := -1;
+      { For a string or a structured constant this is an address in the
+        exporting unit's data segment, and it needs the same relocation a
+        data address in code needs. Nothing applies that yet, so importing
+        one is refused rather than silently pointing into this program's
+        own data. }
+      p := ObjRU32;
+      if (v = tyString) or (v = tyRecord) or (v = tyArray) or (v = tySet) then
+        Error('importing ' + nm + ' from ' + unitName + ' is not supported ' +
+              'yet: its value is an address in that unit''s data segment ' +
+              'and nothing relocates it until the linker exists');
+      syms[sym].offset := p;
+    end
+    else if k = ObjKindRoutine then begin
+      { Signatures are read and discarded for now. Declaring the routine
+        needs a funcs[] entry whose index the linker assigns, which is the
+        next piece of this phase. }
+      np := ObjRByte;
+      np := ObjRByte;
+      for p := 1 to np do begin
+        v := ObjRByte; v := ObjRU32; v := ObjRByte; v := ObjRByte;
+      end;
+      v := ObjRByte;
+      v := ObjRU32;
+      v := ObjRU32;
+    end
+    else
+      Error('unknown record kind in ' + path);
+  end;
+
+  close(objFile);
 end;
 
 function MethodSymName(recvTypeIdx: longint; const mname: string): string;
@@ -14727,35 +14941,6 @@ begin
   close(objFile);
 end;
 
-function ObjRByte: longint;
-{** One byte from the object being read. Reading past the end is an error
-  rather than a zero, for the reason reading past the end of any file is:
-  a zero byte is a legal thing to find in a file. }
-var c: char;
-begin
-  if eof(objFile) then
-    Error('object file ends in the middle of a record: ' + optOutName);
-  read(objFile, c);
-  ObjRByte := ord(c);
-end;
-
-function ObjRU32: longint;
-var b0, b1, b2, b3: longint;
-begin
-  b0 := ObjRByte; b1 := ObjRByte; b2 := ObjRByte; b3 := ObjRByte;
-  ObjRU32 := b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24);
-end;
-
-function ObjRStr: string;
-var n, i: longint;
-  s: string;
-begin
-  n := ObjRByte;
-  s := '';
-  for i := 1 to n do
-    s := s + chr(ObjRByte);
-  ObjRStr := s;
-end;
 
 function TypeTagName(t: longint): string;
 {** A tag as it reads in a dump. Diagnostics and dumps only. }
@@ -14811,7 +14996,7 @@ begin
   {$I+}
   if IOResult <> 0 then
     Error('cannot read object file: ' + path);
-  optOutName := path;   { for the end-of-file message }
+  objReadPath := path;
 
   if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
      or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
@@ -15071,6 +15256,17 @@ end;
   Clears the symbol table, scopes, buffers, imports, exports, function
   table, and all accumulated WASM section buffers. Called once at the
   start of each compilation. }
+function IsBareArg(const s: string): boolean;
+{** Whether a command-line argument is a file rather than an option.
+
+  A separate function because indexing the result of a call is not something
+  this language accepts, and the compiler has to compile itself. fpc took
+  ParamStr(i)[1] without complaint, which is exactly the kind of difference
+  the self-compile exists to catch. }
+begin
+  IsBareArg := (length(s) > 0) and (s[1] <> '-');
+end;
+
 procedure Init;
 var
   i: longint;
@@ -15224,6 +15420,7 @@ begin
   optDump := false;
   optCompileUnit := false;
   optPadImmediates := false;
+  emitRelocatable := false;
   inUnitInterface := false;
   inUnitImpl := false;
   optOutName := '';
@@ -15313,6 +15510,18 @@ begin
       UpcaseStr(defArg);
       DefineSymbol(defArg);
     end
+    { A bare argument is an object to link against. There is no search path
+      and there will not be one: a search path is a configuration surface
+      and a source of "which one did it find", and a build script that knows
+      what it is building can pass the paths. }
+    else if IsBareArg(ParamStr(i)) then begin
+      if numObjArgs >= MaxObjArgs then begin
+        WriteErrorLn('Error: too many objects on the command line');
+        halt(1);
+      end;
+      objArgPath[numObjArgs] := ParamStr(i);
+      numObjArgs := numObjArgs + 1;
+    end
     else begin
       WriteErrorLn('Error: unknown option: ' + ParamStr(i));
       halt(1);
@@ -15385,6 +15594,10 @@ begin
     linker has a use for. Saying so at the header is better than failing
     later on a missing entry point. }
   isUnit := tokKind = tkUnit;
+  { A unit is always relocatable. A program becomes relocatable if it
+    imports one, which the uses clause below decides, and it can decide it
+    because uses comes before any code is emitted. }
+  emitRelocatable := isUnit;
   if isUnit then begin
     if not optCompileUnit then
       Error('this is a unit and needs -c; without it the compiler is being ' +

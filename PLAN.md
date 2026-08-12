@@ -2269,7 +2269,16 @@ valid empty object.
       tag. Test o005.
 - [ ] **Elements** in the object.
 - [ ] **Elements** in the object.
-- [ ] **Object reader into the symbol table**, so `uses` can resolve.
+- [x] **Object reader into the symbol table.** `uses Geometry` resolves
+      against an object named on the command line, matched on the unit name
+      inside it rather than the file name, and declares the exported types
+      and scalar constants. A program that imports becomes relocatable
+      itself, decided at the uses clause because that precedes all code.
+      Importing a string or structured constant is refused: its value is an
+      address in the exporting unit's data segment and nothing relocates it
+      yet. Test l001.
+- [ ] **Imported routines**: a funcs[] entry whose index the linker assigns,
+      so a call into a unit can be emitted.
 - [ ] **Linker**: merge, relocate, recompute memory sizing.
 - [ ] **`uses` resolving to objects** named on the command line.
 
