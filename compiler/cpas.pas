@@ -14707,6 +14707,15 @@ begin
   for i := 0 to secData.len - 1 do
     ObjByte(secData.data[i]);
 
+  { The functions this unit put in the table, in its own order. Slots are
+    numbered from 1 within a compilation, so entry i here is this unit's
+    slot i+1 and the linker maps it to a final slot. Slot 0 is empty in
+    every module, which is what makes an unassigned procedural variable
+    trap, so the linker starts placing at 1 as well. }
+  ObjU32(numProcRefs);
+  for i := 0 to numProcRefs - 1 do
+    ObjU32(procRefFunc[i]);
+
   ObjU32(numRelocs);
   for i := 0 to numRelocs - 1 do begin
     ObjByte(relocKind[i]);
@@ -14939,6 +14948,12 @@ begin
     v := ObjRByte;
   str(n, num);
   writeln('data ', num, ' bytes');
+
+  n := ObjRU32;
+  str(n, num);
+  writeln('elements ', num);
+  for i := 1 to n do
+    v := ObjRU32;
 
   n := ObjRU32;
   str(n, num);

@@ -14,5 +14,6 @@ bodies 2
   TWICE
   PICK
 data 0 bytes
+elements 1
 relocations 1
   table -> 1

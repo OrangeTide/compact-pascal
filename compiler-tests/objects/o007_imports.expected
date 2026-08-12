@@ -14,6 +14,7 @@ imports 8
 bodies 1
   P
 data 2 bytes
+elements 0
 relocations 2
   data -> 4
   func -> 11

@@ -13,6 +13,7 @@ bodies 2
   TWICE
   QUAD
 data 0 bytes
+elements 0
 relocations 2
   func -> 37
   func -> 37
