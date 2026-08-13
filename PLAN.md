@@ -2188,6 +2188,43 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 review findings, third round
+
+Probed the unit-to-unit work. Four cases, three defects, and the test that
+was supposed to prove the exit criterion passes for a reason narrower than it
+looks.
+
+1. **A unit's dependency resolves through the importing program's scope.**
+   `ApplyLinkRelocations` resolves an extern with `LookupSym`, so unit Left
+   calling `Base.Say` works only when the *program* also says `uses Base`.
+   Naming `base.cpo` on the command line is not enough. A program should not
+   have to import a unit it never mentions in order for a unit it does import
+   to work. The fix is to resolve against the exporting object's own export
+   table, which the linker should record while placing rather than borrowing
+   the program's symbol table.
+
+   The l007 test passes because its program uses all three units. That is a
+   real case and worth keeping, but it does not test what its name suggests,
+   and a second test where the program imports only the top of the chain
+   would have caught this.
+
+2. **Object order on the command line changes the result.** With the program
+   importing all three units of a diamond, `base.cpo left.cpo right.cpo`
+   links and runs, and `right.cpo left.cpo base.cpo` emits a module that
+   fails validation with a block type mismatch. A build script should not
+   have to topologically sort its objects, and an order that produces a bad
+   module rather than a diagnostic is the worse half of it. Separate from the
+   first finding: every unit is imported here, so scope is not the issue.
+
+3. **The diagnostic for the first case gives advice that does not work.** It
+   says to name the unit's object on the command line and use it; naming it
+   is not sufficient, and the sentence reads as though it were. Once the
+   first finding is fixed this message should mostly disappear, and whatever
+   remains of it should say what actually helps.
+
+What held: a diamond where the program imports every unit, and recompiling
+one unit of a three-unit chain and relinking without touching the others.
+
 ### Phase L2 review findings, second round
 
 Probed against the exit criterion. Eleven cases, four defects; three fixed
