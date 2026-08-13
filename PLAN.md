@@ -2215,13 +2215,14 @@ and one is the criterion itself.
       table does not travel in the object, so an importer would get an
       interface that satisfies nothing. Refused at the unit, where the
       mistake is. Test l006.
-- [ ] **A unit cannot depend on another unit.** `uses` is accepted after the
-      header and after `interface` but not in an implementation section, and
-      the linker refuses an object with unresolved externs. The exit
-      criterion, *a three-unit program*, therefore holds only for three units
-      that do not call each other. Two pieces: let the implementation section
-      open with `uses`, and resolve a unit's own externs the way a program's
-      are.
+- [x] **A unit can now depend on another unit.**
+      An implementation section may open with its own `uses`, and a unit's
+      own externs are resolved at link time. Relocations are deferred until
+      every object is placed, because argument order does not guarantee that
+      the unit defining a routine was placed before the unit calling it.
+      **The exit criterion is met**: three units compiled separately, with
+      dependencies between them, link and run, and recompiling one without
+      touching the others still works. Test l007.
 
 Also verified across a unit boundary and now covered: records, standalone
 methods on imported types, two units on one command line, and recompiling

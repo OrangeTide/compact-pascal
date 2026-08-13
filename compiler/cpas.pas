@@ -679,6 +679,11 @@ var
   objFuncBase: array[0..MaxObjArgs-1] of longint;
   objArgLinked: array[0..MaxObjArgs-1] of boolean;
   loadingObj: longint;
+  objExternFirst: array[0..MaxObjArgs-1] of longint;
+  linkExUnit, linkExName: array[0..MaxExterns-1] of string[63];
+  numLinkExterns: longint;
+  linkRKind, linkRAt, linkRVal, linkRObj: array[0..MaxRelocs-1] of longint;
+  numLinkRelocs: longint;
   externUnit: array[0..MaxExterns-1] of string[63];
   externName: array[0..MaxExterns-1] of string[63];
   numExterns: longint;
@@ -10722,6 +10727,29 @@ begin
   numConform := numConform + 1;
 end;
 
+procedure ParseUsesClause;
+{** Parse `uses A, B;` and make each unit visible.
+
+  Kept in one place because a program has one after its header and a unit
+  may have one in each of its two sections. The interface's names are what
+  importers of this unit can see through it; the implementation's are
+  private to it, which the compiler does not yet distinguish and which only
+  matters once a unit's interface can mention another unit's types. }
+begin
+  NextToken;
+  repeat
+    if tokKind <> tkIdent then
+      Expected('unit name');
+    UseSystemUnit(tokStr);
+    NextToken;
+    if tokKind = tkComma then
+      NextToken
+    else
+      break;
+  until false;
+  Expect(tkSemicolon);
+end;
+
 procedure ParseDeclaration;
 {** Parse one const, type, var, procedure, function, or implement block.
 
@@ -10907,6 +10935,10 @@ begin
   if unitBlock and (tokKind = tkImplementation) then begin
     NextToken;
     inUnitImpl := true;
+    { An implementation section may open with its own uses clause. What it
+      names is private to the unit: an importer sees the interface. }
+    if tokKind = tkUses then
+      ParseUsesClause;
     while (tokKind = tkConst) or (tokKind = tkVar) or (tokKind = tkType)
           or (tokKind = tkProcedure) or (tokKind = tkFunction)
           or (tokKind = tkImplement) do
@@ -14960,6 +14992,8 @@ procedure WriteObject;
   entries in exactly the right order. }
 var
   i, n, fi, p: longint;
+  numBodies: longint;
+  bodyOrd: array[0..MaxFuncs-1] of longint;
 begin
   assign(objFile, optOutName);
   {$I-}
@@ -14970,6 +15004,15 @@ begin
 
   ObjByte(ord('C')); ObjByte(ord('P')); ObjByte(ord('O')); ObjByte(ord('1'));
   ObjStr(curUnitName);
+
+  numBodies := 0;
+  for i := 0 to numFuncs - 1 do begin
+    bodyOrd[i] := -1;
+    if funcs[i].bodyStart >= 0 then begin
+      bodyOrd[i] := numBodies;
+      numBodies := numBodies + 1;
+    end;
+  end;
 
   { Exported types come first, because everything else may refer to one and
     a reference is an index into this list. Declaration order is emission
@@ -15040,7 +15083,7 @@ begin
         emitted a memory.copy with one operand. }
       ObjU32(funcs[fi].retSize);
       ObjU32(funcs[fi].retStrMax);
-      ObjU32(fi);          { which body implements it }
+      ObjU32(bodyOrd[fi]);  { which body implements it }
     end;
   end;
 
@@ -15064,8 +15107,17 @@ begin
 
   { Bodies. Each carries its own length so the reader can walk them without
     knowing the code section's shape. }
-  ObjU32(numFuncs);
+  { Only routines this unit defines. A routine it imports occupies a funcs[]
+    slot so that call sites can read its parameters, but it has no body and
+    no signature index here: writing one read wasmTypes[-1].
+
+    Body indices are therefore ordinals over the defined routines, not
+    funcs[] slots, and bodyOrd maps between them for the export records and
+    the relocations below. }
+  ObjU32(numBodies);
   for i := 0 to numFuncs - 1 do begin
+    if funcs[i].bodyStart < 0 then
+      continue;
     ObjStr(funcs[i].name);
     ObjU32(funcs[i].nlocals);
     { The signature shape, not the type index: an index means nothing in
@@ -15109,7 +15161,10 @@ begin
   ObjU32(numRelocs);
   for i := 0 to numRelocs - 1 do begin
     ObjByte(relocKind[i]);
-    ObjU32(relocInFunc[i]);
+    if relocInFunc[i] < 0 then
+      ObjU32(-1)
+    else
+      ObjU32(bodyOrd[relocInFunc[i]]);
     ObjU32(relocOffset[i]);
     ObjU32(relocSymbol[i]);
   end;
@@ -15551,11 +15606,23 @@ begin
     numProcRefs := numProcRefs + 1;
   end;
 
+  { The routines this unit calls but does not define. Resolving them here
+    would mean the unit that defines them had to be placed already, which
+    argument order does not guarantee, so they are recorded and resolved
+    once everything is placed. }
+  objExternFirst[objIdx] := numLinkExterns;
   n := ObjRU32;
-  if n > 0 then
-    Error('unit ' + objArgUnit[objIdx] + ' calls into another unit, which ' +
-          'the linker does not resolve yet');
+  for i := 1 to n do begin
+    if numLinkExterns >= MaxExterns then
+      Error('too many routines imported between units');
+    linkExUnit[numLinkExterns] := ObjRStr;
+    linkExName[numLinkExterns] := ObjRStr;
+    numLinkExterns := numLinkExterns + 1;
+  end;
 
+  { Relocations are deferred for the same reason. Each remembers the buffer
+    position it patches, which is absolute in funcBodies and so stays valid
+    however much is appended after it. }
   n := ObjRU32;
   for i := 1 to n do begin
     k := ObjRByte;
@@ -15564,19 +15631,55 @@ begin
     v := ObjRU32;
     if (j < 0) or (j >= nBodies) then
       Error('a relocation in ' + path + ' names a function that is not there');
+    if numLinkRelocs >= MaxRelocs then
+      Error('too many relocations while linking');
+    linkRKind[numLinkRelocs] := k;
+    linkRAt[numLinkRelocs] := bodyAt[j] + p;
+    linkRObj[numLinkRelocs] := objIdx;
     if k = RelocFunc then
-      PatchPadded(funcBodies, bodyAt[j] + p, funcBase + (v - (numImports + 32)))
+      linkRVal[numLinkRelocs] := funcBase + (v - (numImports + 32))
     else if k = RelocData then
       { The unit numbered its data from 4, past its own nil guard, and its
         bytes are appended at dataBase. So its address v is byte v-4 of what
         was appended. Adding dataBase alone shifted every string by four. }
-      PatchPadded(funcBodies, bodyAt[j] + p, dataBase + v - 4)
+      linkRVal[numLinkRelocs] := dataBase + v - 4
     else if k = RelocTable then
-      PatchPadded(funcBodies, bodyAt[j] + p, slotBase + v)
+      linkRVal[numLinkRelocs] := slotBase + v
+    else if k = RelocExtern then
+      linkRVal[numLinkRelocs] := v      { an index into this unit's externs }
     else
       Error('unknown relocation kind in ' + path);
+    numLinkRelocs := numLinkRelocs + 1;
   end;
   close(objFile);
+end;
+
+procedure ApplyLinkRelocations;
+{** Apply every deferred relocation, once all objects are placed.
+
+  A unit's call into another unit is resolved by name against what the
+  program has in scope, which is where an imported routine's placeholder
+  already points at the right final index. }
+var i, sym, e: longint;
+begin
+  for i := 0 to numLinkRelocs - 1 do begin
+    if linkRKind[i] = RelocExtern then begin
+      e := objExternFirst[linkRObj[i]] + linkRVal[i];
+      sym := LookupSym(linkExName[e]);
+      if sym < 0 then
+        Error('unit ' + objArgUnit[linkRObj[i]] + ' calls ' +
+              linkExName[e] + ' from ' + linkExUnit[e] +
+              ', which this program does not import; name that unit''s ' +
+              'object on the command line and use it');
+      if syms[sym].offset < ExternFuncBase then
+        Error(linkExName[e] + ' resolved to something that is not a routine ' +
+              'imported from a unit');
+      PatchPadded(funcBodies, linkRAt[i],
+                  objFuncBase[externObj[syms[sym].offset - ExternFuncBase]]
+                  + externBody[syms[sym].offset - ExternFuncBase]);
+    end else
+      PatchPadded(funcBodies, linkRAt[i], linkRVal[i]);
+  end;
 end;
 
 procedure WriteModule;
@@ -15846,6 +15949,8 @@ begin
   numRelocs := 0;
   numExterns := 0;
   numExternCalls := 0;
+  numLinkExterns := 0;
+  numLinkRelocs := 0;
   { The main body is _start, which is not a funcs[] entry. Left at zero this
     attributed every relocation in the main body to funcs[0]. }
   curFuncIdx := -1;
@@ -16145,6 +16250,7 @@ begin
     for linkI := 0 to numObjArgs - 1 do
       if objArgLinked[linkI] then
         LinkObject(linkI);
+    ApplyLinkRelocations;
     for linkI := 0 to numRelocs - 1 do
       if relocKind[linkI] = RelocExtern then begin
         linkJ := objFuncBase[externObj[relocSymbol[linkI]]]
