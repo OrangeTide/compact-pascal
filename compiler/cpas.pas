@@ -3118,10 +3118,14 @@ function FindObjectArg(const unitName: string): longint;
   Names are read on first use rather than all at once, because a command
   line may name more objects than a program turns out to need. }
 var
-  i: longint;
+  i, j: longint;
   saved: string;
 begin
   FindObjectArg := -1;
+  { Every name is read on the first call rather than each on demand. The
+    demand version could not see a duplicate: the second object's name had
+    not been read yet when the first matched. Sixteen objects is the most a
+    command line takes, so reading them all costs nothing. }
   for i := 0 to numObjArgs - 1 do begin
     if objArgUnit[i] = '' then begin
       assign(objFile, objArgPath[i]);
@@ -3139,11 +3143,19 @@ begin
       objReadPath := saved;
       close(objFile);
     end;
+  end;
+
+  { Two objects claiming one unit is ambiguous. Taking the first would make
+    which one satisfied a uses depend on argument order. }
+  for i := 0 to numObjArgs - 1 do
     if objArgUnit[i] = unitName then begin
+      for j := i + 1 to numObjArgs - 1 do
+        if objArgUnit[j] = unitName then
+          Error('both ' + objArgPath[i] + ' and ' + objArgPath[j] +
+                ' hold unit ' + unitName);
       FindObjectArg := i;
       exit;
     end;
-  end;
 end;
 
 procedure UseSystemUnit(const name: string);
@@ -3354,7 +3366,7 @@ procedure DeclareImportedRoutine(const unitName, nm: string;
                                  isFn: boolean; np: longint;
                                  var pTyp, pRef: TParamTypeArr;
                                  var pVar, pConst: TParamFlagArr;
-                                 retTyp, retRef: longint);
+                                 retTyp, retRef, retSz, retSM: longint);
 {** Declare a routine another unit exports.
 
   It gets a funcs[] entry like any routine, because every call site reads
@@ -3381,8 +3393,8 @@ begin
   funcs[fi].nparams := np;
   funcs[fi].retTyp := retTyp;
   funcs[fi].retTypeIdx := retRef;
-  funcs[fi].retSize := 0;
-  funcs[fi].retStrMax := 0;
+  funcs[fi].retSize := retSz;
+  funcs[fi].retStrMax := retSM;
   for i := 0 to np - 1 do begin
     funcs[fi].varParams[i] := pVar[i];
     funcs[fi].constParams[i] := pConst[i];
@@ -3417,7 +3429,9 @@ var
   nm, tname, unitName: string;
   fOfs, fSize, fStrMax: longint;
   isFn: boolean;
-  bodyIdx: longint;
+  bodyIdx, retSz, retSM: longint;
+  liParams: TWasmParamArr;
+  liResults: TWasmResultArr;
   retTyp, retRef: longint;
   pTyp, pRef: TParamTypeArr;
   pVar, pConst: TParamFlagArr;
@@ -3484,6 +3498,22 @@ begin
       types[tIdx].elemSize := ObjRU32;
       types[tIdx].arrLo := ObjRU32;
       types[tIdx].arrHi := ObjRU32;
+    end
+    else if k = tyProc then begin
+      { Rebuild the signature index from the shape. Without this the
+        descriptor had no parameter count and the first call through an
+        imported procedural value reported the wrong arity. }
+      types[tIdx].elemSize := ObjRU32;
+      types[tIdx].arrLo := ObjRU32;
+      for p := 0 to types[tIdx].elemSize - 1 do
+        liParams[p] := WasmI32;
+      if types[tIdx].arrLo <> 0 then begin
+        liResults[0] := WasmI32;
+        types[tIdx].elemType :=
+          AddWasmType(types[tIdx].elemSize, liParams, 1, liResults);
+      end else
+        types[tIdx].elemType :=
+          AddWasmType(types[tIdx].elemSize, liParams, 0, liResults);
     end;
     sym := AddSym(tname, skType, k);
     syms[sym].typeIdx := tIdx;
@@ -3532,11 +3562,13 @@ begin
         retRef := localType[j]
       else
         retRef := -1;
+      retSz := ObjRU32;
+      retSM := ObjRU32;
       bodyIdx := ObjRU32;
       externBody[numExterns] := bodyIdx;
       externObj[numExterns] := loadingObj;
       DeclareImportedRoutine(unitName, nm, isFn, np, pTyp, pRef,
-                             pVar, pConst, retTyp, retRef);
+                             pVar, pConst, retTyp, retRef, retSz, retSM);
     end
     else
       Error('unknown record kind in ' + path);
@@ -6331,6 +6363,14 @@ begin
             pieceSaveBytes := 0;
           end;
           exprType := syms[exprCallSym].typ;
+          { A result's procedural signature comes from the declaration, and is
+            unknown rather than stale when there is none. Leaving whatever
+            the last designator set rejected a valid assignment. }
+          if (exprType = tyProc)
+             and (funcs[syms[exprCallSym].size].retTypeIdx >= 0) then
+            exprProcSig := types[funcs[syms[exprCallSym].size].retTypeIdx].elemType
+          else
+            exprProcSig := -1;
           if retBufSize > 0 then begin
             { The call returned nothing; the value of the expression is the
               buffer. It stays allocated until the statement ends, so its
@@ -14897,7 +14937,18 @@ begin
     ObjU32(types[tIdx].elemSize);
     ObjU32(types[tIdx].arrLo);
     ObjU32(types[tIdx].arrHi);
-  end;
+  end
+  else if types[tIdx].kind = tyProc then begin
+    { The shape, not the WASM signature index, for the reason a function
+      body carries its shape: an index means nothing in another module's
+      type section. The importer rebuilds it. }
+    ObjU32(types[tIdx].elemSize);   { visible parameters }
+    ObjU32(types[tIdx].arrLo);      { nonzero if it is a function }
+  end
+  else if types[tIdx].kind = tyInterface then
+    Error('an interface type cannot be exported from a unit yet: the ' +
+          'method table it needs does not travel in the object, so an ' +
+          'importer would get an interface with no methods');
 end;
 
 procedure WriteObject;
@@ -14984,6 +15035,11 @@ begin
       end;
       ObjByte(funcs[fi].retTyp);
       ObjTypeRef(funcs[fi].retTyp, funcs[fi].retTypeIdx);
+      { A structured result is written through a buffer the caller allocates
+        and sizes from these. Without them an importer allocated nothing and
+        emitted a memory.copy with one operand. }
+      ObjU32(funcs[fi].retSize);
+      ObjU32(funcs[fi].retStrMax);
       ObjU32(fi);          { which body implements it }
     end;
   end;
@@ -15152,6 +15208,13 @@ begin
         writeln(line);
       end;
     end
+    else if k = tyProc then begin
+      str(ObjRU32, num);
+      line := '    ' + num + ' params';
+      if ObjRU32 <> 0 then
+        line := line + ', returns a value';
+      writeln(line);
+    end
     else if k = tyArray then begin
       v := ObjRByte;
       line := '    of ' + TypeTagName(v);
@@ -15210,6 +15273,8 @@ begin
         if ref <> '' then
           line := line + ' ' + ref;
       end;
+      v := ObjRU32;   { result size }
+      v := ObjRU32;   { result strMax }
       v := ObjRU32;   { body index }
       writeln(line);
     end
@@ -15370,6 +15435,8 @@ begin
       end;
     end else if k = tyArray then begin
       v := ObjRByte; v := ObjRU32; v := ObjRU32; v := ObjRU32; v := ObjRU32;
+    end else if k = tyProc then begin
+      v := ObjRU32; v := ObjRU32;
     end;
   end;
   n := ObjRU32;
@@ -15384,7 +15451,7 @@ begin
       for p := 1 to np do begin
         v := ObjRByte; v := ObjRU32; v := ObjRByte; v := ObjRByte;
       end;
-      v := ObjRByte; v := ObjRU32; v := ObjRU32;
+      v := ObjRByte; v := ObjRU32; v := ObjRU32; v := ObjRU32; v := ObjRU32;
     end;
   end;
 end;

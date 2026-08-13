@@ -1,6 +1,7 @@
 unit OPS
 types 1
   proc TOP size 4
+    1 params, returns a value
 exports 2
   function TWICE(integer): integer
   function PICK(): proc TOP

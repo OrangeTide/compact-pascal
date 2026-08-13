@@ -82,6 +82,22 @@ for src in "$here"/link/*.pas; do
     name=$(basename "$src" .pas)
     unit="$here/link/$name.unit.pas"
     want="$here/link/$name.expected"
+    # A .unitfail pins a diagnostic the unit itself owes, for something a
+    # unit is not allowed to export.
+    unitfail="$here/link/$name.unitfail"
+    if [ -f "$unitfail" ]; then
+        if "$cpas" -c -o "$tmp/$name.cpo" < "$unit" 2>"$tmp/$name.uerr"; then
+            echo "FAIL $name (unit should have been refused)" >&2
+            fail=$((fail + 1))
+        elif ! grep -q -f "$unitfail" "$tmp/$name.uerr"; then
+            echo "FAIL $name (wrong unit refusal)" >&2
+            sed 's/^/  /' "$tmp/$name.uerr" >&2
+            fail=$((fail + 1))
+        else
+            echo "PASS $name"
+        fi
+        continue
+    fi
     if ! "$cpas" -c -o "$tmp/$name.cpo" < "$unit" 2>"$tmp/$name.uerr"; then
         echo "FAIL $name (unit)" >&2; sed 's/^/  /' "$tmp/$name.uerr" >&2
         fail=$((fail + 1)); continue
