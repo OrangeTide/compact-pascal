@@ -2188,7 +2188,46 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
-### Phase L2 review findings — all fixed
+### Phase L2 review findings
+
+Probed against the exit criterion rather than re-read. Eleven cases; four
+defects, one of which is the criterion itself not being met.
+
+**What holds.** Two units on one command line link and run. Recompiling one
+unit and relinking, without touching the other, produces a working program,
+which is the half of the exit criterion that matters most. An object named
+but never used costs nothing. A missing object, a file that is not an object,
+and a unit whose host imports differ from the program's are all refused with
+messages that name the problem. An `implement` block inside a unit's
+implementation section compiles, and `uses Files` after `interface` works.
+
+**1. A unit cannot depend on another unit.** `uses` is accepted only right
+after the header and after `interface`, not in an implementation section, and
+the linker refuses an object with unresolved externs anyway. So the exit
+criterion, *a three-unit program*, is met only for three units that do not
+call each other. This is the largest remaining gap and it is two pieces: let
+the implementation section open with `uses`, and resolve a unit's own externs
+during linking the way a program's are resolved.
+
+**2. A structured return across units emits an invalid module.** A unit
+exporting `function Make(a, b: integer): TP` produces, at the call site, a
+`memory.copy` with one operand instead of three. The result buffer is
+caller-allocated and sized from `retSize`, which the object does not carry
+and which `DeclareImportedRoutine` sets to zero. Carry `retSize` and
+`retStrMax` in the export record. This is the worst of the four: it is
+silent until validation, and a host that skips validation would run it.
+
+**3. A procedural type does not survive an object.** The type record writes
+kind, name, and size, and a `tyProc` descriptor keeps its signature in
+`elemType`, its parameter count in `elemSize`, and its is-a-function flag in
+`arrLo`, none of which are written. An imported `TOp` therefore reports the
+wrong argument count at the first call through it.
+
+**4. Two objects claiming the same unit are not diagnosed.** The first one
+named wins, silently. Refuse it: which object satisfied a `uses` should not
+depend on argument order.
+
+### Phase L2 review findings, first round — all fixed
 
 Probed rather than re-read, the same way Phase M was reviewed. Six small
 units, each doing one ordinary thing, found five defects. None was hard; all
