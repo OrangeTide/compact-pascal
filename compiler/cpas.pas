@@ -15615,6 +15615,15 @@ begin
     numDefinedFuncs := numDefinedFuncs + 1;
   end;
 
+  { Align before appending. A unit lays its data out from address 4 with
+    four-byte alignment, and a relocation maps its address v to
+    dataBase + v - 4, so that arithmetic only preserves alignment when
+    dataBase is a multiple of four. Without this an i32 field of an imported
+    record landed on an odd address and the program trapped. }
+  while (dataPos mod 4) <> 0 do begin
+    DataBufEmit(secData, 0);
+    dataPos := dataPos + 1;
+  end;
   dataBase := dataPos;
   n := ObjRU32;
   for i := 1 to n do
@@ -15656,6 +15665,13 @@ begin
     v := ObjRU32;
     if (j < 0) or (j >= nBodies) then
       Error('a relocation in ' + path + ' names a function that is not there');
+    { A call to a host import or to one of the 32 helper slots is not
+      rebased: those sit at the same index in every module this compiler
+      emits. The check existed before relocations were deferred and was lost
+      in the move, so an import call was rewritten to a neighbouring index
+      and the operand counts stopped matching. }
+    if (k = RelocFunc) and (v < numImports + 32) then
+      continue;
     if numLinkRelocs >= MaxRelocs then
       Error('too many relocations while linking');
     linkRKind[numLinkRelocs] := k;
@@ -15674,6 +15690,13 @@ begin
       linkRVal[numLinkRelocs] := v      { an index into this unit's externs }
     else
       Error('unknown relocation kind in ' + path);
+    if optDebug and (k <> RelocExtern) then begin
+      write(stderr, 'link: ', objArgUnit[objIdx], ' body ', j, ' at ', p);
+      if k = RelocFunc then write(stderr, ' func ')
+      else if k = RelocData then write(stderr, ' data ')
+      else write(stderr, ' table ');
+      writeln(stderr, v, ' -> ', linkRVal[numLinkRelocs]);
+    end;
     numLinkRelocs := numLinkRelocs + 1;
   end;
   close(objFile);

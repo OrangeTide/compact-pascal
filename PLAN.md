@@ -2188,40 +2188,41 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
-### Phase L2 review findings, third round
+### Phase L2 review findings, third round — all fixed
 
 1. **A unit's dependency resolved through the importing program's scope.**
-   Fixed. Each object's export table is recorded while it is placed, and an
-   extern resolves against that rather than against `LookupSym`. The linker
-   also places transitively now: a program that imports Left, where Left
-   calls into Base, gets Base placed from naming `base.cpo` alone. Placement
-   repeats until nothing new turns up, because a dependency may be
-   discovered only after the unit naming it has been read.
+   Each object's export table is recorded while it is placed, and an extern
+   resolves against that rather than against `LookupSym`. The linker also
+   places transitively: a program that imports Left, where Left calls into
+   Base, gets Base placed from naming `base.cpo` alone. Placement repeats
+   until nothing new turns up, because a dependency can be discovered only
+   after the unit naming it has been read.
 
-2. **Object order on the command line still changes the result, and the
-   failing orders emit a module that fails validation rather than a
-   diagnostic.** Not fixed. What is known:
+2. **Object order on the command line changed the result.** Two causes, and
+   the debug print found both in one run after a turn of reasoning had found
+   neither.
 
-   - The extern indices are right. A trace prints `placed LEFT base 37`,
-     `placed BASE base 38`, `BASE.SAY body 1 -> 39`, and the module declares
-     `func[39] sig=1`, which is `(i32) -> nil`, correct for `Say`.
-   - So the wrong thing is not which function a call reaches, nor the
-     signature that function is declared with. `wasm-validate` reports a call
-     expecting `[i32, i32]` and getting `[i32]`, somewhere the trace does not
-     cover, which points at a call site that is not an extern: a helper call,
-     or a call the placement pass rebased.
-   - The two failing shapes are the same one: a unit placed before the unit
-     it calls into. `base.cpo left.cpo right.cpo` works and
-     `right.cpo left.cpo base.cpo` does not.
+   The skip for calls to host imports and helper slots was lost when
+   relocations were deferred. Those sit at the same index in every module and
+   must not be rebased; the deferred path rebased them anyway, turning a call
+   to import 0 into a call to import 1, whose signature differs. That is the
+   `[i32, i32]` against `[i32]` the validator was reporting, and it was a
+   check that had existed and was dropped in a refactor.
 
-   Next step is a print of every non-extern relocation the placement pass
-   applies, with the body it lands in, which is the one class the current
-   trace omits.
+   Under that was an alignment bug. A unit lays its data out from address 4
+   with four-byte alignment, and a relocation maps its address `v` to
+   `dataBase + v - 4`, which preserves alignment only when `dataBase` is a
+   multiple of four. Appending one unit's data after another's left it odd,
+   and an `i32` field of an imported record landed on an unaligned address.
+   The appended data is padded now.
 
 3. **The diagnostic advised naming the object, which was not sufficient.**
-   Fixed, and it is now true: naming the object is sufficient, so the
-   message says an object holding that unit is missing from the command
-   line.
+   Now it is sufficient, and the message says an object holding that unit is
+   missing from the command line.
+
+Covered by l008: a diamond where the program imports only the two arms, so
+the shared dependency is placed transitively and its data alignment is
+exercised.
 
 ### Phase L2 review findings, second round
 
