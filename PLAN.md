@@ -2188,37 +2188,49 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
-### The snapshot cannot link — found by taking the linker to the Rust crate
+### The snapshot cannot link — narrowed, not yet fixed
 
-The crate gained `Options::unit_dir` and `Options::objects`, which pass object
-names as bare arguments and preopen the directory holding them, confined the
-same way include paths are. That part works and its refusal test passes.
-
-The linking test does not, and the cause is not in the crate. **An object path
-given on the command line arrives empty when the compiler runs as WASM.**
-`FindObjectArg` reports `cannot read object file: ` with no name after it.
-Reproducible with no Rust involved:
+`ParamStr` and `ParamCount` are not the bug. A program that dumps its own
+arguments, compiled by this compiler and run under wasmtime, reports them
+exactly:
 
 ```
-$ wasmtime run --dir=. snapshot/compiler.wasm base.cpo < prog.pas
-Error: 2:10: cannot read object file:
+count=2
+0 len=7 [pc.wasm]
+1 len=6 [-debug]
+2 len=8 [base.cpo]
 ```
 
-The native compiler links the same objects correctly, so this is argument
-handling under WASI rather than anything in the linker or the object format.
-Everything in four rounds of review was tested through the native binary, and
-the snapshot is what every host actually runs, so the whole of Phase L2 is
-currently reachable only from the command line.
+The compiler's own option loop nonetheless ends up with **two** objects where
+there is one. A print inside `FindObjectArg` shows, running as WASM:
 
-Worth noting what this says about the reviews: each round probed harder at
-the same surface, and none of them changed hosts. The gap was recorded at the
-end of the fourth round as untested, and testing it took one command.
+```
+obj[0] len=8 [base.cpo]
+obj[1] len=0 []
+```
 
-Next: find why `ParamStr` yields an empty string for a bare argument under
-WASI when `-c` and `-o` on the same command line work. The args intrinsic
-reads argv into a buffer at startup; a length or an index is the likely
-culprit, and printing what the compiler thinks its arguments are is the first
-step.
+and running natively, from the same command line, only `obj[0]`. The empty
+second entry is what fails to open, and it is why the diagnostic named no
+file: it was printing an empty string, not losing a good one.
+
+So the fault is between a correct argv and the loop that reads it, in the
+compiled compiler only. What is known:
+
+- The bare-argument branch is guarded by `IsBareArg`, which returns false for
+  an empty string, so an empty argument cannot have been added by the branch
+  as written. Something either adds an entry twice or the guard sees a
+  different string than the assignment does.
+- `IsBareArg` takes `const s: string`, which passes by reference, and its
+  argument is the result of a function returning a string. The if-chain calls
+  `ParamStr(i)` once per comparison, roughly twenty times in one statement,
+  each allocating a result buffer released at the end of the statement. That
+  is the most complicated thing in the loop and the first place to look.
+- The same pattern in a small program works, so whatever it is depends on
+  something the compiler has and the small program does not.
+
+Next: print `i`, `numObjArgs`, and the string at the moment the bare-argument
+branch fires, which distinguishes "the branch ran twice" from "the branch ran
+once and stored the wrong thing".
 
 ### Phase L2 review findings, fourth round
 

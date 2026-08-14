@@ -3143,6 +3143,11 @@ begin
       {$I-}
       reset(objFile);
       {$I+}
+      if optDebug then begin
+        write(stderr, 'obj[', i, '] len=', length(objArgPath[i]), ' [');
+        write(stderr, objArgPath[i]);
+        writeln(stderr, ']');
+      end;
       if IOResult <> 0 then
         Error('cannot read object file: ' + objArgPath[i]);
       saved := objReadPath;
