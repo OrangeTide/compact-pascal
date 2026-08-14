@@ -2190,40 +2190,38 @@ else depends on.
       t126, n030, n031.
 ### Phase L2 review findings, third round
 
-Probed the unit-to-unit work. Four cases, three defects, and the test that
-was supposed to prove the exit criterion passes for a reason narrower than it
-looks.
+1. **A unit's dependency resolved through the importing program's scope.**
+   Fixed. Each object's export table is recorded while it is placed, and an
+   extern resolves against that rather than against `LookupSym`. The linker
+   also places transitively now: a program that imports Left, where Left
+   calls into Base, gets Base placed from naming `base.cpo` alone. Placement
+   repeats until nothing new turns up, because a dependency may be
+   discovered only after the unit naming it has been read.
 
-1. **A unit's dependency resolves through the importing program's scope.**
-   `ApplyLinkRelocations` resolves an extern with `LookupSym`, so unit Left
-   calling `Base.Say` works only when the *program* also says `uses Base`.
-   Naming `base.cpo` on the command line is not enough. A program should not
-   have to import a unit it never mentions in order for a unit it does import
-   to work. The fix is to resolve against the exporting object's own export
-   table, which the linker should record while placing rather than borrowing
-   the program's symbol table.
+2. **Object order on the command line still changes the result, and the
+   failing orders emit a module that fails validation rather than a
+   diagnostic.** Not fixed. What is known:
 
-   The l007 test passes because its program uses all three units. That is a
-   real case and worth keeping, but it does not test what its name suggests,
-   and a second test where the program imports only the top of the chain
-   would have caught this.
+   - The extern indices are right. A trace prints `placed LEFT base 37`,
+     `placed BASE base 38`, `BASE.SAY body 1 -> 39`, and the module declares
+     `func[39] sig=1`, which is `(i32) -> nil`, correct for `Say`.
+   - So the wrong thing is not which function a call reaches, nor the
+     signature that function is declared with. `wasm-validate` reports a call
+     expecting `[i32, i32]` and getting `[i32]`, somewhere the trace does not
+     cover, which points at a call site that is not an extern: a helper call,
+     or a call the placement pass rebased.
+   - The two failing shapes are the same one: a unit placed before the unit
+     it calls into. `base.cpo left.cpo right.cpo` works and
+     `right.cpo left.cpo base.cpo` does not.
 
-2. **Object order on the command line changes the result.** With the program
-   importing all three units of a diamond, `base.cpo left.cpo right.cpo`
-   links and runs, and `right.cpo left.cpo base.cpo` emits a module that
-   fails validation with a block type mismatch. A build script should not
-   have to topologically sort its objects, and an order that produces a bad
-   module rather than a diagnostic is the worse half of it. Separate from the
-   first finding: every unit is imported here, so scope is not the issue.
+   Next step is a print of every non-extern relocation the placement pass
+   applies, with the body it lands in, which is the one class the current
+   trace omits.
 
-3. **The diagnostic for the first case gives advice that does not work.** It
-   says to name the unit's object on the command line and use it; naming it
-   is not sufficient, and the sentence reads as though it were. Once the
-   first finding is fixed this message should mostly disappear, and whatever
-   remains of it should say what actually helps.
-
-What held: a diamond where the program imports every unit, and recompiling
-one unit of a three-unit chain and relinking without touching the others.
+3. **The diagnostic advised naming the object, which was not sufficient.**
+   Fixed, and it is now true: naming the object is sufficient, so the
+   message says an object holding that unit is missing from the command
+   line.
 
 ### Phase L2 review findings, second round
 

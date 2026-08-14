@@ -257,6 +257,7 @@ const
   ExternFuncBase = 1000000;  { placeholder indices for unresolved routines }
   MaxExterns  = 128;
   MaxObjArgs  = 16;   { objects named on one command line }
+  MaxLinkSyms = 256;  { routines exported across all linked objects }
   { IOResult codes above the host's range. WASI preview 1 errnos stop well
     below 200, so a language-defined code cannot be mistaken for one. }
   IOErrPastEof = 200;
@@ -662,6 +663,7 @@ var
   emitRelocatable: boolean;   (* output must be patchable by the linker *)
   isUnit: boolean;            (* the source began with a unit header *)
   linkI, linkJ: longint;
+  linkProgress: boolean;
   pendingUnitBlock: boolean;  (* the next ParseBlock is a unit's top level *)
   inUnitImpl: boolean;        (* parsing a unit implementation section *)
   inUnitInterface: boolean;   (* parsing a unit interface section *)
@@ -678,12 +680,16 @@ var
   numObjArgs: longint;
   objFuncBase: array[0..MaxObjArgs-1] of longint;
   objArgLinked: array[0..MaxObjArgs-1] of boolean;
+  objArgPlaced: array[0..MaxObjArgs-1] of boolean;
   loadingObj: longint;
   objExternFirst: array[0..MaxObjArgs-1] of longint;
   linkExUnit, linkExName: array[0..MaxExterns-1] of string[63];
   numLinkExterns: longint;
   linkRKind, linkRAt, linkRVal, linkRObj: array[0..MaxRelocs-1] of longint;
   numLinkRelocs: longint;
+  linkSymUnit, linkSymName: array[0..MaxLinkSyms-1] of string[63];
+  linkSymBody, linkSymIdx: array[0..MaxLinkSyms-1] of longint;
+  numLinkSyms: longint;
   externUnit: array[0..MaxExterns-1] of string[63];
   externName: array[0..MaxExterns-1] of string[63];
   numExterns: longint;
@@ -15472,8 +15478,14 @@ begin
     b.data[at + 4] := (value shr 28) and $7F;
 end;
 
-procedure SkipObjectInterface;
-{** Step over the part of an object the first pass already read. }
+procedure SkipObjectInterface(const unitName: string);
+{** Step over the types the first pass already read, and record what this
+  object exports.
+
+  The export table is what a unit's call into another unit resolves against.
+  Resolving through the importing program's symbol table instead meant a
+  program had to import a unit it never mentions so that a unit it does
+  import would work. }
 var n, i, k, np, p, v: longint;
   nm: string;
 begin
@@ -15506,7 +15518,13 @@ begin
       for p := 1 to np do begin
         v := ObjRByte; v := ObjRU32; v := ObjRByte; v := ObjRByte;
       end;
-      v := ObjRByte; v := ObjRU32; v := ObjRU32; v := ObjRU32; v := ObjRU32;
+      v := ObjRByte; v := ObjRU32; v := ObjRU32; v := ObjRU32;
+      if numLinkSyms >= MaxLinkSyms then
+        Error('too many routines exported between units');
+      linkSymUnit[numLinkSyms] := unitName;
+      linkSymName[numLinkSyms] := nm;
+      linkSymBody[numLinkSyms] := ObjRU32;
+      numLinkSyms := numLinkSyms + 1;
     end;
   end;
 end;
@@ -15522,7 +15540,7 @@ procedure LinkObject(objIdx: longint);
 var
   n, i, j, k, np, p, v, dataBase, funcBase, slotBase: longint;
   nm, path: string;
-  nprm, nres, sigIdx: longint;
+  nprm, nres, sigIdx, symFirst: longint;
   lkParams: TWasmParamArr;
   lkResults: TWasmResultArr;
   bodyAt: array[0..MaxFuncs-1] of longint;
@@ -15539,7 +15557,8 @@ begin
   for i := 0 to 3 do
     v := ObjRByte;
   nm := ObjRStr;
-  SkipObjectInterface;
+  symFirst := numLinkSyms;
+  SkipObjectInterface(nm);
 
   { Import indices are positional and are fixed before parsing, so a unit
     that uses Files and a program that does not disagree about every
@@ -15559,6 +15578,12 @@ begin
     where it landed. }
   funcBase := numImports + numDefinedFuncs;
   objFuncBase[objIdx] := funcBase;
+  { The exports recorded above hold body ordinals. Now that this object's
+    base is known they become final indices. }
+  for i := symFirst to numLinkSyms - 1 do
+    linkSymIdx[i] := funcBase + linkSymBody[i];
+  if optDebug then
+    writeln(stderr, 'link: placed ', objArgUnit[objIdx], ' base ', funcBase);
   nBodies := ObjRU32;
   for i := 0 to nBodies - 1 do begin
     nm := ObjRStr;
@@ -15654,29 +15679,50 @@ begin
   close(objFile);
 end;
 
+function FindObjectByUnit(const unitName: string): longint;
+{** Which object holds this unit, by the name recorded inside it, or -1.
+  Unlike FindObjectArg this reads nothing: names are all read the first time
+  a uses clause looks one up. }
+var i: longint;
+begin
+  FindObjectByUnit := -1;
+  for i := 0 to numObjArgs - 1 do
+    if objArgUnit[i] = unitName then begin
+      FindObjectByUnit := i;
+      exit;
+    end;
+end;
+
 procedure ApplyLinkRelocations;
 {** Apply every deferred relocation, once all objects are placed.
 
   A unit's call into another unit is resolved by name against what the
   program has in scope, which is where an imported routine's placeholder
   already points at the right final index. }
-var i, sym, e: longint;
+var i, j, sym, e: longint;
 begin
   for i := 0 to numLinkRelocs - 1 do begin
     if linkRKind[i] = RelocExtern then begin
       e := objExternFirst[linkRObj[i]] + linkRVal[i];
-      sym := LookupSym(linkExName[e]);
+      { Resolved against what the objects export, not against what the
+        program has in scope. Going through the program's symbol table meant
+        a program had to import a unit it never mentions so that a unit it
+        does import could call into it. }
+      sym := -1;
+      for j := 0 to numLinkSyms - 1 do
+        if (linkSymUnit[j] = linkExUnit[e])
+           and (linkSymName[j] = linkExName[e]) then begin
+          sym := j;
+          break;
+        end;
       if sym < 0 then
-        Error('unit ' + objArgUnit[linkRObj[i]] + ' calls ' +
-              linkExName[e] + ' from ' + linkExUnit[e] +
-              ', which this program does not import; name that unit''s ' +
-              'object on the command line and use it');
-      if syms[sym].offset < ExternFuncBase then
-        Error(linkExName[e] + ' resolved to something that is not a routine ' +
-              'imported from a unit');
-      PatchPadded(funcBodies, linkRAt[i],
-                  objFuncBase[externObj[syms[sym].offset - ExternFuncBase]]
-                  + externBody[syms[sym].offset - ExternFuncBase]);
+        Error('unit ' + objArgUnit[linkRObj[i]] + ' calls ' + linkExName[e] +
+              ' from ' + linkExUnit[e] + ', and no object on the command ' +
+              'line holds unit ' + linkExUnit[e]);
+      if optDebug then
+        writeln(stderr, 'link: ', linkExUnit[e], '.', linkExName[e],
+                ' body ', linkSymBody[sym], ' -> ', linkSymIdx[sym]);
+      PatchPadded(funcBodies, linkRAt[i], linkSymIdx[sym]);
     end else
       PatchPadded(funcBodies, linkRAt[i], linkRVal[i]);
   end;
@@ -15951,6 +15997,7 @@ begin
   numExternCalls := 0;
   numLinkExterns := 0;
   numLinkRelocs := 0;
+  numLinkSyms := 0;
   { The main body is _start, which is not a funcs[] entry. Left at zero this
     attributed every relocation in the main body to funcs[0]. }
   curFuncIdx := -1;
@@ -16247,9 +16294,28 @@ begin
       its unit has been placed. }
     if numObjArgs > 0 then
       ForceAllHelpers;
-    for linkI := 0 to numObjArgs - 1 do
-      if objArgLinked[linkI] then
-        LinkObject(linkI);
+    { Place what the program imports, then whatever those units call into,
+      until nothing new turns up. A unit's dependency has to be placed even
+      when the program never mentions it: the program imports Left, Left
+      calls into Base, and Base has to be in the module for that call to
+      land anywhere. Naming base.cpo is the whole of what a build script
+      should have to do. }
+    repeat
+      linkProgress := false;
+      for linkI := 0 to numObjArgs - 1 do
+        if objArgLinked[linkI] and not objArgPlaced[linkI] then begin
+          objArgPlaced[linkI] := true;
+          LinkObject(linkI);
+          linkProgress := true;
+        end;
+      for linkI := 0 to numLinkExterns - 1 do begin
+        linkJ := FindObjectByUnit(linkExUnit[linkI]);
+        if (linkJ >= 0) and not objArgLinked[linkJ] then begin
+          objArgLinked[linkJ] := true;
+          linkProgress := true;
+        end;
+      end;
+    until not linkProgress;
     ApplyLinkRelocations;
     for linkI := 0 to numRelocs - 1 do
       if relocKind[linkI] = RelocExtern then begin
