@@ -99,6 +99,33 @@ impl CompileResult {
 ///
 /// The defaults match the compiler's own defaults, so `Options::default()`
 /// compiles exactly as the `cpas` binary does with no arguments.
+/// Reject an object name that could reach outside the unit directory.
+///
+/// The same rule include paths follow, and for the same reason: the compiler
+/// resolves the name against a preopened directory, and a name containing
+/// `..` or an absolute path would leave it.
+fn check_object_name(name: &str) -> Result<(), CompileError> {
+    if name.is_empty() {
+        return Err(CompileError::Instantiation("an object name may not be empty".to_string()));
+    }
+    for component in std::path::Path::new(name).components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(CompileError::Instantiation(format!(
+                    "{name}: an object name may not contain '..'"
+                )))
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(CompileError::Instantiation(format!(
+                    "{name}: an object name must be relative to the unit directory"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Runtime range checks on array indexing and subrange assignment
@@ -117,6 +144,22 @@ pub struct Options {
     /// Setting it passes `-I` and grants the compiler that one directory,
     /// confined the same way `expand_includes` confines its own.
     pub include_dir: Option<std::path::PathBuf>,
+    /// Directory the compiler may read separately compiled unit objects
+    /// (`.cpo`) from. `None`, the default, means a program may not import a
+    /// Pascal unit: only the system units are available.
+    ///
+    /// Objects are named in `objects` relative to this directory, confined
+    /// the same way includes are. If `include_dir` is also set the two must
+    /// name the same directory, because a module gets one preopen.
+    pub unit_dir: Option<std::path::PathBuf>,
+    /// Objects to link against, as file names relative to `unit_dir`.
+    ///
+    /// Naming an object a program never imports costs nothing: the compiler
+    /// reads its unit name to see whether a `uses` clause wants it, and
+    /// links only what is reached. A unit's own dependencies are pulled in
+    /// whether or not the program mentions them, so a build script names
+    /// every object it built without working out which are needed.
+    pub objects: Vec<String>,
 }
 
 impl Default for Options {
@@ -127,6 +170,8 @@ impl Default for Options {
             defines: Vec::new(),
             verbose: false,
             include_dir: None,
+            unit_dir: None,
+            objects: Vec::new(),
         }
     }
 }
@@ -145,6 +190,11 @@ impl Options {
         }
         for d in &self.defines {
             args.push(format!("-d{d}"));
+        }
+        // Objects come last, as bare arguments. The compiler takes anything
+        // not starting with a dash as an object to link against.
+        for o in &self.objects {
+            args.push(o.clone());
         }
         args
     }
@@ -193,7 +243,23 @@ impl Compiler {
         let mut ctx = WasiContext::new();
         ctx.stdin = StdioBuffer::from_bytes(source.as_bytes());
         ctx.args = self.options.to_args();
-        ctx.preopen_dir = self.options.include_dir.clone();
+        // One preopen serves both includes and objects. Which one it is
+        // depends on what the host asked for, and asking for two different
+        // directories is refused rather than silently granting one.
+        for o in &self.options.objects {
+            check_object_name(o)?;
+        }
+        ctx.preopen_dir = match (&self.options.unit_dir, &self.options.include_dir) {
+            (Some(u), Some(i)) if u != i => {
+                return Err(CompileError::Instantiation(
+                    "unit_dir and include_dir must name the same directory: \
+                     a compiled module gets one preopened directory"
+                        .to_string(),
+                ))
+            }
+            (Some(u), _) => Some(u.clone()),
+            (None, i) => i.clone(),
+        };
         let mut store = wasmi::Store::new(&engine, ctx);
 
         let module = Module::new(&engine, self.snapshot)

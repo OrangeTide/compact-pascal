@@ -2188,6 +2188,38 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### The snapshot cannot link — found by taking the linker to the Rust crate
+
+The crate gained `Options::unit_dir` and `Options::objects`, which pass object
+names as bare arguments and preopen the directory holding them, confined the
+same way include paths are. That part works and its refusal test passes.
+
+The linking test does not, and the cause is not in the crate. **An object path
+given on the command line arrives empty when the compiler runs as WASM.**
+`FindObjectArg` reports `cannot read object file: ` with no name after it.
+Reproducible with no Rust involved:
+
+```
+$ wasmtime run --dir=. snapshot/compiler.wasm base.cpo < prog.pas
+Error: 2:10: cannot read object file:
+```
+
+The native compiler links the same objects correctly, so this is argument
+handling under WASI rather than anything in the linker or the object format.
+Everything in four rounds of review was tested through the native binary, and
+the snapshot is what every host actually runs, so the whole of Phase L2 is
+currently reachable only from the command line.
+
+Worth noting what this says about the reviews: each round probed harder at
+the same surface, and none of them changed hosts. The gap was recorded at the
+end of the fourth round as untested, and testing it took one command.
+
+Next: find why `ParamStr` yields an empty string for a bare argument under
+WASI when `-c` and `-o` on the same command line work. The args intrinsic
+reads argv into a buffer at startup; a length or an index is the likely
+culprit, and printing what the compiler thinks its arguments are is the first
+step.
+
 ### Phase L2 review findings, fourth round
 
 Fourteen cases, no correctness defects. Recording that as carefully as the
