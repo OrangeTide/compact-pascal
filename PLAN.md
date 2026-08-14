@@ -2188,6 +2188,42 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 review findings, fifth round
+
+Aimed at the two things the fourth round named as untested, plus the class of
+bug the for-loop fault belonged to. No defects.
+
+**The snapshot was made to run the link tests, not just the native binary.**
+That is the systematic version of what the fourth round missed by hand: every
+single-unit case, the three-unit chain, the diamond, and the interface-export
+refusal, all driven through `wasmtime run --dir=. snapshot/compiler.wasm`.
+Every one matches the native compiler. The check-objects harness cannot be
+pointed at the snapshot as it stands, because it writes objects to an
+absolute temporary path and one preopened directory cannot serve those; the
+sweep was run by hand against the same test sources.
+
+**Objects and linked modules are byte-identical**, compiled twice natively,
+and compiled natively against compiled by the snapshot. That closes the
+determinism question the fourth round raised: a linked module is as
+reproducible as a single-file one.
+
+**The for-loop fault was a compile-time index standing in for a run-time
+resource, so the same shape was looked for elsewhere.** Sixteen-deep nesting,
+a loop inside a nested procedure, a loop whose limit is a call, and a
+recursive routine called from inside two loops all behave. So do the other
+per-function scratch resources under the same stress: a set expression whose
+operand calls a routine doing set arithmetic, string temporaries across two
+calls in one expression, a `with` whose body calls a routine containing its
+own `with`, and a `with` around a loop around a call. Those were saved and
+restored across calls already, which is why they hold and the loop limit did
+not.
+
+**What is still untested**, carried forward: no unit has been linked by a
+host other than the command line and the Rust crate; `check-objects` cannot
+drive the snapshot without a preopen it can reach; and nothing exercises a
+unit compiled by one version of the compiler and linked by another, which is
+the failure a build system is most likely to produce by accident.
+
 ### The snapshot cannot link — narrowed, not yet fixed
 
 `ParamStr` and `ParamCount` are not the bug. A program that dumps its own
