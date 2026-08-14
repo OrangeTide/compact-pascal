@@ -2188,6 +2188,38 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 review findings, fourth round
+
+Fourteen cases, no correctness defects. Recording that as carefully as the
+rounds that found things, because a clean review is the weaker claim: it says
+these cases pass, not that the phase is right.
+
+**Passed, and now known to work rather than assumed:** procedural values from
+two different units, whose table slots are numbered from 1 in each and must
+not collide; scalar and structured typed constants in a unit; `New` and
+`Dispose` inside a unit; a string-returning function called across a unit
+boundary; a unit compiled with `{$ALIGN 8}`; a unit compiled `-S-` linked into
+a program compiled `-S+`; a four-unit chain with the objects named in reverse
+dependency order; a unit name written in a different case from the header;
+and an importer built against a stale object whose interface has since
+changed, which reports the argument count rather than miscompiling.
+
+**Two diagnostics that are correct and misleading.** A unit that uses itself,
+and two units that use each other, are both refused with "unknown unit",
+because no object on the command line holds the name. That is true and it is
+not the useful thing to say. The self-reference case should say a unit cannot
+use itself. The mutual case cannot arise any other way: neither object can be
+built first, so an interface cycle is impossible by construction rather than
+by a check, which settles a question the design left open and should be
+written down as the answer.
+
+**What four rounds of probing have not covered**, and what a fifth should
+start from: no unit has been linked by the Rust crate or any host other than
+the command line; nothing checks that a linked module is deterministic the
+way `check-determinism` does for a single file; and the alignment fix pads to
+four bytes, which is sufficient only because no value in this language needs
+more, so it is a fact about the language rather than about the linker.
+
 ### Phase L2 review findings, third round — all fixed
 
 1. **A unit's dependency resolved through the importing program's scope.**
