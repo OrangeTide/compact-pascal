@@ -414,18 +414,7 @@ fn a_program_can_be_granted_a_directory_to_write_in() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Ignored: the snapshot cannot link. An object path given on the command
-/// line arrives empty when the compiler runs as WASM, so FindObjectArg
-/// reports "cannot read object file: " with no name. Reproducible without
-/// this crate:
-///
-///     wasmtime run --dir=. snapshot/compiler.wasm base.cpo < prog.pas
-///
-/// The native compiler links the same objects correctly, so this is argument
-/// handling under WASI rather than anything in the linker. Un-ignore once
-/// that is fixed; everything else in this test is known to work.
 #[test]
-#[ignore]
 fn a_program_can_link_against_a_separately_compiled_unit() {
     use compact_pascal::{Compiler, Options};
     use std::io::Write;

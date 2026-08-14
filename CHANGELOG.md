@@ -166,6 +166,17 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **A `for` loop whose body called a routine containing its own `for` loop
+  ran the wrong number of times.** The loop limit lived in a data slot
+  indexed by lexical nesting depth, and a lexical index is not unique at run
+  time: a loop in a called routine had the same depth as the caller's and
+  overwrote its limit. A loop that should have run once ran eight times. The
+  limit now lives in a local of the enclosing routine, which is per
+  invocation, so neither a call nor recursion can reach another frame's.
+
+  This affected every program the compiler produced, including its own
+  snapshot, and is why the snapshot behaved differently from the
+  fpc-built compiler.
 - **Closing a file that was written and then read appended a second copy of
   the data.** The buffer flush wrote whatever byte count the control block
   held, and the read path uses that same field for the bytes it has

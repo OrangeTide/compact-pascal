@@ -627,6 +627,8 @@ var
   curRecvTempIdx: longint;        { first of MaxRecvDepth receiver locals }
   recvDepth: longint;             { how many method calls are being parsed }
   curFuncNeedsRecvTemp: boolean;  { whether current func needs the receiver temp }
+  curForTempIdx: longint;         { first of 16 for-loop limit locals }
+  curFuncNeedsForTemp: boolean;
   curFuncIsFunction: boolean;    { whether current func is a function (has return value) }
   curFuncReturnIdx: longint;     { WASM local index for return value in current func }
   curFuncRetStructured: boolean; { current function returns via a caller buffer }
@@ -3133,6 +3135,8 @@ var
   saved: string;
 begin
   FindObjectArg := -1;
+  if optDebug then
+    writeln(stderr, 'find: numObjArgs=', numObjArgs, ' want=', unitName);
   { Every name is read on the first call rather than each on demand. The
     demand version could not see a duplicate: the second object's name had
     not been read yet when the first matched. Sixteen objects is the most a
@@ -9177,10 +9181,16 @@ begin
         { Each nesting level gets its own limit scratch address }
         if forLimitDepth > 15 then
           Error('for loops nested too deeply');
-        limitAddr := EnsureForLimit(forLimitDepth);
-        EmitI32Const(limitAddr);
+        { The limit lives in a local of this function, indexed by lexical
+          nesting depth. It used to live in a data slot indexed the same
+          way, and a lexical index is not unique at run time: a loop in a
+          called function had the same depth as the caller's loop and
+          overwrote its limit. Locals are per invocation, so a call cannot
+          reach the caller's. }
+        curFuncNeedsForTemp := true;
+        limitAddr := curForTempIdx + forLimitDepth;
         ParseExpression(PrecNone);
-        EmitI32Store(2, 0);
+        EmitLocalSet(limitAddr);
 
         Expect(tkDo);
 
@@ -9204,8 +9214,7 @@ begin
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
-        EmitI32Const(limitAddr);
-        EmitI32Load(2, 0);
+        EmitLocalGet(limitAddr);
         EmitOp(OpI32GtS);
         EmitOp(OpBrIf);
         EmitULEB128(startCode, 1);
@@ -9245,10 +9254,10 @@ begin
         NextToken;
         if forLimitDepth > 15 then
           Error('for loops nested too deeply');
-        limitAddr := EnsureForLimit(forLimitDepth);
-        EmitI32Const(limitAddr);
+        curFuncNeedsForTemp := true;
+        limitAddr := curForTempIdx + forLimitDepth;
         ParseExpression(PrecNone);
-        EmitI32Store(2, 0);
+        EmitLocalSet(limitAddr);
         Expect(tkDo);
 
         EmitOp(OpBlock);
@@ -9261,8 +9270,7 @@ begin
         EmitI32Const(syms[sym].offset);
         EmitOp(OpI32Add);
         EmitI32Load(2, 0);
-        EmitI32Const(limitAddr);
-        EmitI32Load(2, 0);
+        EmitLocalGet(limitAddr);
         EmitOp(OpI32LtS);
         EmitOp(OpBrIf);
         EmitULEB128(startCode, 1);
@@ -9539,6 +9547,8 @@ var
   savedCaseTempIdx: longint;
   savedFuncIdx: longint;
   savedRecvTempIdx: longint;
+  savedForTempIdx: longint;
+  savedFuncNeedsForTemp: boolean;
   savedFuncNeedsRecvTemp: boolean;
   savedFuncNeedsCaseTemp: boolean;
   savedFuncIsFunction: boolean;
@@ -10046,6 +10056,9 @@ begin
   savedRecvTempIdx := curRecvTempIdx;
   savedFuncNeedsRecvTemp := curFuncNeedsRecvTemp;
   curFuncNeedsRecvTemp := false;
+  savedForTempIdx := curForTempIdx;
+  savedFuncNeedsForTemp := curFuncNeedsForTemp;
+  curFuncNeedsForTemp := false;
   savedFuncIsFunction := curFuncIsFunction;
   savedFuncReturnIdx := curFuncReturnIdx;
   curFuncIsFunction := isFunc;
@@ -10095,6 +10108,7 @@ begin
     the receiver the outer call is still holding. The depth is a compile-time
     count, so the bank costs nothing at run time. }
   curRecvTempIdx := curCaseTempIdx + 1;
+  curForTempIdx := curRecvTempIdx + MaxRecvDepth;
 
   { Enter scope for procedure body }
   EnterScope;
@@ -10227,7 +10241,9 @@ begin
     nlocals := 2; { return value + saved display }
   { A structured result lives in the hidden trailing parameter, not in a
     declared local, so index np is already accounted for by nparams. }
-  if curFuncNeedsRecvTemp then
+  if curFuncNeedsForTemp then
+    nlocals := nlocals + 2 + MaxRecvDepth + 16  { plus the for-limit bank }
+  else if curFuncNeedsRecvTemp then
     nlocals := nlocals + 2 + MaxRecvDepth  { string, case, receiver bank }
   else if curFuncNeedsCaseTemp then
     nlocals := nlocals + 2  { string temp + case temp }
@@ -10241,6 +10257,8 @@ begin
   curFuncIdx := savedFuncIdx;
   curRecvTempIdx := savedRecvTempIdx;
   curFuncNeedsRecvTemp := savedFuncNeedsRecvTemp;
+  curForTempIdx := savedForTempIdx;
+  curFuncNeedsForTemp := savedFuncNeedsForTemp;
   curFuncNeedsCaseTemp := savedFuncNeedsCaseTemp;
   curFuncIsFunction := savedFuncIsFunction;
   curFuncReturnIdx := savedFuncReturnIdx;
@@ -15544,7 +15562,7 @@ procedure LinkObject(objIdx: longint);
   landed. Its table entries are appended and its slots renumbered. }
 var
   n, i, j, k, np, p, v, dataBase, funcBase, slotBase: longint;
-  nm, path: string;
+  nm, nm2, path: string;
   nprm, nres, sigIdx, symFirst: longint;
   lkParams: TWasmParamArr;
   lkResults: TWasmResultArr;
@@ -15569,14 +15587,22 @@ begin
     that uses Files and a program that does not disagree about every
     function index above the imports. Renumbering them is possible and is
     not done, so the mismatch is refused. }
+  { The unit's imports must be the program's first n, in order. Import
+    indices are positional, so the unit's calls only land correctly if the
+    two agree on every index the unit uses. A program may declare more, as
+    it does when it imports a host function of its own, because those come
+    after and shift nothing below them. }
   n := ObjRU32;
-  for i := 1 to n do begin
-    nm := ObjRStr; nm := ObjRStr; v := ObjRU32;
+  for i := 0 to n - 1 do begin
+    nm := ObjRStr;
+    nm2 := ObjRStr;
+    v := ObjRU32;
+    if (i >= numImports) or (imports[i].modname <> nm)
+       or (imports[i].fieldname <> nm2) then
+      Error('unit ' + objArgUnit[objIdx] + ' needs host import ' + nm +
+            '.' + nm2 + ' where this program has something else; both must ' +
+            'use Files or neither');
   end;
-  if n <> numImports then
-    Error('unit ' + objArgUnit[objIdx] + ' declares' +
-          ' host imports and this program declares a different number' +
-          '; both must use Files or neither');
 
   { numDefinedFuncs already counts the 32 helper slots, so the base is the
     imports plus it. Adding 32 again put every linked function 32 slots past
@@ -15994,6 +16020,8 @@ begin
   curFuncNeedsStringTemp := false;
   curCaseTempIdx := 1;      { for _start, case temp is local 1 (after string temp) }
   curRecvTempIdx := 2;      { receiver temp follows the case temp }
+  curForTempIdx := 2 + MaxRecvDepth;
+  curFuncNeedsForTemp := false;
   curFuncNeedsRecvTemp := false;
   curFuncNeedsCaseTemp := false;
   exprType := tyInteger;
@@ -16121,6 +16149,12 @@ begin
       if numObjArgs >= MaxObjArgs then begin
         WriteErrorLn('Error: too many objects on the command line');
         halt(1);
+      end;
+      if optDebug then begin
+        write(stderr, 'arg[', i, '] bare, slot ', numObjArgs, ' len=');
+        write(stderr, length(ParamStr(i)), ' [');
+        write(stderr, ParamStr(i));
+        writeln(stderr, ']');
       end;
       objArgPath[numObjArgs] := ParamStr(i);
       numObjArgs := numObjArgs + 1;
@@ -16282,7 +16316,9 @@ begin
     ProgressReport(srcLine, optProgressTotal, 'Parsed');
 
   { Set _start locals based on whether string/case temps were needed }
-  if curFuncNeedsRecvTemp then
+  if curFuncNeedsForTemp then
+    startNlocals := startNlocals + 2 + MaxRecvDepth + 16
+  else if curFuncNeedsRecvTemp then
     startNlocals := startNlocals + 2 + MaxRecvDepth  { string, case, receiver bank }
   else if curFuncNeedsCaseTemp then
     startNlocals := startNlocals + 2  { string temp + case temp }
