@@ -2188,6 +2188,39 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### What happens across compiler versions
+
+Not a requirement, and tested because the answer was unknown. Six older
+compilers were built from git history, spanning every change the object
+format went through, and made to produce an object for the same unit.
+
+**Every mismatch fails loudly. Nothing miscompiled.**
+
+| Case | Result |
+|---|---|
+| Old object, current compiler | `unknown record kind in base.cpo`, no module written |
+| Current object, old compiler | the same, or `unknown option` on versions predating object arguments |
+| Truncated object | `object file ends in the middle of a record` |
+| `CPO1` followed by random bytes | `unknown unit: BASE`, because the name read out of the noise matches nothing a `uses` asked for |
+| Empty file | `ends in the middle of a record` |
+
+One old object linked and ran correctly, and that is the interesting entry:
+the revision in question happens to have the identical format, byte for byte,
+so it is not compatibility but coincidence.
+
+**The detection is accidental.** The magic has been `CPO1` through six format
+changes and carries no version. Nothing compares versions; a mismatched
+object is caught because the reader desyncs and lands on a record kind it
+does not recognise. That has held for every case tried, and it holds by luck
+rather than by design: a desync that landed on a plausible kind byte with
+plausible lengths would get further.
+
+The cheap improvement, if this ever matters: a format version in the header,
+bumped whenever a record changes, so the message can say the object was built
+by a different compiler instead of describing the symptom. That turns a
+diagnostic that names the wrong thing into one that names the cause, and
+turns luck into a check.
+
 ### Phase L2 review findings, fifth round
 
 Aimed at the two things the fourth round named as untested, plus the class of
