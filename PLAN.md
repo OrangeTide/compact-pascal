@@ -2188,6 +2188,40 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 review findings, sixth round
+
+Aimed at limits, combinations, and malformed input. One defect, and it was
+not L2's.
+
+**A directory given where a file was expected crashed with an unhandled
+runtime error**, both as an object and as an include. Under fpc, opening a
+directory succeeds and the first read raises; under WASI `path_open` refuses
+it, so the snapshot was already correct and only the native binary crashed.
+Both paths now probe the handle with `eof` under `{$I-}` and report it. The
+include half is older than this phase and was fixed alongside because it is
+the same line.
+
+An empty object now says so rather than reporting a record that ends early,
+which is true but describes the tenth byte of the problem rather than the
+first.
+
+**Passed:** objects and `-I` in the same run, which is the case the one
+preopen has to serve for both; seventeen objects, refused by count; an
+unreadable object; `/dev/null` as an object; and a directory through the
+snapshot, which was already clean.
+
+**What this round says about the previous five.** Every earlier round probed
+things a program might legitimately do. This one probed things a build script
+might do by mistake, and the first such probe found a crash. The malformed
+and hostile inputs to the compiler's own file handling had never been tried,
+because the object format was new and the attention went to whether correct
+input worked.
+
+Still carried forward: `check-objects` cannot drive the snapshot, because it
+writes objects to an absolute temporary path that one preopen cannot serve.
+Every link case has been run through the snapshot by hand instead, which
+proves the behavior and not the harness.
+
 ### What happens across compiler versions
 
 Not a requirement, and tested because the answer was unknown. Six older

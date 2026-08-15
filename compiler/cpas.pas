@@ -1245,6 +1245,7 @@ var
   i: longint;
   symName: string[63];
   incPath: string;
+  incProbe: boolean;
   incIdx: longint;
   condTrue: boolean;
   foundElse: boolean;
@@ -1430,6 +1431,17 @@ begin
         {$I+}
         if IOResult <> 0 then
           Error('cannot open include file: ' + incPath);
+        { The same guard the object reader needs. Opening a directory
+          succeeds under fpc and fails on the first read, which escaped as an
+          unhandled runtime error rather than a diagnostic. }
+        {$I-}
+        incProbe := eof(incFile[incDepth]);
+        {$I+}
+        if IOResult <> 0 then
+          Error(incPath + ' cannot be read; a directory perhaps');
+        if incProbe then
+          { An empty include is legal and contributes nothing. }
+          ;
         incDepth := incDepth + 1;
         srcLine := 1;
         srcCol := 0;
@@ -3149,8 +3161,20 @@ function ReadObjHeader(const path: string): string;
   tried and it worked by luck: a desync landing on a plausible kind with
   plausible lengths would have got further, and the further it gets the worse
   the eventual symptom. }
-var v: longint;
+var
+  v: longint;
+  probeEof: boolean;
 begin
+  { A handle that opened but cannot be read. Opening a directory succeeds
+    under fpc and fails on the first read, which escaped as an unhandled
+    runtime error; under WASI path_open refuses it and this never fires. }
+  {$I-}
+  probeEof := eof(objFile);
+  {$I+}
+  if IOResult <> 0 then
+    Error(path + ' cannot be read; a directory perhaps');
+  if probeEof then
+    Error(path + ' is empty');
   if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
      or (ObjRByte <> ord('O')) or (ObjRByte <> ord('2')) then
     Error(path + ' is not a Compact Pascal object, or was built by a ' +

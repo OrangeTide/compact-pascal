@@ -166,6 +166,12 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **A directory given where a file was expected crashed** with an unhandled
+  runtime error rather than a diagnostic, both as an object on the command
+  line and as an include. Opening a directory succeeds under the native
+  build and fails on the first read; the WASM build was already correct,
+  because WASI refuses to open one. An empty object now says it is empty
+  rather than reporting a record that ends early.
 - **A `for` loop whose body called a routine containing its own `for` loop
   ran the wrong number of times.** The loop limit lived in a data slot
   indexed by lexical nesting depth, and a lexical index is not unique at run

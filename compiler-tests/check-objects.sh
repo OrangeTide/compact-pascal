@@ -190,6 +190,26 @@ if [ -s "$tmp/ver.cpo" ]; then
     fi
 fi
 
+
+# A directory and an empty file are both plausible mistakes for an object
+# path. Under fpc, opening a directory succeeds and the first read raised an
+# unhandled runtime error rather than a diagnostic.
+mkdir -p "$tmp/adir.cpo"
+: > "$tmp/empty.cpo"
+for bad in adir empty; do
+    if "$cpas" "$tmp/$bad.cpo" < "$here/objects/o001_signatures.pas" \
+         > /dev/null 2>"$tmp/$bad.err"; then
+        echo "FAIL bad-object-$bad (accepted)" >&2
+        fail=$((fail + 1))
+    elif grep -qi 'runtime error' "$tmp/$bad.err"; then
+        echo "FAIL bad-object-$bad (crashed instead of diagnosing)" >&2
+        sed 's/^/  /' "$tmp/$bad.err" >&2
+        fail=$((fail + 1))
+    else
+        echo "PASS bad-object-$bad"
+    fi
+done
+
 if [ "$fail" -ne 0 ]; then
     echo "check-objects: $fail failed" >&2
     exit 1
