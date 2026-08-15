@@ -249,6 +249,11 @@ const
   MaxRecvDepth = 4;   { method calls nested inside one another's arguments }
   ObjKindConst   = 1;
   ObjKindRoutine = 2;
+  ObjFormatVersion = 1;  { bumped whenever a record in the object changes.
+                           The magic went to CPO2 at the same time, because
+                           in a CPO1 object the byte in this position is a
+                           unit name's length: a one-character name would
+                           have read as version 1 and passed. }
   MaxRelocs   = 65536;  { every call and every data address takes one }
   RelocFunc   = 1;
   RelocData   = 2;
@@ -3123,6 +3128,42 @@ end;
 
 procedure LoadObjectInterface(const path, want: string); forward;
 
+function IntToStrCP(v: longint): string;
+{** An integer as text, for messages built by concatenation. }
+var s: string[11];
+begin
+  str(v, s);
+  IntToStrCP := s;
+end;
+
+function ReadObjHeader(const path: string): string;
+{** Check an object's magic and format version, and return its unit name.
+
+  One reader for all four call sites. The record readers drifted apart once
+  already, and a header that four places parse independently is the same
+  invitation.
+
+  The version exists because the magic never moved while the format changed
+  six times, and a mismatched object was caught only when the reader desynced
+  onto a record kind it did not recognise. That worked every time it was
+  tried and it worked by luck: a desync landing on a plausible kind with
+  plausible lengths would have got further, and the further it gets the worse
+  the eventual symptom. }
+var v: longint;
+begin
+  if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
+     or (ObjRByte <> ord('O')) or (ObjRByte <> ord('2')) then
+    Error(path + ' is not a Compact Pascal object, or was built by a ' +
+          'compiler older than the one that started stamping a format ' +
+          'version');
+  v := ObjRByte;
+  if v <> ObjFormatVersion then
+    Error(path + ' is a version ' + IntToStrCP(v) + ' object and this ' +
+          'compiler writes version ' + IntToStrCP(ObjFormatVersion) +
+          '; it was built by a different compiler and has to be rebuilt');
+  ReadObjHeader := ObjRStr;
+end;
+
 function FindObjectArg(const unitName: string): longint;
 {** Which object named on the command line holds this unit, or -1.
 
@@ -3156,10 +3197,7 @@ begin
         Error('cannot read object file: ' + objArgPath[i]);
       saved := objReadPath;
       objReadPath := objArgPath[i];
-      if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
-         or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
-        Error(objArgPath[i] + ' is not a Compact Pascal object');
-      objArgUnit[i] := ObjRStr;
+      objArgUnit[i] := ReadObjHeader(objArgPath[i]);
       objReadPath := saved;
       close(objFile);
     end;
@@ -3465,10 +3503,7 @@ begin
     Error('cannot read object file: ' + path);
   objReadPath := path;
 
-  if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
-     or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
-    Error(path + ' is not a Compact Pascal object');
-  unitName := ObjRStr;
+  unitName := ReadObjHeader(path);
   if unitName <> want then
     Error(path + ' holds unit ' + unitName + ', not ' + want);
 
@@ -15031,7 +15066,8 @@ begin
   if IOResult <> 0 then
     Error('cannot write object file: ' + optOutName);
 
-  ObjByte(ord('C')); ObjByte(ord('P')); ObjByte(ord('O')); ObjByte(ord('1'));
+  ObjByte(ord('C')); ObjByte(ord('P')); ObjByte(ord('O')); ObjByte(ord('2'));
+  ObjByte(ObjFormatVersion);
   ObjStr(curUnitName);
 
   numBodies := 0;
@@ -15258,10 +15294,7 @@ begin
     Error('cannot read object file: ' + path);
   objReadPath := path;
 
-  if (ObjRByte <> ord('C')) or (ObjRByte <> ord('P'))
-     or (ObjRByte <> ord('O')) or (ObjRByte <> ord('1')) then
-    Error(path + ' is not a Compact Pascal object');
-  writeln('unit ', ObjRStr);
+  writeln('unit ', ReadObjHeader(path));
 
   { Types first, and their names are recorded as they are read so that a
     later reference prints as a name rather than an index. }
@@ -15577,9 +15610,7 @@ begin
   if IOResult <> 0 then
     Error('cannot read object file: ' + path);
   objReadPath := path;
-  for i := 0 to 3 do
-    v := ObjRByte;
-  nm := ObjRStr;
+  nm := ReadObjHeader(path);
   symFirst := numLinkSyms;
   SkipObjectInterface(nm);
 

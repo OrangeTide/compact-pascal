@@ -171,6 +171,25 @@ for src in "$here"/link/*.units; do
     fi
     echo "PASS $name"
 done
+
+# A version stamp only helps if a wrong one is refused. Build a real object,
+# corrupt the version byte, and check the message names the cause. The magic
+# is bytes 0..3 and the version is byte 4.
+"$cpas" -c -o "$tmp/ver.cpo" < "$here/objects/o001_signatures.pas" 2>/dev/null
+if [ -s "$tmp/ver.cpo" ]; then
+    { head -c 4 "$tmp/ver.cpo"; printf '\377'; tail -c +6 "$tmp/ver.cpo"; } > "$tmp/badver.cpo"
+    if "$cpas" -dump-obj "$tmp/badver.cpo" > "$tmp/ver.out" 2>&1; then
+        echo "FAIL version-check (a wrong version was accepted)" >&2
+        fail=$((fail + 1))
+    elif ! grep -q 'version' "$tmp/ver.out"; then
+        echo "FAIL version-check (message does not mention the version)" >&2
+        sed 's/^/  /' "$tmp/ver.out" >&2
+        fail=$((fail + 1))
+    else
+        echo "PASS version-check"
+    fi
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "check-objects: $fail failed" >&2
     exit 1

@@ -2215,11 +2215,12 @@ does not recognise. That has held for every case tried, and it holds by luck
 rather than by design: a desync that landed on a plausible kind byte with
 plausible lengths would get further.
 
-The cheap improvement, if this ever matters: a format version in the header,
-bumped whenever a record changes, so the message can say the object was built
-by a different compiler instead of describing the symptom. That turns a
-diagnostic that names the wrong thing into one that names the cause, and
-turns luck into a check.
+Since done. The header carries a format version, checked by one reader all
+four call sites now share, and the magic went to `CPO2` at the same time. The
+magic had to move: in a `CPO1` object the byte in the version's position is a
+unit name's length, so a one-character name would have read as version 1 and
+passed the check. Every object from every earlier revision is now refused
+with a message naming the cause, including that case.
 
 ### Phase L2 review findings, fifth round
 
