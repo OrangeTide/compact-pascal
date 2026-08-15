@@ -2217,10 +2217,12 @@ and hostile inputs to the compiler's own file handling had never been tried,
 because the object format was new and the attention went to whether correct
 input worked.
 
-Still carried forward: `check-objects` cannot drive the snapshot, because it
-writes objects to an absolute temporary path that one preopen cannot serve.
-Every link case has been run through the snapshot by hand instead, which
-proves the behavior and not the harness.
+Since fixed. `check-objects` runs every compiler invocation from inside its
+temporary directory and names files relative to it, so a WASM runtime with
+one preopened directory can serve it. `make check-objects-snapshot` drives
+the same nineteen cases through `snapshot/compiler.wasm`, and `test-all` runs
+both. What was proved by hand for one round is now proved by the harness
+every time.
 
 ### What happens across compiler versions
 
