@@ -166,6 +166,11 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Compiler
 
+- **A damaged object is diagnosed rather than believed.** Counts and lengths
+  in an object were never checked, so a count of `` read as -1 and a
+  loop over it ran zero times: a corrupt object was silently treated as
+  having no types and compiled anyway. Other values crashed. Every count is
+  now bounded by what the compiler could have written.
 - **A directory given where a file was expected crashed** with an unhandled
   runtime error rather than a diagnostic, both as an object on the command
   line and as an include. Opening a directory succeeds under the native

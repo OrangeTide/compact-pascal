@@ -228,6 +228,36 @@ for bad in adir empty; do
     fi
 done
 
+
+# An object is input like any other. A count of $FFFFFFFF reads as -1, which
+# made a for loop run zero times: a corrupt object was silently treated as
+# having no types and compiled anyway. Every aligned word is overwritten in
+# turn and the compiler must not crash or hang. It may well succeed: a word
+# inside a name the importing program never mentions changes nothing it uses,
+# and rejecting that would be a stricter promise than the format makes.
+run_cpas -c -o fuzz.cpo < "$here/objects/o005_data_relocs.pas" 2>/dev/null
+printf 'program FZ;\nuses Words;\nbegin Announce end.\n' > "$tmp/fzmain.pas"
+if [ -s "$tmp/fuzz.cpo" ]; then
+    fsz=$(wc -c < "$tmp/fuzz.cpo")
+    bad=0
+    off=0
+    while [ "$off" -lt $((fsz - 4)) ]; do
+        { head -c "$off" "$tmp/fuzz.cpo"; printf '\377\377\377\377';
+          tail -c +$((off + 5)) "$tmp/fuzz.cpo"; } > "$tmp/fz.cpo"
+        { run_cpas fz.cpo < "$tmp/fzmain.pas" > /dev/null 2>"$tmp/fz.out"; } || true
+        if grep -qi 'runtime error' "$tmp/fz.out"; then
+            echo "FAIL fuzz-object (offset $off crashed)" >&2
+            bad=$((bad + 1))
+        fi
+        off=$((off + 4))
+    done
+    if [ "$bad" -ne 0 ]; then
+        fail=$((fail + 1))
+    else
+        echo "PASS fuzz-object"
+    fi
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "check-objects: $fail failed" >&2
     exit 1

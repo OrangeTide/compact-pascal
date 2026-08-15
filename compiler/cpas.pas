@@ -3107,6 +3107,14 @@ end;
 {** Populate the outermost scope with built-in types and constants
   (INTEGER, BOOLEAN, CHAR, BYTE, WORD, SHORTINT, LONGINT, TRUE, FALSE,
   MAXINT). Must be called after InitSymTable before any user code. }
+function IntToStrCP(v: longint): string;
+{** An integer as text, for messages built by concatenation. }
+var s: string[11];
+begin
+  str(v, s);
+  IntToStrCP := s;
+end;
+
 function ObjRByte: longint;
 {** One byte from the object being read. Reading past the end is an error
   rather than a zero, for the reason reading past the end of any file is:
@@ -3137,16 +3145,30 @@ begin
   ObjRStr := s;
 end;
 
+function ObjRCount(const what: string; limit: longint): longint;
+{** A count or length from an object, rejected if it is not believable.
+
+  An object is input like any other, and nothing had checked these. A count
+  of $FFFFFFFF reads as -1, which made `for i := 0 to n - 1` run zero times:
+  a corrupt object was silently treated as having no types, or no exports,
+  and compiled anyway. Other values crashed or would have run for a very
+  long time.
+
+  The limit is what this compiler could have written, so a real object always
+  passes and anything larger is either damage or a different format. }
+var v: longint;
+begin
+  v := ObjRU32;
+  if (v < 0) or (v > limit) then
+    Error(objReadPath + ' is damaged: it claims ' + IntToStrCP(v) + ' ' +
+          what + ', which is not a number this compiler could have written');
+  ObjRCount := v;
+end;
+
+
 
 procedure LoadObjectInterface(const path, want: string); forward;
 
-function IntToStrCP(v: longint): string;
-{** An integer as text, for messages built by concatenation. }
-var s: string[11];
-begin
-  str(v, s);
-  IntToStrCP := s;
-end;
 
 function ReadObjHeader(const path: string): string;
 {** Check an object's magic and format version, and return its unit name.
@@ -3534,7 +3556,7 @@ begin
   { Types first, each remembered so a later reference resolves. The
     descriptor is named exactly as the exporting unit named it, which is
     what lets a method's mangled name be rebuilt here and match. }
-  nTypes := ObjRU32;
+  nTypes := ObjRCount('exported types', MaxTypes);
   for i := 0 to nTypes - 1 do begin
     k := ObjRByte;
     tname := ObjRStr;
@@ -3599,7 +3621,7 @@ begin
     syms[sym].size := types[tIdx].size;
   end;
 
-  n := ObjRU32;
+  n := ObjRCount('exports', MaxSyms);
   for i := 1 to n do begin
     k := ObjRByte;
     nm := ObjRStr;
@@ -15569,7 +15591,7 @@ procedure SkipObjectInterface(const unitName: string);
 var n, i, k, np, p, v: longint;
   nm: string;
 begin
-  n := ObjRU32;
+  n := ObjRCount('exported types', MaxTypes);
   for i := 0 to n - 1 do begin
     k := ObjRByte;
     nm := ObjRStr;
@@ -15586,7 +15608,7 @@ begin
       v := ObjRU32; v := ObjRU32;
     end;
   end;
-  n := ObjRU32;
+  n := ObjRCount('exports', MaxSyms);
   for i := 1 to n do begin
     k := ObjRByte;
     nm := ObjRStr;
@@ -15670,21 +15692,21 @@ begin
     linkSymIdx[i] := funcBase + linkSymBody[i];
   if optDebug then
     writeln(stderr, 'link: placed ', objArgUnit[objIdx], ' base ', funcBase);
-  nBodies := ObjRU32;
+  nBodies := ObjRCount('function bodies', MaxFuncs);
   for i := 0 to nBodies - 1 do begin
     nm := ObjRStr;
-    np := ObjRU32;            { locals, before the signature: writer order }
+    np := ObjRCount('locals in a routine', 4096);   { before the signature }
     { Rebuild the type index here. One from another module's type section
       means nothing, and rebuilding from the shape costs one call against a
       relocation kind it would otherwise need. }
-    nprm := ObjRU32;
-    nres := ObjRU32;
+    nprm := ObjRCount('parameters', 17);
+    nres := ObjRCount('results', 1);
     for k := 0 to nprm - 1 do
       lkParams[k] := WasmI32;
     if nres > 0 then
       lkResults[0] := WasmI32;
     sigIdx := AddWasmType(nprm, lkParams, nres, lkResults);
-    p := ObjRU32;
+    p := ObjRCount('bytes in a body', CodeBufMax);
     bodyAt[i] := funcBodies.len;
     for k := 1 to p do
       CodeBufEmit(funcBodies, ObjRByte);
@@ -15711,13 +15733,13 @@ begin
     dataPos := dataPos + 1;
   end;
   dataBase := dataPos;
-  n := ObjRU32;
+  n := ObjRCount('bytes of data', DataBufMax);
   for i := 1 to n do
     DataBufEmit(secData, ObjRByte);
   dataPos := dataPos + n;
 
   slotBase := numProcRefs;
-  n := ObjRU32;
+  n := ObjRCount('table entries', MaxProcRefs);
   for i := 1 to n do begin
     v := ObjRU32;
     if numProcRefs >= MaxProcRefs then
@@ -15731,7 +15753,7 @@ begin
     argument order does not guarantee, so they are recorded and resolved
     once everything is placed. }
   objExternFirst[objIdx] := numLinkExterns;
-  n := ObjRU32;
+  n := ObjRCount('externs', MaxExterns);
   for i := 1 to n do begin
     if numLinkExterns >= MaxExterns then
       Error('too many routines imported between units');
@@ -15743,7 +15765,7 @@ begin
   { Relocations are deferred for the same reason. Each remembers the buffer
     position it patches, which is absolute in funcBodies and so stays valid
     however much is appended after it. }
-  n := ObjRU32;
+  n := ObjRCount('relocations', MaxRelocs);
   for i := 1 to n do begin
     k := ObjRByte;
     j := ObjRU32;

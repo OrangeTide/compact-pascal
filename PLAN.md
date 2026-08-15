@@ -2188,6 +2188,40 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Phase L2 review findings, seventh and last round
+
+The two categories named as remaining: adversarial objects and scale. One
+defect, in the first.
+
+**An object's counts were never checked.** A count of `$FFFFFFFF` reads as
+-1, and `for i := 0 to n - 1` then runs zero times, so a corrupt object was
+silently treated as having no types, or no exports, and the program compiled
+anyway. Other values crashed with an unhandled runtime error. Every count and
+length is now read through one checked reader, bounded by what this compiler
+could have written, so a real object always passes and anything else is named
+as damage.
+
+Verified by overwriting every four-byte-aligned word of two real objects with
+`$FFFFFFFF`, one at a time: 285 variants, none crashing, hanging, or being
+silently mistaken for something valid. That sweep is in `check-objects` now,
+over a rich object, at about a second.
+
+The sweep asserts only that the compiler does not crash or hang. It may well
+succeed: a word inside a name the importing program never mentions changes
+nothing it uses, and rejecting that would be a stricter promise than the
+format makes. Two earlier drafts of the test asserted more than that and were
+wrong, once because `-dump-obj` only prints and does not consume, and once
+because a corrupted unused name is genuinely harmless.
+
+**Scale holds.** A unit exporting 300 routines compiles and produces a 24 KB
+object, and linking it reports `too many routines imported from units`
+against the 128 limit rather than overflowing anything.
+
+**This closes the review of Phase L2**, on the rule that review ends when no
+untried category remains rather than when a round comes back empty. What is
+left is not hand review: other WASM runtimes and the Windows and macOS paths
+belong to `make preflight` and CI.
+
 ### Phase L2 review findings, sixth round
 
 Aimed at limits, combinations, and malformed input. One defect, and it was
