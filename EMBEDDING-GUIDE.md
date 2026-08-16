@@ -64,6 +64,7 @@ let compiler = Compiler::with_options(Options {
     stack_checks: true,               // {$S+}: stack, frame, and nil checks (default)
     defines: vec!["DEBUG".to_string()], // -dDEBUG, visible to {$IFDEF DEBUG}
     verbose: false,                   // -v: emit Info: diagnostics
+    ..Options::default()              // include_dir, unit_dir, objects: see below
 });
 ```
 
@@ -317,6 +318,53 @@ Which one to use is a real choice, not a default to accept:
 Do not do both. Source that a host has already expanded has no directives
 left, so nothing happens; source that still has them would be opened twice.
 
+## Linking separately compiled units
+
+A unit is a Pascal file compiled on its own to an object, which a program is
+then linked against. The crate compiles and links programs; it does not
+compile units, because building them is a build step rather than an embedding
+one. Use the command-line compiler for that:
+
+```
+cpas -c -o geometry.cpo < geometry.pas
+```
+
+Then hand the objects to the compiler along with the directory they live in:
+
+```rust
+use compact_pascal::{Compiler, Options};
+use std::path::PathBuf;
+
+let compiler = Compiler::with_options(Options {
+    unit_dir: Some(PathBuf::from("./units")),
+    objects: vec!["geometry.cpo".to_string(), "shapes.cpo".to_string()],
+    ..Options::default()
+});
+let wasm = compiler.compile("program M;\nuses Geometry;\nbegin end.\n")?.wasm;
+```
+
+`objects` names files relative to `unit_dir`, confined the way include paths
+are: a name containing `..`, an absolute path, or a drive prefix is refused
+before the compiler runs.
+
+**Name every object the build produced.** Which ones a program needs is the
+compiler's problem, not the host's: an object nothing imports costs nothing,
+and a unit's own dependencies are linked whether or not the program mentions
+them. Order does not matter.
+
+**One preopened directory serves both units and includes.** Setting
+`unit_dir` and `include_dir` to different directories is an error rather than
+a silent choice between them; set them to the same directory if a program
+needs both.
+
+Without `unit_dir`, a program may not import a Pascal unit at all — only the
+system units are available, which is the behavior a host that never asks for
+filesystem access keeps.
+
+**Objects are not portable between compiler versions.** Each carries a format
+version, and one written by a different compiler is refused by name rather
+than misread. Rebuild them when the crate is upgraded.
+
 ## Granting a program its own files
 
 A compiled program that says `uses Files;` can open files, but only in a
@@ -387,8 +435,8 @@ versions may break.
 
 - The names, signatures, and behavior of `Compiler`, `CompileResult`,
   `CompileError`, `Instance`, `InstanceBuilder`, `RuntimeError`, `Diagnostic`,
-  `Severity`, `Options`, and `Limits`, including `Options::include_dir` and
-  `Limits::preopen_dir`.
+  `Severity`, `Options`, and `Limits`, including `Options::include_dir`,
+  `Options::unit_dir`, `Options::objects`, and `Limits::preopen_dir`.
 - The meaning of each `CompileError` and `RuntimeError` variant.
 - The diagnostic tag format the compiler emits, since it is what `Diagnostic`
   parses.

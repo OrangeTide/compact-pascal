@@ -80,7 +80,7 @@ wasmtime run hello.wasm
 | 5 | Playground file I/O | Not started |
 | 6 | Dynamic allocation (`New`/`Dispose`) | Not started |
 | 6b | Richer string type | Not started |
-| 7 | Units and separate compilation | System units done; separate compilation not started |
+| 7 | Units and separate compilation | Done: a unit compiles to an object and links into a program |
 | 8 | Interfaces and methods | Not started |
 
 ## Documentation
@@ -94,7 +94,7 @@ wasmtime run hello.wasm
 | [doc/pode-server.md](doc/pode-server.md) | Pode Server design (Pascal Node clone) |
 | [doc/lightout-example.md](doc/lightout-example.md) | Light's Out browser game example design |
 | [doc/playground.md](doc/playground.md) | Browser playground design |
-| [doc/units-design.md](doc/units-design.md) | Separately compiled units — design proposal |
+| [doc/units-design.md](doc/units-design.md) | Separately compiled units — the design, and what building it changed |
 
 ## Prerequisites
 

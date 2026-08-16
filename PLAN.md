@@ -2188,6 +2188,42 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Consistency review, second pass: the documents I had not touched
+
+The first pass fixed the reference and the white paper. It looked at the two
+documents the project rule names and stopped there, which was the same
+mistake one level up. Four more documents were stale and one carried an
+example that does not compile.
+
+**The embedding guide's `Options` example never compiled.** It initialises
+four fields of a struct that has seven, with no `..Default::default()`, so a
+reader copying it gets `missing fields include_dir, objects and unit_dir`.
+Two of those fields are mine, from this phase; `include_dir` predates it, so
+the example had been wrong since Phase J and nobody had run it. Fixed, and
+compiled against the crate to prove it.
+
+**The embedding guide had no section on linking units**, the same omission
+the reference had: `Options::unit_dir` and `Options::objects` shipped with
+doc comments on the fields and nothing in the guide. It has one now, and its
+example was compiled and run against two real objects rather than trusted.
+The API stability list named `Options::include_dir` and now names the other
+two as well.
+
+**README** said separate compilation was not started. **ROADMAP** said Phase
+L was awaiting review, and a paragraph further down still placed real units in
+the future tense.
+
+**What this says about the check.** The rule names PLAN, the white paper and
+the reference, so that is where I looked. The documents outside the rule —
+README, ROADMAP, the embedding guide — drift the same way and nothing points
+at them. The check that works is not "are the three consistent" but "what did
+this phase change, and which files claim something about it", which finds the
+guide and the README without being told to.
+
+A doc example that does not compile is worse than a stale sentence: a sentence
+is read and discounted, an example is copied. The two examples added in this
+pass were both run before being committed.
+
 ### Consistency review after Phase L2
 
 The project rule is that PLAN, the white paper, and the language reference

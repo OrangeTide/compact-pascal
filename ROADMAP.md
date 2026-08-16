@@ -43,7 +43,7 @@ is roughly as much work again:
 | I | Heap: `New` and `Dispose` | Done |
 | J | File system access and the `text` type; `{$I}` inside the compiler | Done |
 | K | System units — `uses` against runtime-provided bindings | Done |
-| L | Pascal units — write and compile your own, separately | Design done, awaiting review |
+| L | Pascal units — write and compile your own, separately | Done |
 | M | Method pointers and interfaces | |
 
 Phases are capped at about three weeks each so that a wrong estimate stays
@@ -63,8 +63,8 @@ traps rather than returning `nil`.
 itself, eight levels deep, with cycles and missing files diagnosed, so a
 multi-file program builds from the command line with no host help. The
 host-side expansion path stays supported and is still the default. Real units,
-where a file is compiled once rather than textually inserted, are Phases K and
-L.
+where a file is compiled once rather than textually inserted, are done: a unit
+compiles to an object and a program links against it.
 
 ## What is deliberately not planned
 
