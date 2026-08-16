@@ -126,6 +126,11 @@ fn check_object_name(name: &str) -> Result<(), CompileError> {
     Ok(())
 }
 
+/// Adding a field must not be a breaking change, so this cannot be built with
+/// a struct literal that names every field. Use `..Options::default()`. Marked
+/// before 1.0 deliberately: after it, the first new option would have cost a
+/// major version.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Runtime range checks on array indexing and subrange assignment
@@ -173,6 +178,63 @@ impl Default for Options {
             unit_dir: None,
             objects: Vec::new(),
         }
+    }
+}
+
+impl Options {
+    /// Compiler switches at their defaults, the same as `Options::default()`.
+    ///
+    /// The `with_` methods below exist because `Options` is `#[non_exhaustive]`,
+    /// which stops another crate building it with a struct literal even when
+    /// that literal ends in `..Options::default()`. That restriction is the
+    /// point: a field added later is then not a breaking change. The cost is
+    /// that construction needs methods, and this is them.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `{$R+}`: check array indices and subrange assignments at run time.
+    pub fn with_range_checks(mut self, on: bool) -> Self {
+        self.range_checks = on;
+        self
+    }
+
+    /// `{$S+}`: stack overflow guard, frame balance check, and nil check.
+    pub fn with_stack_checks(mut self, on: bool) -> Self {
+        self.stack_checks = on;
+        self
+    }
+
+    /// A conditional compilation symbol, as `-dNAME`. Call more than once to
+    /// define more than one.
+    pub fn with_define(mut self, name: impl Into<String>) -> Self {
+        self.defines.push(name.into());
+        self
+    }
+
+    /// Emit `Info:` lines describing what the compiler decided.
+    pub fn with_verbose(mut self, on: bool) -> Self {
+        self.verbose = on;
+        self
+    }
+
+    /// Let the compiler resolve `{$I}` itself, against this one directory.
+    pub fn with_include_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.include_dir = Some(dir.into());
+        self
+    }
+
+    /// The directory holding unit objects, which `objects` names relative to.
+    pub fn with_unit_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.unit_dir = Some(dir.into());
+        self
+    }
+
+    /// An object to link against, named relative to `unit_dir`. Call more than
+    /// once to name more than one.
+    pub fn with_object(mut self, name: impl Into<String>) -> Self {
+        self.objects.push(name.into());
+        self
     }
 }
 

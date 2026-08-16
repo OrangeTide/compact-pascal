@@ -369,10 +369,7 @@ fn the_crate_can_let_the_compiler_resolve_includes() {
     assert!(Compiler::new().compile(src).is_err());
 
     // With one, the compiler opens the file itself.
-    let opts = Options {
-        include_dir: Some(dir.clone()),
-        ..Options::default()
-    };
+    let opts = Options::new().with_include_dir(dir.clone());
     let result = Compiler::with_options(opts)
         .compile(src)
         .expect("the include should have been resolved");
@@ -400,10 +397,7 @@ fn a_program_can_be_granted_a_directory_to_write_in() {
     let mut denied = InstanceBuilder::new().unwrap().build(&wasm).unwrap();
     assert!(denied.run().is_err(), "an ungranted program should not have opened anything");
 
-    let granted = InstanceBuilder::with_limits(Limits {
-        preopen_dir: Some(dir.clone()),
-        ..Limits::default()
-    })
+    let granted = InstanceBuilder::with_limits(Limits::new().with_preopen_dir(dir.clone()))
     .unwrap();
     let mut instance = granted.build(&wasm).unwrap();
     instance.run().unwrap();
@@ -468,11 +462,10 @@ fn a_program_can_link_against_a_separately_compiled_unit() {
     // behavior a host that never asks for filesystem access keeps.
     assert!(Compiler::new().compile(program).is_err());
 
-    let opts = Options {
-        unit_dir: Some(dir.clone()),
-        objects: vec!["mid.cpo".to_string(), "base.cpo".to_string()],
-        ..Options::default()
-    };
+    let opts = Options::new()
+        .with_unit_dir(dir.clone())
+        .with_object("mid.cpo")
+        .with_object("base.cpo");
     let result = Compiler::with_options(opts)
         .compile(program)
         .expect("the unit should have linked");
@@ -499,11 +492,9 @@ fn a_program_can_link_against_a_separately_compiled_unit() {
 fn an_object_name_may_not_escape_the_unit_directory() {
     use compact_pascal::{Compiler, Options};
 
-    let opts = Options {
-        unit_dir: Some(std::env::temp_dir()),
-        objects: vec!["../elsewhere.cpo".to_string()],
-        ..Options::default()
-    };
+    let opts = Options::new()
+        .with_unit_dir(std::env::temp_dir())
+        .with_object("../elsewhere.cpo");
     let err = Compiler::with_options(opts)
         .compile("program T;\nbegin end.\n")
         .expect_err("an object name containing '..' should be refused");

@@ -30,10 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Range checks on: this is a calculator taking numbers from outside, and
     // the cost of the checks is not worth the debugging they save being
     // skipped.
-    let compiler = Compiler::with_options(Options {
-        range_checks: true,
-        ..Options::default()
-    });
+    let compiler = Compiler::with_options(Options::new().with_range_checks(true));
 
     let result = match compiler.compile(RULE) {
         Ok(r) => r,

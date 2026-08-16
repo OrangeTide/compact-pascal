@@ -145,6 +145,20 @@ behind a decision lives in the Findings section of `PLAN.md`.
 
 ### Rust crate
 
+- **Version 0.2.0.** `Options` and `Limits` are now `#[non_exhaustive]` and are
+  built with `Options::new()` and `with_` methods rather than a struct
+  literal. Done before 1.0 deliberately: the attribute is what makes a field
+  added later a non-breaking change, and after 1.0 the first new option would
+  have cost a major version.
+
+  `Options` also gained `unit_dir` and `objects`, and `RuntimeError::Execution`
+  was renamed, so this release breaks anything written against 0.1.0. Under
+  0.x that is a minor bump, and a dependency written as `"0.1"` will not pick
+  it up.
+- **`Options::unit_dir` and `Options::objects`** link a program against
+  separately compiled units. See "Linking separately compiled units" in the
+  embedding guide.
+
 - **`Options::include_dir`** lets the compiler resolve `{$I}` itself, against
   one directory. **`Limits::preopen_dir`** grants a compiled program its own
   directory to open files in. Both are `None` by default, and with neither set

@@ -3,7 +3,7 @@ members = []
 
 [package]
 name = "compact-pascal"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Embeddable Pascal-to-WASM compiler"

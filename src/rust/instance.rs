@@ -68,6 +68,9 @@ fn classify(e: wasmi::Error) -> Option<RuntimeError> {
 /// guest looping forever or growing memory until instantiation fails. Set
 /// these when running source you did not write; leave them unset when the
 /// program is your own and the overhead is not worth it.
+/// Extended the way `Options` is, and for the same reason. Use
+/// `..Limits::default()`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct Limits {
     /// Units of execution before the program traps. wasmi charges roughly one
@@ -85,6 +88,33 @@ pub struct Limits {
     /// has nothing to open. Paths are confined to this directory: `..`, an
     /// absolute path, and a drive prefix are all refused.
     pub preopen_dir: Option<std::path::PathBuf>,
+}
+
+impl Limits {
+    /// No limits, the same as `Limits::default()`. `#[non_exhaustive]` for the
+    /// reason `Options` is; see the `with_` methods there.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Instructions a program may execute before it is stopped.
+    pub fn with_fuel(mut self, fuel: u64) -> Self {
+        self.fuel = Some(fuel);
+        self
+    }
+
+    /// The most linear memory a program may grow to.
+    pub fn with_memory_bytes(mut self, bytes: usize) -> Self {
+        self.memory_bytes = Some(bytes);
+        self
+    }
+
+    /// A directory the program may open files in. Nothing outside it is
+    /// reachable.
+    pub fn with_preopen_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.preopen_dir = Some(dir.into());
+        self
+    }
 }
 
 impl Limits {

@@ -59,13 +59,13 @@ command-line compiler does with no arguments.
 ```rust
 use compact_pascal::{Compiler, Options};
 
-let compiler = Compiler::with_options(Options {
-    range_checks: true,               // {$R+}: check array and subrange bounds
-    stack_checks: true,               // {$S+}: stack, frame, and nil checks (default)
-    defines: vec!["DEBUG".to_string()], // -dDEBUG, visible to {$IFDEF DEBUG}
-    verbose: false,                   // -v: emit Info: diagnostics
-    ..Options::default()              // include_dir, unit_dir, objects: see below
-});
+let compiler = Compiler::with_options(
+    Options::new()
+        .with_range_checks(true)   // {$R+}: check array and subrange bounds
+        .with_stack_checks(true)   // {$S+}: stack, frame, and nil checks (default)
+        .with_define("DEBUG")      // -dDEBUG, visible to {$IFDEF DEBUG}
+        .with_verbose(false),      // -v: emit Info: diagnostics
+);
 ```
 
 A directive in the source still overrides these from the point it appears.
@@ -300,10 +300,7 @@ The compiler can open include files itself. Give it a directory and it opens
 them relative to that, with the same confinement:
 
 ```rust
-let compiler = Compiler::with_options(Options {
-    include_dir: Some(PathBuf::from("./pascal")),
-    ..Options::default()
-});
+let compiler = Compiler::with_options(Options::new().with_include_dir("./pascal"));
 ```
 
 Which one to use is a real choice, not a default to accept:
@@ -335,11 +332,12 @@ Then hand the objects to the compiler along with the directory they live in:
 use compact_pascal::{Compiler, Options};
 use std::path::PathBuf;
 
-let compiler = Compiler::with_options(Options {
-    unit_dir: Some(PathBuf::from("./units")),
-    objects: vec!["geometry.cpo".to_string(), "shapes.cpo".to_string()],
-    ..Options::default()
-});
+let compiler = Compiler::with_options(
+    Options::new()
+        .with_unit_dir("./units")
+        .with_object("geometry.cpo")
+        .with_object("shapes.cpo"),
+);
 let wasm = compiler.compile("program M;\nuses Geometry;\nbegin end.\n")?.wasm;
 ```
 
@@ -429,7 +427,13 @@ source in the same sandbox, and no safer.
 ## API stability
 
 The crate follows semantic versioning once it reaches 1.0. Until then, minor
-versions may break.
+versions may break, and 0.2.0 did: `Options` and `Limits` are
+`#[non_exhaustive]` and are built with `Options::new()` and the `with_`
+methods rather than a struct literal.
+
+That was done before 1.0 on purpose. `#[non_exhaustive]` stops another crate
+naming the fields, which is what makes adding one later a non-breaking
+change; after 1.0 the first new option would have cost a major version.
 
 **Stable after 1.0**, meaning a change requires a major version:
 
