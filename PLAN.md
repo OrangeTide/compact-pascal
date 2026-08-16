@@ -2188,6 +2188,55 @@ else depends on.
       dereference, a method call in a statement and in an expression, and a
       structured result from a method. Receiver restricted to records. Tests
       t126, n030, n031.
+### Consistency review after Phase L2
+
+The project rule is that PLAN, the white paper, and the language reference
+stay consistent, and that the white paper's grammar matches the reference's.
+Checked after L2 rather than during it, which was the mistake: **units are
+implemented and undocumented.**
+
+**1. The reference has no Units section.** `unit`, `interface`,
+`implementation`, `-c`, `-o`, objects, and linking are a shipped language
+feature with nothing written about them. Every other feature added in this
+run — procedural types, standalone methods, interfaces — got its section as
+it landed. Units did not, because the work was spread over many sessions and
+each one ended at a compiler boundary rather than a documentation one.
+
+**2. Two statements in the reference are now false.**
+
+- Under System Units: *"Separately compiled units, where a `uses` really does
+  pull in another file, are a later phase."* That phase is this one.
+- In Appendix A, the `UsesClause` comment: *"Names system units. Not a file
+  reference: nothing is read or compiled"* and *"Must precede all
+  declarations"*. Both were true when written. A `uses` now may name an
+  object, and a unit's implementation section may open with one.
+
+**3. Neither grammar can express a unit.** The reference's Appendix A and the
+white paper's both give `Program = 'program' Identifier ';' [ UsesClause ]
+Block '.'` as the only compilation unit. There is no `Unit`, no
+`InterfaceSection`, no `ImplementationSection`. The two grammars agree with
+each other and disagree with the compiler.
+
+**4. The Minimum Limits table is stale in one row and short by several.**
+`User-defined procedures and functions` says 256 for the reference compiler;
+it is 384 since this phase. Missing entirely: methods per interface (8),
+conformances (32), nested `for` loops (16), method calls nested in one
+another's arguments (4), objects on a command line (16), routines imported
+between units (128), and routines exported across linked objects (256).
+
+**What was checked and holds.** The two limits the reference states as
+conformance requirements were tested rather than read: an interface accepts
+8 methods and refuses 9, and a program may take 64 routines' addresses and is
+refused at 65. The conformance section's claims about WASM features and WASI
+imports are still accurate, and `check-wasm-features` asserts the first on
+every preflight.
+
+This is a documentation defect of my own making, and it is the same shape as
+the nine documentation-versus-reality defects found in Phases C through L:
+the compiler moved and the prose did not. The difference is that those were
+found by reading the docs against the code, and this one was found by asking
+what the docs do not mention at all.
+
 ### Phase L2 review findings, seventh and last round
 
 The two categories named as remaining: adversarial objects and scale. One
