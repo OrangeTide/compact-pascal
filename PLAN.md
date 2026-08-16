@@ -2231,11 +2231,25 @@ refused at 65. The conformance section's claims about WASM features and WASI
 imports are still accurate, and `check-wasm-features` asserts the first on
 every preflight.
 
-This is a documentation defect of my own making, and it is the same shape as
-the nine documentation-versus-reality defects found in Phases C through L:
-the compiler moved and the prose did not. The difference is that those were
-found by reading the docs against the code, and this one was found by asking
-what the docs do not mention at all.
+All five fixed. The reference has a Units section covering the two sections,
+compiling and linking, recompiling, what a unit may export and the three
+things it may not, host imports, and the object format. Both grammars gained
+identical `CompilationUnit` and `Unit` productions and a corrected
+`UsesClause` comment, and the two were diffed against each other rather than
+read. The limits table has the corrected row and seven new ones. Two further
+stale claims turned up while fixing these: the white paper still said the
+heap was unimplemented, three phases after it landed, and the reference still
+listed modules among the extensions that are not part of the core.
+
+The documented example was compiled verbatim out of the reference and linked
+with the documented commands, rather than trusted.
+
+This was a documentation defect of my own making, the same shape as the nine
+documentation-versus-reality defects found in Phases C through L: the
+compiler moved and the prose did not. The difference is that those were found
+by reading the docs against the code, and this one by asking what the docs do
+not mention at all. The lesson is a check at each phase boundary, not at the
+end of several.
 
 ### Phase L2 review findings, seventh and last round
 

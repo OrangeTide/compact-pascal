@@ -105,7 +105,7 @@ The system has three layers:
 
 ### Core Language
 
-The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records, enumerated types, and set types; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Variant records and pointers are implemented; floating point (`real`) and dynamic allocation (`New`/`Dispose`) are planned for later phases. Pointers reference storage that already exists, since there is no heap yet. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
+The core is a minimal subset of Pascal sufficient for systems programming and compiler construction: integer, boolean, char, and string types; arrays, records, enumerated types, and set types; standard control flow (`break`/`continue`, `with` for record field access); procedures and functions with value, `var`, and `const` parameters; nested procedures with access to enclosing scope variables. Variant records, pointers, and dynamic allocation (`New`/`Dispose`) are implemented; floating point (`real`) is planned for a later phase. Separately compiled units are implemented: a unit is compiled to an object and linked into a program. The language is case-insensitive; hexadecimal literals (`$FF`) are supported, with optional C-style prefixes (`0x`, `0o`, `0b`) behind a compiler directive.
 
 Source files are UTF-8. The compiler's lexer only acts on ASCII-range bytes (0x00–0x7F); bytes 0x80–0xFF pass through verbatim in string literals and comments. `char` is a byte, not a Unicode codepoint, and `length` returns the byte count — the same model as C and Go's `[]byte`. Legacy source files in CP437 (the code page used by DOS-era Pascal systems) or other encodings must be converted to UTF-8 before compilation using standard tools (`iconv`, `encoding_rs`, etc.).
 
@@ -355,11 +355,29 @@ This appendix is an EBNF summary of the Compact Pascal grammar, covering the cor
 ### Programs
 
 ```ebnf
+CompilationUnit  = Program | Unit .
+
 Program          = 'program' Identifier ';' [ UsesClause ] Block '.' .
 
+Unit             = 'unit' Identifier ';'
+                   'interface' [ UsesClause ] { DeclSection }
+                   'implementation' [ UsesClause ] { DeclSection }
+                   'end' '.' .
+                 (* Compiled with -c to an object; see Units. A routine
+                    header in the interface section is a forward declaration,
+                    and the implementation repeats it in full. A unit
+                    declares no variables at its own level and has no
+                    statement part: it has no frame to put either in. *)
+
 UsesClause       = 'uses' Identifier { ',' Identifier } ';' .
-                 (* Names system units. Not a file reference: nothing is read
-                    or compiled. See System Units in the language reference. *)
+                 (* A system unit, which names bindings the compiler already
+                    has and reads nothing, or a unit satisfied by an object
+                    named on the command line. System names win, so a unit
+                    may not be called System or Files. A program has at most
+                    one clause, after its header; a unit may open each of its
+                    two sections with one. The clause precedes all
+                    declarations because a unit may add WASM imports and the
+                    import count is fixed before any code is emitted. *)
 ```
 
 ### Blocks and Declarations

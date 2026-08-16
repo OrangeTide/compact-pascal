@@ -52,7 +52,7 @@ Legacy Turbo Pascal source files encoded in CP437 or other 8-bit code pages must
 
 ## Core Language
 
-The core language is a minimal subset of Pascal sufficient for systems programming and compiler construction. Advanced extensions (modules, overloads, dynamic arrays, exceptions, OOP) are not part of the core and may be added in later phases.
+The core language is a minimal subset of Pascal sufficient for systems programming and compiler construction. Separately compiled units are part of the language; see [Units](#units). Other advanced extensions (overloads, dynamic arrays, exceptions, OOP) are not part of the core and may be added in later phases.
 
 Compact Pascal is **case-insensitive** — identifiers, keywords, and type names are matched without regard to case, as in standard Pascal. The sole exception is WASM import/export names in `{$IMPORT}` and `{$EXPORT}` directives, which are case-sensitive because they refer to external WASM symbols.
 
@@ -463,7 +463,9 @@ uses Files;
 | `System` | The types, constants, and routines available without asking. Naming it is allowed and does nothing. |
 | `Files` | The `text` type and `Assign`, `Reset`, `Rewrite`, `Close`, `Read`, `ReadLn`, `Write`, `WriteLn`, `Eof`, `IOResult` on files. See [Text Files](#text-files). |
 
-**A system unit is not compiled.** There is no unit file, nothing is read from disk, and nothing is linked. The name stands for a set of bindings the compiler already knows how to emit, and using it turns them on and registers whatever WASM imports they need. Separately compiled units, where a `uses` really does pull in another file, are a later phase.
+**A system unit is not compiled.** There is no unit file, nothing is read from disk, and nothing is linked. The name stands for a set of bindings the compiler already knows how to emit, and using it turns them on and registers whatever WASM imports they need.
+
+A `uses` clause may also name a unit written in Compact Pascal, which is read from an object and linked. System unit names win: `uses Files` is the system unit whatever objects are on the command line, and a unit may not be called `System` or `Files` for that reason. See [Units](#units).
 
 Using a unit is visible in the compiled module. `uses Files` adds `path_open`, `fd_close`, and `fd_prestat_get` to the imports, so a host can refuse a program that wants files without reading its source.
 
@@ -483,6 +485,148 @@ end.
 ```
 
 Naming an unknown unit is an error. The clause must appear immediately after the program header and before any declaration, because a unit may add imports and the import count has to be settled before any code is emitted.
+
+## Units
+
+A program is one file. A unit is a second kind of file: it declares what other
+files may use, defines it, and is compiled on its own.
+
+```pascal
+unit Geometry;
+
+interface
+
+const
+  Dimensions = 2;
+
+type
+  TPoint = record
+    x, y: integer;
+  end;
+
+function Distance(a, b: integer): integer;
+
+implementation
+
+function Distance(a, b: integer): integer;
+begin
+  Distance := a * a + b * b
+end;
+
+end.
+```
+
+A unit has two sections. The **interface** section declares what importers can
+see. The **implementation** section defines it, and may declare and define
+things of its own that no importer can reach.
+
+**The implementation repeats each routine header in full.** Turbo Pascal lets
+it omit the parameter list; Compact Pascal does not. Repeating it means a
+reader of the implementation can see the signature, and it means the two
+headers are checked against each other by the machinery `forward` already
+uses: an interface header *is* a forward declaration, and a mismatch is
+reported where any other forward mismatch would be.
+
+Either section may open with its own `uses` clause. What the interface names
+is part of what importers see through this unit; what the implementation names
+is private to it.
+
+### Compiling and Linking
+
+A unit is compiled to an **object**, and a program is compiled and linked
+against objects, in one command each:
+
+```
+cpas -c -o geometry.cpo < geometry.pas
+cpas geometry.cpo < main.pas > main.wasm
+```
+
+`-c` compiles a unit and requires `-o`. A unit without `-c` and a program with
+`-c` are both errors at the header, because a unit becomes an object and a
+program becomes a module and neither can be asked to be the other.
+
+Any argument that does not begin with `-` names an object. **There is no
+search path and there will not be one**: a search path is a configuration
+surface and a source of "which one did it find", and a build script that knows
+what it is building can pass the paths.
+
+A `uses` clause is matched against the unit name recorded **inside** each
+object, not against the file name, so renaming a file cannot change what a
+program means. Two objects claiming the same unit are an error rather than a
+race between argument order.
+
+**Naming an object is enough; using it is not required.** A unit's own
+dependencies are linked whether or not the program mentions them, so a build
+script names every object it built and does not work out which are reachable.
+Objects a program does not need cost nothing. The order of objects on the
+command line does not matter.
+
+### Recompiling
+
+Changing a unit's **implementation** means rebuilding that object and
+relinking. Nothing else has to be recompiled.
+
+Changing its **interface** means every importer must be recompiled, because
+each of them read that interface and put its symbols in its own symbol table.
+No separate-compilation scheme that is not also a whole-program one avoids
+this, and it is what a build system's dependency edges are for. The compiler
+does not compare timestamps and does not decide whether an object is stale.
+
+An importer built against an interface that has since changed does not
+silently miscompile: the signature it remembers no longer matches, and the
+call is reported as any other signature error would be.
+
+### What a Unit May Export
+
+Constants, types, routines, and standalone methods on an exported record type.
+An exported type may be a record, an array, an enumeration, a subrange, a
+pointer, or a procedural type; a record's fields and an array's bounds travel
+with it, so an importer reaches them exactly as the unit does.
+
+A method's name is built from its receiver's unit-qualified type name, so an
+importer that reconstructs the type from the same object reconstructs the same
+name and finds the method.
+
+Three things a unit may not do yet, each reported rather than silently
+mishandled:
+
+- **Declare variables.** A unit has no frame, and unit-level storage has to be
+  placed by the linker, which is not built. A `var` inside a routine is a
+  local and is unaffected.
+- **Export an interface type.** The method table an interface value needs does
+  not travel in the object, so an importer would get an interface that nothing
+  satisfies.
+- **Export a string or structured constant to a program that reads it.** Its
+  value is an address in the unit's own data, and importing one is refused
+  until the address is relocated.
+
+A field or parameter in the interface whose type the interface does not export
+is refused, rather than written as a reference an importer could not resolve.
+
+### Host Imports
+
+A unit's host imports must be the importing program's first imports, in order.
+Import indices are positional and are fixed before parsing, so a unit that
+`uses Files` and a program that does not disagree about every function index
+above them. In practice: both must use `Files` or neither. A program may
+declare host functions of its own with `{$IMPORT}`, because those come after
+and shift nothing below them.
+
+### Objects
+
+An object is not a WASM module and is not meant to be read by anything but
+this compiler. It holds the unit's name, its interface description, the host
+imports it needs, its compiled bodies, its data, its table entries, the
+routines it calls but does not define, and the places in its code that the
+linker must patch.
+
+The header carries a format version. An object written by a different version
+of the compiler is refused by name rather than misread. **Objects are not
+portable between compiler versions**, and nothing about the format is
+promised: rebuild them when the compiler changes.
+
+A damaged object is diagnosed rather than believed. Every count and length in
+one is checked against what the compiler could have written.
 
 ## Text Files
 
@@ -1080,7 +1224,7 @@ An implementation may impose limits, but not below these. A program staying with
 |---|---|---|
 | Live symbols | 1024 | 1024 |
 | Nested scopes | 32 | 32 |
-| User-defined procedures and functions | 256 | 256 |
+| User-defined procedures and functions | 256 | 384 |
 | Distinct named types | 256 | 256 |
 | Record fields, all records combined | 512 | 512 |
 | Parameters per procedure or function | 16 | 16 |
@@ -1096,6 +1240,13 @@ An implementation may impose limits, but not below these. A program staying with
 | String length | 255 | 255 |
 | Set base type values | 256 | 256 |
 | Routines whose address is taken | 64 | 64 |
+| Methods in one interface | 8 | 8 |
+| Implement blocks in one program | 32 | 32 |
+| Nested `for` loops in one routine | 16 | 16 |
+| Method calls nested in one another's arguments | 4 | 4 |
+| Objects on one command line | 16 | 16 |
+| Routines imported from units | 128 | 128 |
+| Routines exported across all linked objects | 256 | 256 |
 
 Exceeding a limit is an error and must be reported as one. It is never undefined behavior.
 
@@ -1604,13 +1755,29 @@ The grammar is specified in Extended Backus-Naur Form (EBNF). The notation follo
 ### Program Structure
 
 ```ebnf
+CompilationUnit  = Program | Unit .
+
 Program          = 'program' Identifier ';' [ UsesClause ] Block '.' .
 
+Unit             = 'unit' Identifier ';'
+                   'interface' [ UsesClause ] { DeclSection }
+                   'implementation' [ UsesClause ] { DeclSection }
+                   'end' '.' .
+                 (* Compiled with -c to an object; see Units. A routine
+                    header in the interface section is a forward declaration,
+                    and the implementation repeats it in full. A unit
+                    declares no variables at its own level and has no
+                    statement part: it has no frame to put either in. *)
+
 UsesClause       = 'uses' Identifier { ',' Identifier } ';' .
-                 (* Names system units. Not a file reference: nothing is read
-                    or compiled. Must precede all declarations, because a unit
-                    may add WASM imports and the import count is fixed before
-                    any code is emitted. See System Units. *)
+                 (* A system unit, which names bindings the compiler already
+                    has and reads nothing, or a unit satisfied by an object
+                    named on the command line. System names win, so a unit
+                    may not be called System or Files. A program has at most
+                    one clause, after its header; a unit may open each of its
+                    two sections with one. The clause precedes all
+                    declarations because a unit may add WASM imports and the
+                    import count is fixed before any code is emitted. *)
 
 Block            = { DeclSection } StatementPart .
 
