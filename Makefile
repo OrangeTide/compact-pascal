@@ -218,10 +218,12 @@ check-selfhost-gen2: $(SNAPSHOT)
 # portability defect here — the same oflags and rights succeed under wasmtime,
 # and rewriting an existing file succeeds under wasmer.
 #
-# The two tests that create files are therefore expected to fail. Pinned as a
-# set rather than skipped, so this notices if wasmer starts working or if a
-# different test breaks.
-WASMER_EXPECTED_FAILURES := t117_text_write_read t120_read_past_eof
+# The tests that create files are therefore expected to fail. Pinned as a set
+# rather than skipped, so this notices if wasmer starts working or if a
+# different test breaks. It did notice: t132 joined the set when it was
+# written, and the cause was confirmed to be the same one rather than assumed
+# — pre-creating the file makes t132 pass under wasmer unchanged.
+WASMER_EXPECTED_FAILURES := t117_text_write_read t120_read_past_eof t132_write_then_read_same_file
 
 check-runtimes: $(CPAS_BIN)
 	@if ! command -v wasmer >/dev/null 2>&1; then \
