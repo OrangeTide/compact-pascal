@@ -2559,8 +2559,8 @@ valid empty object.
       string or typed constant carries an address in the export table too,
       which the linker relocates by the same rule, inferred from the type
       tag. Test o005.
-- [ ] **Elements** in the object.
-- [ ] **Elements** in the object.
+- [x] **Elements** in the object: the functions a unit put in the table, in
+      its own order, renumbered by the linker.
 - [x] **Object reader into the symbol table.** `uses Geometry` resolves
       against an object named on the command line, matched on the unit name
       inside it rather than the file name, and declares the exported types
@@ -2569,7 +2569,7 @@ valid empty object.
       Importing a string or structured constant is refused: its value is an
       address in the exporting unit's data segment and nothing relocates it
       yet. Test l001.
-- [ ] **Imported routines**: a funcs[] entry whose index the linker assigns,
+- [x] **Imported routines**: a funcs[] entry whose index the linker assigns,
       so a call into a unit can be emitted.
 **Linker, what it took.** Written, reverted once, and finished on the second
 attempt with a debug print, which found in one line what an hour of reading
