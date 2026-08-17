@@ -432,7 +432,18 @@ fn a_program_can_link_against_a_separately_compiled_unit() {
         let mut f = std::fs::File::create(dir.join(name)).unwrap();
         f.write_all(src.as_bytes()).unwrap();
     }
+    // Objects are built by the command-line compiler, which is not part of
+    // this crate and is not built by `cargo`. Skip rather than fail when it
+    // is absent: a user who installed the crate from crates.io has the
+    // snapshot but no Pascal toolchain, and `cargo test` must pass for them.
+    // CI builds it first, so the test does run there.
     let cpas = concat!(env!("CARGO_MANIFEST_DIR"), "/compiler/cpas");
+    if !std::path::Path::new(cpas).exists() {
+        eprintln!("skipping the unit-linking test: {cpas} is not built. \
+                   Run `fpc -Mtp compiler/cpas.pas`.");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     for (src, obj, deps) in [
         ("base.pas", "base.cpo", vec![]),
         ("mid.pas", "mid.cpo", vec!["base.cpo"]),

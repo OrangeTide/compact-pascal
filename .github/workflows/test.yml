@@ -152,7 +152,13 @@ jobs:
           echo "win64 cross target available"
 
       - name: Cross-compile cpas for Windows
-        run: fpc -Mtp -Twin64 -FEbuild/win64 compiler/cpas.pas
+        # -FE names an output directory and fpc will not create one, so a
+        # fresh checkout with no build/ fails here with "Path does not
+        # exist". The Makefile's check-windows target makes it; this step is a
+        # second copy of that logic and drifted from it.
+        run: |
+          mkdir -p build/win64
+          fpc -Mtp -Twin64 -FEbuild/win64 compiler/cpas.pas
 
       - name: Compile the compiler's own source under Wine
         run: |
@@ -186,6 +192,15 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+      - name: Build the command-line compiler
+        # The crate does not need it to build or run, but one test links a
+        # program against separately compiled units, and building those units
+        # is a job for the command-line compiler. Without it that test skips
+        # itself, which is right for someone who installed the crate from
+        # crates.io and wrong for CI: here it should actually run.
+        run: |
+          sudo apt-get update && sudo apt-get install -y fpc
+          fpc -Mtp compiler/cpas.pas
       - name: Build
         run: cargo build --verbose
       - name: Test
